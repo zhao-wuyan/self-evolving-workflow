@@ -37,10 +37,10 @@ Audit every target file across all four dimensions (under `--tier quick`, focus 
 | `architecture` | Layer/boundary violations, circular dependencies, contract drift, duplicated logic, abstraction leaks |
 
 Parallel execution options:
-- Launch one read-only subagent per dimension (`invoke_subagent` in Antigravity, or `spawn_agent` / `spawn_agents_on_csv` in Codex; join/cancel every spawned subagent before advancing) returning structured findings.
-- For an independent cross-model check, run:
+- Launch one read-only subagent per dimension (`invoke_subagent` in Antigravity; `spawn_agent` / `spawn_agents_on_csv` in Codex; native `task`/eval `agent()` with `reviewer` in OMP, shared `context` + `tasks[]`; join/cancel every child before advancing, never poll) returning structured findings. Native agent duties do not enforce OS read-only permissions; strict OMP analysis uses the separate CLI bridge below.
+- For an independent cross-model check, explicitly select an authorized model different from the original model. The existing Codex bound command remains:
   `evolve delegate "<review prompt with target files and scope>" --to codex --mode analysis --session <session> --run <run>`
-  (or `--to agy --mode analysis` without `--session`/`--run` for an unbound second opinion).
+  For OMP use `--to omp --mode analysis --model <authorized-selector> --session <session> --run <run>` with the same prompt; for Agy use `--to agy --mode analysis` without binding flags. Explicitly resolve the authorized second-opinion model on each host before claiming cross-model independence. Same-model children are another perspective, not independent-model verification; apply the [host contract](../../../SKILL.md#omp-native-delegation-and-strict-cli-analysis).
 
 ---
 

@@ -6,7 +6,7 @@ Shared by all seven Odyssey modes (`debug`, `improve`, `planex`, `review`, `secu
 
 1. **Workspace commits (mutable modes only)** — in mutable modes when code changes are made, commit workspace source changes per phase (`git commit -m "odyssey-{mode}({slug}): {phase} — {summary}"`). Never commit `{run_dir}/outputs/*` (`session.json`, `evidence.ndjson`, `understanding.md`) to git; register them atomically via `evolve run complete`. Read-only `security` and `defensive` modes never touch source files or commits.
 2. **Confident edits vs decision gate** — implement confident fixes immediately; record ambiguous tradeoffs as `evidence.ndjson {"phase":"decision","status":"pending"}` without modifying code. Only these justify waiting on a decision: cross-module architecture tradeoffs | business-semantics ambiguity | new dependency or breaking API. ("Unsure how", "too big", "pre-existing" are NOT valid triggers.)
-3. **Subagent & CLI assist** — parallelize independent scans/dimensions cleanly via host subagents (always joining/cancelling every spawned subagent — see [runtime adapters](runtime-adapters.md)) and run `evolve delegate "<prompt>" --to codex|agy --mode analysis|write` for cross-angle checks.
+3. **Subagent & CLI assist** — parallelize independent scans/dimensions cleanly via host subagents (always joining/cancelling every spawned subagent — see [runtime adapters](runtime-adapters.md)) and run `evolve delegate "<prompt>" --to codex|agy|omp --mode analysis|write` for cross-angle checks. OMP native results auto-deliver without polling; strict analysis uses the separate CLI bridge. For independent second opinions explicitly select an authorized model; same-model children are not independent-model verification. Keep existing Codex defaults.
 4. **No context-exhaustion aborts** — complete every campaign cleanly through `S_RECORD -> END`.
 5. **Zero-residual** — every finding needs a concrete disposition (fix / issue / decision); "report only" and blanket "pre-existing" skips are forbidden.
 
@@ -98,7 +98,7 @@ Before discovery or code search, satisfy the **Knowledge Gate** (`AGENTS.md`):
 | Outcome | Recommended follow-up |
 |---|---|
 | Reusable patterns/rules ready to publish | Follow `evolve workflows show knowledge` (`evolve closeout session` -> `evolve wiki propose`) |
-| Independent second opinion needed | `evolve delegate "<review prompt>" --to codex\|agy --mode analysis` |
+| Independent second opinion needed | `evolve delegate "<review prompt>" --to codex\|agy\|omp --mode analysis`; explicitly select an authorized different model for cross-model verification (OMP `--model <selector>`), with binding rules in [runtime adapters](runtime-adapters.md) |
 | Pending `phase=decision` items remain | Filter `evidence.ndjson` (`phase == "decision" && status == "pending"`) |
 
 </shared_appendix>

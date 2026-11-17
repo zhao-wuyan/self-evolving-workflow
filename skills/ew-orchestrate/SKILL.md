@@ -42,7 +42,23 @@ Any bounded, mechanically clear task that **modifies workspace files or runs sta
 - `--auto` — sets `policy.auto_mode` (`continuation.authority = automatic`) with bounded retries (`--retry-max`) and recovery policy (`auto-policy.md`).
 - `--goal <goal>` — durable outcome-driven chain (`--goal-mode`, `auto-policy.md`).
 - `--amend` — amend live Session goal (`references/goal.md`, appends `CHG-NNN`).
-- **Host capabilities**: map subagent/parallel steps to the host's native tools (`invoke_subagent` / `swarm` / `run_workflow` in Antigravity, joining or cancelling all spawned subagents; `spawn_agent` / `wait_agent` in Codex), user prompts to `ask_question` / `request_user_input`, web search to `search_web`, and browser acceptance to `browser` subagent / Playwright / Chrome DevTools.
+- **Host capabilities**: map subagent/parallel steps to native tools: Antigravity `invoke_subagent` / `swarm` / `run_workflow`; Codex `spawn_agent` / `wait_agent`; OMP `task` or eval `agent()`. Join or cancel every spawned child before advancing or ending. User prompts map to Antigravity `ask_question`, Codex `request_user_input`, or OMP `ask`; progress mirrors use Codex `update_plan` or OMP `todo`. Web/browser acceptance uses the available host search/browser tools, Playwright, or Chrome DevTools.
+
+### OMP native delegation and strict CLI analysis
+
+- Use `scout` for research, `reviewer` for review, and `task` for implementation. For independent slices, batch `{ context, tasks: [{ agent, task, solutionSpace, ... }] }`; shared background belongs in `context`, agent/model selection in each item. Eval `agent()` is the equivalent handle-based path (read `xd://eval/agents` before using it); join handles at dependency barriers or cancel them before ending scope.
+- Results auto-deliver; continue useful independent work after spawning. Never poll agent/job status or output. When completely blocked, use the host `wait`; collect all results before synthesis. `ask` handles user decisions; `todo` mirrors progress only, never replaces the canonical Session/Run state.
+- Agent responsibilities are not OS permissions. Native `scout`/`reviewer` instructions and `tools` lists do not establish strict read-only isolation or prove that additional MCP tools are excluded. In particular, task/eval `tools` names share parent eval-defined tools; they are not a denylist for ambient MCP.
+- When strict analysis is required, use a separate `evolve delegate` process, not a native child or Plan mode:
+
+  ```sh
+  evolve delegate "<prompt>" --to omp --mode analysis|write [--role <name>] [--model <selector>] [--timeout <seconds>] [--session <id> --run <id>]
+  ```
+
+  Default mode is `analysis`; default model roles are `analysis=@plan` and `write=@task`. Explicit `--model` takes precedence over `--role`. Roles only select models: they neither enter Plan mode nor authorize operations. Default timeout is 600 seconds; `OMP_EXECUTABLE` overrides the executable. OMP's `--trusted-extension` loads Evolve's bundled SDK bridge without an additional OMP npm dependency, community sandbox, or container.
+- The analysis bridge exposes only `read`/`grep`/`glob` plus the six bound Run knowledge tools when bound: `evolve_read_skill`, `evolve_read_artifact`, `evolve_wiki_context`, `evolve_wiki_reference`, `evolve_memory_search`, `evolve_memory_get`. No `bash`, `eval`, `write`, `task`, or ambient MCP. Write mode exposes only read/write tools, `bash`, and `lsp` (plus bound Run knowledge tools); it does not override user approvals or enable yolo. Native child roles are not substitutes for this boundary.
+- Pass `--session <id> --run <id>` together for bound Codex or OMP delegation; Agy remains standalone without those flags. Existing Codex defaults remain unchanged. Examples selecting Codex in step guides remain valid; OMP is an additional explicit executor, not a global replacement.
+- A second opinion must explicitly select an operator-authorized model (`--model <selector>` for OMP, or a supported authorized host selector), different from the original model when claiming independent cross-model verification. Same-model subagents provide another perspective, not independent-model validation; never silently substitute them or create agent definitions/user configuration to gain authorization.
 
 <invariants>
 1. **One chain** — one canonical Session/Run protocol; no executor-specific Session types.

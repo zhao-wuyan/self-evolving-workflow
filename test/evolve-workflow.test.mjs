@@ -295,7 +295,7 @@ test('Evolve delegate resolves JS stubs and Windows shims, binds Run MCP for Cod
 
     assert.throws(() => execWithEnv([
       'delegate', 'Bound agy should fail', '--to', 'agy', '--session', 'delegate-check', '--run', run.run_id,
-    ], { AGY_EXECUTABLE: stub }), /Use Codex for a bound Evolve worker/);
+    ], { AGY_EXECUTABLE: stub }), /bound Evolve worker/);
     assert.throws(() => execWithEnv(['delegate', 'Bad flag', '--resume', 'abc']), /Unknown option '--resume'/);
   } finally {
     f.cleanup();

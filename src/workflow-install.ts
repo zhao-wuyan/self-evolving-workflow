@@ -12,6 +12,7 @@ const hosts = {
   codex: { path: ['.codex'], instructions: ['.codex', 'AGENTS.md'] },
   claude: { path: ['.claude'], instructions: ['.claude', 'CLAUDE.md'] },
   agy: { path: ['.gemini', 'config'], instructions: ['.gemini', 'AGENTS.md'] },
+  omp: { path: ['.omp', 'agent'], instructions: ['.omp', 'agent', 'AGENTS.md'] },
 } as const;
 const workflowTitle = 'Self-Evolving Workflow';
 
@@ -130,9 +131,9 @@ export async function installWorkflow(root: string, options: InstallOptions) {
         scope = answer === '2' ? 'user' : 'project';
       }
       if (scope === 'user' && !host) {
-        const answer = (await ui.question('Host [1] Codex, [2] Claude or [3] Agy [1]? ')).trim();
-        if (answer && answer !== '1' && answer !== '2' && answer !== '3') throw new InputError('Choose Codex (1), Claude (2) or Agy (3)');
-        host = answer === '2' ? 'claude' : answer === '3' ? 'agy' : 'codex';
+        const answer = (await ui.question('Host [1] Codex, [2] Claude, [3] Agy or [4] OMP [1]? ')).trim();
+        if (answer && answer !== '1' && answer !== '2' && answer !== '3' && answer !== '4') throw new InputError('Choose Codex (1), Claude (2), Agy (3) or OMP (4)');
+        host = answer === '2' ? 'claude' : answer === '3' ? 'agy' : answer === '4' ? 'omp' : 'codex';
       }
       const { target } = scopeAndHost(root, scope, host);
       if (!requested.length) {

@@ -6,7 +6,7 @@
 
 [![npm version](https://img.shields.io/npm/v/self-evolving-workflow?color=cb3837&logo=npm)](https://www.npmjs.com/package/self-evolving-workflow)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.16.0-339933?logo=node.js&logoColor=white)](package.json)
-[![Hosts](https://img.shields.io/badge/Hosts-Codex%20%C2%B7%20Claude%20%C2%B7%20Antigravity-111827)](#2-安装工作流-skill)
+[![Hosts](https://img.shields.io/badge/Hosts-Codex%20%C2%B7%20Claude%20%C2%B7%20Antigravity%20%C2%B7%20OMP-111827)](#2-安装工作流-skill)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 [30 秒上手](#-快速开始) · [为什么选择它](#-为什么选择-self-evolving-workflow) · [八大工作流 Skills](#-随包提供的-skills) · [Session 与 Run 指南](skills/ew-orchestrate/references/orchestrator-run-loop.md)
@@ -15,7 +15,7 @@
 
 ![Self-Evolving Workflow 总览，展示从任务到 Session、Run、验证封存及知识复用的流程](docs/images/workflow-overview.png)
 
-`evolve` 为 Codex CLI、Claude Code、Antigravity 等代码助手提供可恢复的 **Session / Run 状态机**、自动同步的 **代码图谱 + 项目 Wiki + 工作记忆**，以及依据执行证据提案与回放的 **Skill 自我进化机制**——零外部服务依赖，全部沉淀在你的 Git 仓库中。
+`evolve` 为 Codex CLI、Claude Code、Antigravity、OMP 等代码助手提供可恢复的 **Session / Run 状态机**、自动同步的 **代码图谱 + 项目 Wiki + 工作记忆**，以及依据执行证据提案与回放的 **Skill 自我进化机制**——零外部服务依赖，全部沉淀在你的 Git 仓库中。
 
 ---
 
@@ -55,8 +55,13 @@ evolve --help
 | **Codex CLI（用户级）** | `evolve install --scope user --host codex --yes` | `~/.codex/skills/`、`~/.codex/AGENTS.md` |
 | **Claude Code（用户级）** | `evolve install --scope user --host claude --yes` | `~/.claude/skills/`、`~/.claude/CLAUDE.md` |
 | **Antigravity（用户级）** | `evolve install --scope user --host agy --yes` | `~/.gemini/config/skills/`、`~/.gemini/AGENTS.md` |
+| **OMP（用户级）** | `evolve install --scope user --host omp --yes` | `~/.omp/agent/skills/`、`~/.omp/agent/AGENTS.md` |
 
 按项目安装后请将 `skills/` 与 `AGENTS.md` 提交到 Git，Evolve 会把每个 Run 绑定到对应的提交版本；如只需特定工作流包，可追加 `--skill <名称>`。
+
+**OMP 委派**：安装并授权 OMP 后，可用 `evolve delegate "<prompt>" --to omp --mode analysis|write [--role <name>] [--model <selector>] [--timeout <seconds>] [--session <id> --run <id>]`。默认 `analysis` 使用 `@plan`，`write` 使用 `@task`；`--model` 优先于 `--role`，角色仅选模，不进入 Plan 模式、不授予权限。默认超时 600 秒，`OMP_EXECUTABLE` 可覆盖可执行文件。当前通过 `--trusted-extension` 加载随包 SDK bridge，无额外 OMP npm 依赖，不需要社区沙箱或容器。
+
+严格 `analysis` 在独立进程中仅开放 `read`/`grep`/`glob` 和绑定的 6 个 Run 知识工具，不开放 `bash`/`eval`/`write`/`task` 或环境 MCP；`write` 开放读写工具、`bash`/`lsp` 和绑定知识工具，不覆盖用户审批、不启用 yolo。Codex/OMP 均支持同时传入 `--session`/`--run` 绑定，Agy 保持 standalone，现有 Codex 默认值不变。原生 OMP `task`/eval `agent()` 的职责或 `tools` 名单不是 OS 权限隔离；第二意见须显式选获授权模型，同模型子代理不等于独立模型验证。详见 [OMP 宿主适配](skills/ew-orchestrate/SKILL.md#omp-native-delegation-and-strict-cli-analysis)。
 
 ### 3. 30 秒验证知识检索与首轮 Run
 

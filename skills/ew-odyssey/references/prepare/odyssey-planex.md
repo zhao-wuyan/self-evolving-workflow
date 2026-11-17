@@ -66,7 +66,7 @@ Satisfy the Knowledge Gate (`AGENTS.md`) before searching code:
 
 - Wiki & Memory (first): Run MCP `wiki_context` / `memory_search` + `wiki_reference` / `memory_get`, or CLI `evolve context "<requirement keywords>" --session <session> --include-memory --reads "<run_dir>/knowledge-reads.json"` (plus `evolve wiki get <id> --resolved --reads ... --from-search ...`) for `coding` and `review` scope.
 - Code graph (after Knowledge Gate): `evolve code search "<requirement keywords>"` → module boundaries, integration points.
-- CLI tools: `the Codex or Agy executables available to the host` → available executors for task dispatch.
+- CLI tools: `the Codex, Agy, or OMP executables available to the host` → available executors for task dispatch; retain existing defaults and apply [runtime adapters](../runtime-adapters.md) for Run binding, authorized model selection, and strict OMP analysis.
 
 When prior planex sessions of the same scope exist, check their acceptance criteria and plan to avoid duplicating work or re-implementing already-delivered features.
 

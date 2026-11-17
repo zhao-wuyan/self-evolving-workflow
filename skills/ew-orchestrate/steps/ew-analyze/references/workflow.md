@@ -65,10 +65,10 @@ Initialize `report.md`: metadata, original User Intent, replaceable `Current Und
 
 **2.0 Research handoff** (only when `external_research` is active, or architecture patterns are active without upstream `architecture_template_evidence`):
 1. If `external_research` is selected, run 2-3 targeted web searches (`search_web` in Antigravity or host equivalent) for stack, architecture patterns, and pitfalls.
-2. Delegate synthesis (plus one focused architecture-template lookup if absent) to a `research` subagent (joined before proceeding) returning markdown only: `## Standard Stack`, `## Architecture Patterns`, `## Don't Hand-Roll`, `## Common Pitfalls`, and optional `## Architecture Template Evidence` (preserve `no_match`/`load_failed` status cleanly). Store as in-memory `researchContext`.
+2. Delegate synthesis (plus one focused architecture-template lookup if absent) to a `research` subagent (OMP: `scout`; joined before proceeding) returning markdown only: `## Standard Stack`, `## Architecture Patterns`, `## Don't Hand-Roll`, `## Common Pitfalls`, and optional `## Architecture Template Evidence` (preserve `no_match`/`load_failed` status cleanly). Store as in-memory `researchContext`.
 
 **2.1 Codebase exploration** (mandatory subagent, not manual Read/Grep):
-Launch exploration subagent(s) (`invoke_subagent` with `research` or host subagent; join all before advancing) across three layers:
+Launch exploration subagent(s) (`invoke_subagent` with `research` or host subagent; OMP: native `task`/eval `agent()` with `scout`, shared `context` + `tasks[]` for independent slices; join/cancel all before advancing, never poll) across three layers:
 - **L1 Breadth**: relevant files and module boundaries (`relevant_files[]`)
 - **L2 Depth**: top 3-5 files, 2-3 call/data-flow layers (`call_chains[]`, `data_flows[]`)
 - **L3 Anchors**: 20-50 line `file:line` snippets (`code_anchors[]`)
@@ -76,7 +76,7 @@ Launch exploration subagent(s) (`invoke_subagent` with `research` or host subage
 Write merged anchors to `evidence/exploration-codebase.json` (plus optional per-perspective files `evidence/explorations/{perspective}.json` when running multi-perspective up to 4 parallel subagents).
 
 **2.2 Cross-perspective analysis** (mandatory independent pass):
-Run >=1 `evolve delegate "<exploration context prompt>" --to codex|agy --mode analysis` (pass `--session <session> --run <run>` when using `--to codex` inside a bound Run; note `--to agy` runs standalone without `--session`/`--run`). Append `researchContext` as non-binding recommendations if present. For multi-perspective runs, fan out up to 4 parallel subagents/`evolve delegate` calls and wait/join all before continuing.
+Run >=1 `evolve delegate "<exploration context prompt>" --to codex|agy|omp --mode analysis` (pass `--session <session> --run <run>` for Codex/OMP inside a bound Run; Agy stays standalone). Explicitly select an authorized second-opinion model (OMP: `--model <selector>`); claim cross-model independence only when it differs from the original model. Same-model subagents are not independent-model validation. Strict OMP analysis uses this separate CLI process, not native children. Append `researchContext` as non-binding recommendations if present. For multi-perspective runs, fan out up to 4 independent calls and collect/join all before continuing; results auto-deliver without polling.
 
 **2.3 Aggregation & Round 1**: merge into `evidence/perspectives.json` (including `technical_solutions[]`: `{round, solution, problem, rationale, alternatives, status: proposed|validated|rejected, evidence_refs[], next_action}`), append Round 1 to `report.md`, check initial Intent coverage (✅/🔄/❌), and score baseline confidence across weights (`findings_depth .30`, `evidence_strength .25`, `coverage_breadth .20`, `user_validation .15`, `consistency .10`). `<60%` continue; `60-80%` confirm before converging; `>80%` ready for synthesis.
 

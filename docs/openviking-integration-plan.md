@@ -215,3 +215,7 @@ CLI 升级不能隐式覆盖已经进化的项目 Skill。同步与发布的单�
 - [Agent Evolution](https://docs.openviking.ai/en/api/19-agent-evolution)
 
 OpenViking 的 Experience 读取与结果轨迹关联可用于复盘，但关联不等于因果证明，也不替代 Evolve 对候选修改的隔离回放和行为验证。
+
+## 12. 原生 Experience 的后续融合
+
+原生经验接入的分阶段交付、开发推进条件及数据/发布授权边界见 [Experience 融合实施计划](openviking-experience-integration-plan.md)。该计划不代表当前资产同步已经创建原生会话或生成 Experience，也不授权自动上传会话或自动修改、发布 Skill。

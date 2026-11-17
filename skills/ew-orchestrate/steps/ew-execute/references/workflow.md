@@ -16,7 +16,7 @@ Resolve `current-plan` via the Run packet's `upstream_aliases`:
 
 ## Step 1: Parse Execution Options
 
-If `-y` is set (skipping all interactive prompts) or `plan` already specifies execution settings, use defaults. Otherwise resolve via structured prompt (`ask_question` or host equivalent) across enabled tools (`agent` / `codex` / `agy`):
+If `-y` is set (skipping all interactive prompts) or `plan` already specifies execution settings, use defaults. Otherwise resolve via structured prompt (`ask_question` or host equivalent; OMP `ask`) across enabled tools (`agent` / `codex` / `agy` / `omp`), preserving existing defaults:
 - `executionMethod` (`auto` | `agent` | `cli` | tool) and `domainRouting` (`{frontend, backend, default: "agent"}`)
 - `codeReviewTool` (optional post-execution diff review tool or `Skip`)
 - `verificationTool` (smoke self-check tool or `Skip`)
@@ -39,8 +39,8 @@ Reuse bound `session-priors` for covered `coding` Wiki scope. Query `wiki_contex
   - `frontend` (`.tsx/.jsx/.vue/.css/.html` or UI scope), `backend` (`.go/.rs/.java/.py/.sql/.proto` or API/DB scope), `general` (mixed, `.ts/.js`, config, tests). Log before dispatch: `TASK-001 [frontend] -> <executor>`.
 - **Prompt skeleton**: include `PURPOSE`, `TASK`, `MODE: write`, `CONTEXT`, `EXPECTED`, `CONSTRAINTS` (task files + specs), task definition (`Files`, `Read First`, `Implementation`, `Convergence Criteria`), prior wave summaries, and resolved Wiki constraints.
 - **Execution loop** (serial across waves, parallel per independent task inside each wave — never merge unrelated tasks into one delegate call; join all spawned subagents before ending a wave):
-  - **`agent` path**: launch executor subagent (`invoke_subagent` / host subagent with fresh context) to implement -> verify convergence -> auto-fix (<=3 attempts) -> commit only if `--auto-commit` -> write `evidence/summaries/${task.id}.md` -> report status/checkpoint.
-  - **`cli` path**: run `evolve delegate "${prompt}" --to ${executor} --mode write` (include `--session ${session_id} --run ${run_id}` when `--to codex`; note `--to agy` runs standalone without `--session`/`--run`), verify convergence criteria against disk, write `evidence/summaries/${task.id}.md`, and commit only if `--auto-commit`.
+  - **`agent` path**: launch executor subagent (`invoke_subagent` / host subagent with fresh context; OMP `task` agent via native `task` or eval `agent()`, batching independent items with shared `context` + `tasks[]`) to implement -> verify convergence -> auto-fix (<=3 attempts) -> commit only if `--auto-commit` -> write `evidence/summaries/${task.id}.md` -> report status/checkpoint. OMP results auto-deliver; join/cancel all children before ending the wave, never poll.
+  - **`cli` path**: run `evolve delegate "${prompt}" --to ${executor} --mode write` (include `--session ${session_id} --run ${run_id}` for Codex/OMP; Agy stays standalone), verify convergence criteria against disk, write `evidence/summaries/${task.id}.md`, and commit only if `--auto-commit`. OMP optional `--role` selects a model only; `--model` overrides it, never grants permission or enters Plan mode.
 - **Failure handling**: up to 3 focused retries (for CLI retries, narrow prompt then fall back to a subagent). After 3 failures, mark `blocked` with checkpoint `{attempt: 3, last_error, partial_files, executor}` and mark unmet downstream dependents `upstream_blocked`. Between waves, prompt only if a task blocked and `-y` is unset.
 
 ## Step 5: Post-Wave Validation
@@ -48,7 +48,7 @@ Reuse bound `session-priors` for covered `coding` Wiki scope. Query `wiki_contex
 1. Check completed tasks have `evidence/summaries/${task.id}.md` (`missing_summary` warning).
 2. Cross-check task statuses vs wave results (mismatch = critical).
 3. Scan changed files against spec `allowed_languages`/`disallowed_imports` (hit = critical `tech_stack_violation`).
-4. Optional CLI diff check via `evolve delegate "<review changed files for cycles/dead code/breaking changes>" --to codex|agy --mode analysis`.
+4. Optional CLI diff check via `evolve delegate "<review changed files for cycles/dead code/breaking changes>" --to codex|agy|omp --mode analysis`; bind Codex/OMP with both `--session`/`--run`. For an independent second opinion explicitly select an authorized different model (OMP `--model <selector>`), not a same-model child.
 
 Any critical failure marks the run `blocked` with recorded violations.
 

@@ -434,6 +434,45 @@ test('Evolve installs selected Skills and their workflow files without replacing
   assert.match(await readFile(join(home, '.gemini', 'AGENTS.md'), 'utf8'), /evolve context/);
 });
 
+test('Evolve installs OMP user Skills without replacing existing Skills or instructions', async t => {
+  const root = await temp(t);
+  const home = await temp(t);
+  const target = join(home, '.omp', 'agent');
+  const guidance = join(target, 'AGENTS.md');
+  const original = '# User instructions\r\n\r\nKeep local release conventions.\r\n';
+  await mkdir(target, { recursive: true });
+  await writeFile(guidance, original);
+  const evolve = async (...args) => JSON.parse((await run(
+    process.execPath, [workflowCli, ...args],
+    { cwd: root, encoding: 'utf8', env: { ...process.env, HOME: home, USERPROFILE: home } },
+  )).stdout);
+  const args = ['install', '--scope', 'user', '--host', 'omp', '--skill', 'ew-knowledge', '--yes'];
+  const installed = await evolve(...args);
+  assert.equal(installed.status, 'installed');
+  assert.equal(installed.scope, 'user');
+  assert.equal(installed.host, 'omp');
+  assert.equal(installed.root, target);
+  assert.equal(installed.instructions, guidance);
+  assert.deepEqual(installed.installed, ['ew-knowledge']);
+  const entry = join(target, 'skills', 'ew-knowledge', 'SKILL.md');
+  const skill = await readFile(entry, 'utf8');
+  assert.equal(skill, await readFile(new URL('../skills/ew-knowledge/SKILL.md', import.meta.url), 'utf8'));
+  assert.match(skill, /(?:^|\n)description:/);
+  const after = await readFile(guidance, 'utf8');
+  assert.ok(after.startsWith(original));
+  assert.match(after, /evolve context/);
+  const customized = skill + '\nLocal Skill instructions must survive reinstall.\n';
+  await writeFile(entry, customized);
+  const repeated = await evolve(...args);
+  assert.deepEqual(repeated.installed, []);
+  assert.deepEqual(repeated.kept, ['ew-knowledge']);
+  assert.equal(await readFile(entry, 'utf8'), customized);
+  assert.equal(await readFile(guidance, 'utf8'), after);
+  assert.equal((await evolve('install', '--host', 'omp', '--skill', 'ew-knowledge', '--yes')).scope, 'user');
+  await assert.rejects(evolve('install', '--scope', 'project', '--host', 'omp', '--yes'), /--host applies to user installations/);
+  await assert.rejects(access(join(root, 'skills')));
+});
+
 test('completion harvesting preserves evidence and records zero-candidate receipts', async t => {
   const root = await temp(t);
   const { harvestCompletion, publishReference } = await import('../dist/closeout.js');

@@ -116,11 +116,11 @@ Commit: `"odyssey-planex({slug}): PLAN — requirement decomposed into tasks"`
 
 **A_EXECUTE** —
 
-- **Step 1 — Execution Options Confirmation.** Skip if `-y` OR `--method` explicitly set OR `execution_config.confirmed == true` (resume). Load tools: `the Codex or Agy executables available to the host`. Prompt via structured prompt (3 questions): Executor (Auto domain routing | Agent all | specific CLI | custom) / Review (Skip | {tool}) / Verify (Auto | specific tool | Skip). Parse → write `execution_config`, set `confirmed: true`. `--skip-verify` overrides verification to `"Skip"`.
+- **Step 1 — Execution Options Confirmation.** Skip if `-y` OR `--method` explicitly set OR `execution_config.confirmed == true` (resume). Load tools: `the Codex, Agy, or OMP executables available to the host` (preserve existing defaults). Prompt via structured prompt (OMP `ask`; 3 questions): Executor (Auto domain routing | Agent all | specific CLI | custom) / Review (Skip | {tool}) / Verify (Auto | specific tool | Skip). Parse → write `execution_config`, set `confirmed: true`. `--skip-verify` overrides verification to `"Skip"`.
 
 - **Step 2 — Executor Resolution** (method == "auto"): domain routing — frontend (UI/component/page/style, .tsx/.jsx/.vue/.css/.html/.svelte) | backend (API/server/db/service, .go/.rs/.java/.py/.sql/.proto) | general (mixed/config/tests, .ts/.js/other). Resolution: `execution_config.domain_routing[domain]` or default `"agent"`.
 
-- **Step 3 — Task Execution** per plan order (independent tasks may parallelize cleanly via joined subagents — see [runtime adapters](runtime-adapters.md)). **Agent path:** launch subagent with task definition + criteria refs + prior task summaries + specs_content → implement → verify convergence → auto-fix (max 3) → return. **CLI path:**
+- **Step 3 — Task Execution** per plan order (independent tasks may parallelize cleanly via joined subagents — see [runtime adapters](runtime-adapters.md)). **Agent path:** launch subagent (OMP `task` for implementation, shared `context` + `tasks[]` or eval `agent()`; results auto-deliver, join/cancel before advancing, never poll) with task definition + criteria refs + prior task summaries + specs_content → implement → verify convergence → auto-fix (max 3) → return. **CLI path:** use the selected enabled executor; append both `--session <id> --run <id>` for bound Codex/OMP, never for standalone Agy. OMP role/model/permission rules are in runtime adapters.
 ```bash
 evolve delegate "PURPOSE: Implement task ${task_id}: ${title}; success = criteria ${criteria_refs} satisfied
 TASK: ${description} | Read existing code first | Verify convergence criteria after changes
