@@ -47,7 +47,7 @@ const toolDefinitions = [
 
 function callMemory(...args) {
   const output = execFileSync(process.execPath, [memoryCli, '--root', root, '--db', db, '--reads', tracePath, ...args], {
-    cwd: root, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: root, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env },
   });
   return JSON.parse(output);
 }

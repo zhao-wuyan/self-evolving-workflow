@@ -2,13 +2,12 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'n
 import { dirname, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { CodeGraph } from './code.js';
-import { configureMemory, installCodexMemoryHook, memoryHosts, memoryModelSettings, parseMemoryHosts } from './memory-config.js';
+import { configureMemory, installCodexMemoryHook, memoryHosts, parseMemoryHosts } from './memory-config.js';
 import { handleMemoryHook, readMemoryConversation, syncMemoryHost } from './memory-history.js';
 import { InputError, requireText } from './common.js';
 import { createSearchServer } from './http.js';
 import { MemoryStore, type ConversationMessage } from './memory.js';
 import { context as buildContext, parseScope, search, type SearchScope, type SearchSources } from './search.js';
-import type { LlmClient } from './upstream/llm.js';
 import { Wiki } from './wiki.js';
 import {
   harvestCompletion, publishReference, readCloseoutCandidate, readCompletionReceipts,
@@ -27,6 +26,11 @@ import {
   applySkillDesign, createSkillDesignTask, readSkillDesignTask, replaySkillDesign,
   reviewSkillDesign, runSkillDesign,
 } from './skill-design.js';
+import { createModelClient } from './model-client.js';
+import { openKnowledgeSources, type KnowledgeSources } from './knowledge-sources.js';
+import { appendRemoteReads } from './openviking/evidence.js';
+import { readProject } from './openviking/config.js';
+import { parseRemoteMemoryId } from './openviking/memory.js';
 
 export function knowledgeHelp(invocation: 'agent-memory' | 'evolve') {
   const skills = invocation === 'evolve' ? 'skills' : 'evolve';
@@ -88,6 +92,8 @@ Options:
   --root <dir>         Code project root and parent of wiki/ (default current directory)
   --wiki-root <dir>    Override the parent of wiki/
   --db <path>          Memory DB (default <root>/.agent-memory/memory.db)
+  --memory-backend <local|openviking> Select the Memory reader (writes remain local)
+  --workflow-session <id> Pin Memory reads to an Evolve Session; --session remains the Memory filter
   --namespace <name>   Memory namespace (default default)
   --memory-session <id> Memory session filter (context uses this instead of its context session)
   --context-file <path> Load shared task, path and Wiki filters from JSON
@@ -123,6 +129,8 @@ export const knowledgeOptions = {
   scene: { type: 'string' },
   session: { type: 'string' },
   'memory-session': { type: 'string' },
+  'workflow-session': { type: 'string' },
+  'memory-backend': { type: 'string' },
   'context-file': { type: 'string' },
   id: { type: 'string' },
   priority: { type: 'string' },
@@ -175,27 +183,6 @@ export const knowledgeOptions = {
   json: { type: 'boolean' },
 } as const;
 
-function createModelClient(root: string): LlmClient {
-  const settings = memoryModelSettings(root);
-  const url = new URL(requireText(settings.baseUrl, 'LLM base URL (memory config or AGENT_MEMORY_LLM_BASE_URL)'));
-  if (!['http:', 'https:'].includes(url.protocol)) throw new InputError('LLM endpoint must use HTTP or HTTPS');
-  url.pathname = url.pathname.replace(/\/$/, '') + '/chat/completions';
-  const model = requireText(settings.model, 'LLM model (memory config or AGENT_MEMORY_LLM_MODEL)');
-  const key = process.env.AGENT_MEMORY_LLM_API_KEY;
-  return {
-    async chat({ system, prompt }) {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(key && { Authorization: `Bearer ${key}` }) },
-        body: JSON.stringify({ model, messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }] }),
-        signal: AbortSignal.timeout(120_000),
-      });
-      if (!response.ok) throw new Error(`LLM request failed (HTTP ${response.status})`);
-      const data = await response.json() as { choices?: { message?: { content?: string } }[] };
-      return requireText(data.choices?.[0]?.message?.content, 'LLM response content');
-    },
-  };
-}
 
 interface CliWikiContext {
   skill?: string;
@@ -268,13 +255,19 @@ export async function runKnowledgeCli(argv: string[], invocation: 'agent-memory'
   }
   const [command, action, ...args] = positionals;
   const root = resolve(values.root ?? '.');
+  if (process.env.EVOLVE_KNOWLEDGE_SNAPSHOT && (command === 'memory' && !['get', 'search', 'sources', 'conversation'].includes(action) ||
+      command === 'wiki' && !['get', 'search', 'constraints', 'references', 'reference'].includes(action))) {
+    throw new InputError('Frozen knowledge is read-only');
+  }
   const modelClient = () => createModelClient(root);
   const contextValues = cliWikiContext(values as Record<string, unknown>);
-  const wiki = new Wiki(values['wiki-root'] ?? root);
+  let wiki = new Wiki(values['wiki-root'] ?? root);
   const autoRefresh = invocation === 'evolve';
   const openCode = () => new CodeGraph(root, { autoRefresh });
   const db = values.db ?? join(root, '.agent-memory', 'memory.db');
-  const openMemory = () => new MemoryStore(db, { namespace: values.namespace });
+  const openMemory = () => new MemoryStore(process.env.EVOLVE_KNOWLEDGE_SNAPSHOT
+    ? process.env.AGENT_MEMORY_DB ?? join(process.env.EVOLVE_KNOWLEDGE_SNAPSHOT, 'memory.db') : db,
+    { namespace: values.namespace, readOnly: Boolean(process.env.EVOLVE_KNOWLEDGE_SNAPSHOT) });
   const limit = values.limit === undefined ? undefined : Number(values.limit);
   const wikiOptions = { limit, hop: values.hop === undefined ? undefined : Number(values.hop), includeHistory: values.history };
   const memorySession = values['memory-session'] ?? (command === 'memory' || command === 'search' ? values.session : undefined);
@@ -289,8 +282,31 @@ export async function runKnowledgeCli(argv: string[], invocation: 'agent-memory'
   const knowledgeReads = values.trace || traceFile
     ? new KnowledgeReads(initialTrace)
     : undefined;
+  const backend = values['memory-backend'];
+  if (backend !== undefined && backend !== 'local' && backend !== 'openviking') throw new InputError('memory-backend must be local or openviking');
+  let activeKnowledge: KnowledgeSources | undefined;
+  const knowledgeFor = async (includeMemory: boolean) => {
+    if (!process.env.EVOLVE_KNOWLEDGE_SNAPSHOT && command === 'memory' && action === 'get' && args[0]?.startsWith('ov:') && traceFile && !values['workflow-session'] && !existsSync(traceFile + '.openviking.json')) {
+      const profile = readProject(root);
+      if (profile?.enabled !== false && profile) appendRemoteReads(traceFile + '.openviking.json', profile.project_id, parseRemoteMemoryId(args[0]).release);
+    }
+    activeKnowledge = await openKnowledgeSources(root, {
+      session: command === 'context' || command === 'wiki' ? values.session : values['workflow-session'],
+      db: values.db, namespace: values.namespace, wikiRoot: values['wiki-root'], traceFile,
+      memoryBackend: backend, includeMemory,
+    });
+    contextValues.repository ??= activeKnowledge.repositoryId;
+    return activeKnowledge;
+  };
   const print = (result: unknown, compact = false) => process.stdout.write(JSON.stringify(result, null, compact ? 0 : 2) + '\n');
   const withTrace = (result: unknown) => {
+    const remoteReads = activeKnowledge?.memory?.drainRemoteReads?.() ?? [];
+    if (traceFile && activeKnowledge?.releaseId && activeKnowledge.repositoryId && remoteReads.length) {
+      appendRemoteReads(traceFile + '.openviking.json', activeKnowledge.repositoryId, activeKnowledge.releaseId, remoteReads);
+    }
+    if (activeKnowledge?.backend?.configured === 'openviking') result = result && typeof result === 'object' && !Array.isArray(result)
+      ? { ...result, knowledge_backend: activeKnowledge.backend, ...(remoteReads.length ? { openviking_reads: remoteReads } : {}) }
+      : { result, knowledge_backend: activeKnowledge.backend, ...(remoteReads.length ? { openviking_reads: remoteReads } : {}) };
     if (!knowledgeReads) return result;
     if (traceFile) {
       mkdirSync(dirname(resolve(traceFile)), { recursive: true });
@@ -301,14 +317,17 @@ export async function runKnowledgeCli(argv: string[], invocation: 'agent-memory'
       : { result, knowledge_reads: knowledgeReads.toJSON() };
   };
 
-  function sourcesFor(scope: SearchScope): SearchSources {
+  async function sourcesFor(scope: SearchScope): Promise<SearchSources> {
     const useCode = command !== 'context' &&
       (scope === 'code' || (scope === 'all' && (autoRefresh || CodeGraph.hasIndex(root))));
-    return {
-      code: useCode ? openCode() : undefined,
-      wiki: scope === 'wiki' || (scope === 'all' && existsSync(wiki.indexPath)) ? wiki : undefined,
-      memory: scope === 'memory' || (scope === 'all' && (db === ':memory:' || existsSync(db))) ? openMemory() : undefined,
-    };
+    const project = readProject(root);
+    const hasRemote = Boolean(project && project.enabled !== false);
+    const includeMemory = scope === 'memory' || scope === 'all' && (command !== 'context' || Boolean(values['include-memory'])) &&
+      (hasRemote || db === ':memory:' || existsSync(db) || Boolean(process.env.EVOLVE_KNOWLEDGE_SNAPSHOT));
+    const knowledge = await knowledgeFor(includeMemory);
+    return { code: useCode ? openCode() : undefined,
+      wiki: scope === 'wiki' || scope === 'all' && (hasRemote || existsSync(knowledge.wiki.indexPath)) ? knowledge.wiki : undefined,
+      memory: knowledge.memory, repositoryId: knowledge.repositoryId };
   }
 
   if (command === 'serve') {
@@ -316,10 +335,10 @@ export async function runKnowledgeCli(argv: string[], invocation: 'agent-memory'
     if (action !== undefined || !Number.isInteger(port) || port < 0 || port > 65535) {
       throw new InputError(`Usage: ${invocation} serve [--port 0..65535]`);
     }
-    const sources = sourcesFor(parseScope(values.scope ?? 'all'));
+    const sources = await sourcesFor(parseScope(values.scope ?? 'all'));
     const server = createSearchServer(sources);
     server.on('searchError', (error: unknown) => console.error(error));
-    server.on('close', () => sources.memory?.close());
+    server.on('close', () => sources.memory?.close?.());
     server.on('error', error => {
       console.error(error.message);
       process.exitCode = 1;
@@ -335,13 +354,13 @@ export async function runKnowledgeCli(argv: string[], invocation: 'agent-memory'
   if (command === 'search') {
     const query = requireText([action, ...args].join(' '), 'query');
     const scope = parseScope(values.scope ?? 'all');
-    const sources = sourcesFor(scope);
+    const sources = await sourcesFor(scope);
     try {
       print(withTrace(await search(sources, query, {
         scope, limit, wiki: wikiOptions, memory: memoryOptions, knowledgeReads,
       })));
     } finally {
-      sources.memory?.close();
+      sources.memory?.close?.();
     }
     return;
   }
@@ -354,7 +373,7 @@ export async function runKnowledgeCli(argv: string[], invocation: 'agent-memory'
     if (contextValues.repository !== undefined && !isRepositoryId(contextValues.repository)) {
       throw new InputError('Expected a persisted repository UUID');
     }
-    const sources = sourcesFor(scope);
+    const sources = await sourcesFor(scope);
     try {
       print(withTrace(await buildContext(sources, query, {
         limit,
@@ -377,7 +396,7 @@ export async function runKnowledgeCli(argv: string[], invocation: 'agent-memory'
         },
       })));
     } finally {
-      sources.memory?.close();
+      sources.memory?.close?.();
     }
     return;
   }
@@ -401,6 +420,7 @@ export async function runKnowledgeCli(argv: string[], invocation: 'agent-memory'
     }
   }
   if (command === 'wiki') {
+    if (['search', 'get', 'constraints', 'references', 'reference'].includes(action)) wiki = (await knowledgeFor(false)).wiki;
     switch (action) {
       case 'build': return print(wiki.build());
       case 'search': {
@@ -647,11 +667,47 @@ export async function runKnowledgeCli(argv: string[], invocation: 'agent-memory'
       return print(applySkillDesign(root, requireText(args[0], 'Skill design receipt ID'), action === 'rollback'));
     }
   }
+  if (command === 'memory' && (action === 'get' || action === 'search')) {
+    const knowledge = await knowledgeFor(true);
+    const memory = knowledge.memory;
+    if (!memory) throw new InputError('Memory reader is not configured');
+    try {
+      if (!process.env.EVOLVE_KNOWLEDGE_SNAPSHOT && action === 'get' && args[0]?.startsWith('ov:') && readProject(root) && !knowledge.releaseId) throw new InputError('OPENVIKING_REMOTE_ID_UNAVAILABLE');
+      if (action === 'get') return print(withTrace(await memory.get(requireText(args[0], 'id'), {
+        knowledgeReads, fromSearchId: values['from-search'],
+      }) ?? null));
+      const query = requireText(args.join(' '), 'query');
+      const page = values.page === undefined ? undefined : Number(values.page);
+      const filters = { ...memoryOptions, page: values.json ? page : page ?? 1 };
+      const result = await memory.search(query, filters);
+      const searchId = knowledgeReads?.recordSearch({ source: 'memory', query, filters, returnedIds: result.results.map(hit => hit.id) });
+      if (values.json || !result.pagination) return print(withTrace(result));
+      const { pagination } = result;
+      const results = result.results.map(hit => {
+        const host = memory instanceof MemoryStore && hit.session && (memoryHosts.find(host => hit.sourceMessageIds.some(id => id.startsWith(`${host}:${hit.session}:`)))
+          ?? memoryHosts.find(host => memory.extractionOffset(host, hit.session) > 0));
+        return { id: hit.id, content: hit.content.replace(/^(.{160}).+/su, '$1…'),
+          ...(memory instanceof MemoryStore && hit.sourceMessageScope ? { sources: true } : {}), ...(host ? { host } : {}) };
+      });
+      const reads = traceFile ? resolve(traceFile) : undefined;
+      const commands = results.length || hasOtherPage(pagination) ? {
+        prefix: [invocation, 'memory', ...commandFlags({ root, db: values.db === undefined || db === ':memory:' ? values.db : resolve(db), namespace: values.namespace,
+          'memory-backend': knowledge.backend?.active === 'local' && knowledge.backend.configured === 'openviking' ? 'local' : backend,
+          'workflow-session': values['workflow-session'] })],
+        ...(results.length ? { get: ['get', ...commandFlags({ reads, 'from-search': reads ? searchId : undefined }), '--', { arg: 'id' }] } : {}),
+        ...(results.some(hit => hit.sources) ? { sources: ['sources', '--', { arg: 'id' }] } : {}),
+        ...(results.some(hit => hit.host) ? { conversation: ['conversation', '--host', { arg: 'host' }, '--', { arg: 'id' }] } : {}),
+        ...(hasOtherPage(pagination) ? { page: ['search', ...commandFlags({ type: filters.type, scene: filters.scene, 'memory-session': filters.session,
+          limit: pagination.limit, reads, trace: values.trace }), '--page', { arg: 'page' }, '--', query] } : {}),
+      } : undefined;
+      return print(withTrace({ strategy: result.strategy, results, pagination, commands }), true);
+    } finally { memory.close?.(); }
+  }
   if (command === 'memory' && action === 'config') return print(await configureMemory(root, {
     host: values.host, baseUrl: values['base-url'], model: values.model, yes: values.yes,
   }));
   if (command === 'memory' && action === 'codex-install') return print(installCodexMemoryHook(root));
-  if (command === 'memory' && ['put', 'get', 'sources', 'delete', 'search', 'conversation', 'extract', 'codex-hook', 'host-hook', 'codex-sync', 'sync'].includes(action)) {
+  if (command === 'memory' && ['put', 'sources', 'delete', 'conversation', 'extract', 'codex-hook', 'host-hook', 'codex-sync', 'sync'].includes(action)) {
     const memory = openMemory();
     const page = values.page === undefined ? undefined : Number(values.page);
     const memoryPrefix = () => [invocation, 'memory', ...commandFlags({
@@ -663,39 +719,8 @@ export async function runKnowledgeCli(argv: string[], invocation: 'agent-memory'
           content: args.join(' '), id: values.id, type: values.type, scene: values.scene, session: values.session,
           priority: values.priority === undefined ? undefined : Number(values.priority),
         }));
-        case 'get': return print(withTrace(memory.get(requireText(args[0], 'id'), {
-          knowledgeReads, fromSearchId: values['from-search'],
-        }) ?? null));
         case 'sources': return print(memory.sources(requireText(args[0], 'memory ID')));
         case 'delete': return print({ deleted: memory.delete(requireText(args[0], 'id')) });
-        case 'search': {
-          const query = requireText(args.join(' '), 'query');
-          const filters = { ...memoryOptions, page: values.json ? page : page ?? 1 };
-          const result = await memory.search(query, filters);
-          const searchId = knowledgeReads?.recordSearch({
-            source: 'memory', query, filters, returnedIds: result.results.map(hit => hit.id),
-          });
-          const { pagination } = result;
-          if (values.json || !pagination) return print(withTrace(result));
-          const results = result.results.map(hit => {
-            const content = hit.content.replace(/^(.{160}).+/su, '$1…');
-            const host = hit.session && (memoryHosts.find(host => hit.sourceMessageIds.some(id => id.startsWith(`${host}:${hit.session}:`)))
-              ?? memoryHosts.find(host => memory.extractionOffset(host, hit.session) > 0));
-            return { id: hit.id, content, ...(hit.sourceMessageScope && { sources: true }), ...(host && { host }) };
-          });
-          const reads = traceFile ? resolve(traceFile) : undefined;
-          const commands = results.length || hasOtherPage(pagination) ? {
-            prefix: memoryPrefix(),
-            ...(results.length > 0 && { get: ['get', ...commandFlags({ reads, 'from-search': reads ? searchId : undefined }), '--', { arg: 'id' }] }),
-            ...(results.some(hit => hit.sources) && { sources: ['sources', '--', { arg: 'id' }] }),
-            ...(results.some(hit => hit.host) && { conversation: ['conversation', '--host', { arg: 'host' }, '--', { arg: 'id' }] }),
-            ...(hasOtherPage(pagination) && { page: ['search', ...commandFlags({
-              type: filters.type, scene: filters.scene, 'memory-session': filters.session,
-              limit: pagination.limit, reads, trace: values.trace,
-            }), '--page', { arg: 'page' }, '--', query] }),
-          } : undefined;
-          return print(withTrace({ strategy: result.strategy, results, pagination, commands }), true);
-        }
         case 'conversation': {
           const hosts = values.host === undefined ? [] : parseMemoryHosts(values.host);
           if (hosts.length > 1) throw new InputError('Choose one host for the conversation');

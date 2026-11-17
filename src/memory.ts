@@ -59,6 +59,7 @@ export interface MemorySearchOptions {
 export interface MemoryStoreOptions {
   namespace?: string;
   embed?: (text: string) => Promise<ArrayLike<number>>;
+  readOnly?: boolean;
 }
 
 interface ExtractionOptions {
@@ -110,13 +111,16 @@ export class MemoryStore {
   private readonly db: DatabaseSync;
   private readonly namespace: string;
   private readonly embed?: MemoryStoreOptions['embed'];
+  private readonly readOnly: boolean;
 
   constructor(path: string, options: MemoryStoreOptions = {}) {
     this.namespace = requireText(options.namespace ?? 'default', 'namespace');
     this.embed = options.embed;
+    this.readOnly = Boolean(options.readOnly);
     const file = path === ':memory:' ? path : resolve(path);
-    if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
-    this.db = openDb(file);
+    if (file !== ':memory:' && !this.readOnly) mkdirSync(dirname(file), { recursive: true });
+    this.db = openDb(file, this.readOnly);
+    if (this.readOnly) return;
     try {
       this.db.exec(`
         PRAGMA foreign_keys = ON;
@@ -176,6 +180,7 @@ export class MemoryStore {
   }
 
   private async writeMany(inputs: StoredMemoryInput[], advance?: () => boolean): Promise<MemoryRecord[] | undefined> {
+    if (this.readOnly) throw new InputError('Frozen knowledge is read-only');
     const prepared = await Promise.all(inputs.map(async input => {
       const content = requireText(input.content, 'content');
       const priority = input.priority ?? 50;
@@ -255,6 +260,7 @@ export class MemoryStore {
   }
 
   delete(id: string): boolean {
+    if (this.readOnly) throw new InputError('Frozen knowledge is read-only');
     return transaction(this.db, () => {
       const row = this.db.prepare('DELETE FROM memory_records WHERE namespace = ? AND id = ? RETURNING key')
         .get(this.namespace, id);
@@ -340,6 +346,7 @@ export class MemoryStore {
   }
 
   async extract(messages: ConversationMessage[], options: ExtractionOptions): Promise<MemoryRecord[]> {
+    if (this.readOnly) throw new InputError('Frozen knowledge is read-only');
     return (await this.writeMany(groundMemories(await extractMemoryInputs(messages, options), messages)))!;
   }
 
@@ -354,6 +361,7 @@ export class MemoryStore {
     from: number;
     to: number;
   }): Promise<MemoryRecord[] | undefined> {
+    if (this.readOnly) throw new InputError('Frozen knowledge is read-only');
     const { source, session, from, to } = options;
     if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || to <= from) {
       throw new InputError('Invalid memory extraction offsets');

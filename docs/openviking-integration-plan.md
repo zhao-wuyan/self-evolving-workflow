@@ -6,7 +6,27 @@
 
 这里的“进化”是依据执行证据修改 Skill 文档及其配套文件，不是训练模型权重，也不是自动升级 npm 包。OpenViking 负责保存、管理和召回资产，Evolve 负责决定是否修改、验证修改是否有效，以及是否允许发布。
 
-本文记录待实施的目标和行为约定。前期兼容性依据保留在 [OpenViking 接入兼容性与最小改造评估](openviking-integration-assessment.md)；其中“仅做按需 Bridge、不先双向同步”是早期建议，当前目标以本文的 Session 同步和受控发布方案为准。
+本文是 OpenViking 项目资产接入的实现契约。前期兼容性依据保留在 [OpenViking 接入兼容性与最小改造评估](openviking-integration-assessment.md)；当前 Session 同步、受控发布与可选本地回退行为以本文和 `OPENVIKING_项目资产_PLAN.md` 为准。
+
+### 可拔插后端与故障策略
+
+没有 `.evolve/openviking.json` 时保持原本地模式，不读取 OpenViking 凭据，也不增加网络或模型调用。显式初始化后启用远端：
+
+```bash
+evolve openviking init --policy evolution.json
+evolve openviking config --enabled false
+evolve openviking config --enabled true --failure-policy local
+evolve openviking config --failure-policy fail
+evolve openviking status
+```
+
+- 连接只读取绝对路径环境变量 `EVOLVE_OPENVIKING_CONFIG` 指定的文件，或 `~/.openviking/ovcli.conf` 的 `url`、`api_key`。项目描述不保存凭据。
+- `enabled: false` 关闭新查询与新 Session 的远端接入；默认 `failure_policy: local` 在服务不可达、服务端故障或限流时显式回退本地。`fail` 要求远端可用。响应中的 `knowledge_backend` 标明实际后端和回退原因。
+- 已固定远端版本的 Session 不切换 Skill 或 Wiki 约束；优先使用该版本的已验证缓存。远端 Memory 的 `ov:<release>:<origin>` ID 不映射成本地同名记录，缓存缺失时明确失败。
+- 身份不匹配、非法路径、哈希错误、未审批 Wiki 和发布冲突不适用可用性回退。回退不会伪造远端发布成功。
+- 业务 Session 完成后，远端暂不可用不撤销业务完成；保留失败的 publication 和 `openviking finish` 恢复命令。显式 `openviking sync`、`finish` 仍报告未完成的远端操作。
+- `memory put/extract/sync/delete` 保持本地写入；用 `openviking memory share|unshare <local-id>` 明确选择下次发布的正文，取消分享保留 tombstone。查询可用 `--memory-backend local` 显式选择本地读取。
+- Memory 的 `--session` 仍是历史过滤条件；`--workflow-session` 固定当前 Evolve Session。`context` 和 Wiki 只读命令使用 `--session`，`--reads` 的伴随文件固定搜索与精读的 release。
 
 ### 核心目标
 
@@ -59,6 +79,8 @@ CLI 升级不能隐式覆盖已经进化的项目 Skill。同步与发布的单�
 同一 Session 中，远端后续发布不改变已固定输入。新的发布由后续 Session 获取，不能让当前执行链中途漂移。
 
 获取失败、包不完整、权限不符或本地存在冲突时，不得把同步标记为成功。已固定的 Session 可以继续使用自己的已验证快照；新 Session 不得悄悄使用过期缓存冒充“最新版本”。
+
+启动同步同时校验已提交的本地 Skill 内容与上次物化基线，避免把 clean working tree 误当成没有本地改动。新机器首次同步会确认其对应的已发布祖先版本，并处理该版本的文件删除；无法对应已发布基线、或已有基线后的本地内容/删除冲突，返回 `OPENVIKING_LOCAL_ASSET_CONFLICT`，不覆盖本地提交、不推进 Session 到 ready。
 
 ## 5. Session 结束：按证据进化并发布
 

@@ -9,12 +9,17 @@ import { CodeGraph } from './code.js';
 import { InputError, requireText } from './common.js';
 import { knowledgeHelp, knowledgeOptions, runKnowledgeCli } from './knowledge-cli.js';
 import { WorkflowStore, workflowId, type Mutation, type WorkflowStep } from './workflow-runtime.js';
-import { bindWorkflowSkill, commandNames, workflowHash } from './workflow-skills.js';
+import { bindWorkflowSkill, commandNames, workflowHash, workflowBlob, workflowHeader, workflowPath, workflowStrings } from './workflow-skills.js';
 import { serveWorkflowRun } from './workflow-mcp.js';
 import { Wiki } from './wiki.js';
 import { migrateLegacyWiki } from './wiki-migration.js';
 import { wikiLookupScope } from './workflow-knowledge.js';
 import { installSkills, installWorkflow, workflowDocument, workflowDocuments } from './workflow-install.js';
+import { runOpenVikingCli, openVikingHelp } from './openviking/cli.js';
+import { readProject } from './openviking/config.js';
+import { isUnavailable, OpenVikingClient } from './openviking/client.js';
+import { readProjectHead } from './openviking/assets.js';
+import { prepareSession, finishSession } from './openviking/lifecycle.js';
 
 const string = { type: 'string' } as const;
 const strings = { type: 'string', multiple: true } as const;
@@ -30,6 +35,7 @@ const options = {
   to: string, tool: string, role: string, mode: string, model: string, cd: string, 'prompt-file': string, path: string,
   project: string, global: bool, apply: bool, 'knowhow-only': bool,
   scope: string, host: string, skill: strings, yes: bool,
+  commit: string,
 } as const;
 
 const usage = [
@@ -42,7 +48,7 @@ const usage = [
   'evolve run skill-read <run> [<path> --from <from>] --session <id>',
   'evolve run artifact-read <run> <alias> --session <id> [--scope <Wiki scope JSON>]',
   'evolve team controller|assign|report|cancel|list --session <id> --run <id>',
-  'evolve skills [install <package>... | validate <command>]',
+  'evolve skills [install <package>... | validate <command> | inspect <entry> --commit <sha>]',
   'evolve install [--scope project|user | --global] [--host codex|claude|agy] [--skill <package>] [--root <project>] [--yes]',
   'evolve workflows [show <id>]',
   'evolve knowledge import [<source>] [--root <destination>] [--project <legacy-id>] [--global] [--knowhow-only] [--apply]',
@@ -54,10 +60,15 @@ const knowledgeCommands = new Set(['code', 'wiki', 'memory', 'search', 'context'
 const skillEvolutionActions = new Set(['review', 'draft', 'replay', 'apply', 'rollback']);
 
 async function main(argv: string[]) {
+  if (argv[0] === 'openviking') return runOpenVikingCli(argv.slice(1));
   // 路由保留选项及参数顺序，具体命令仍使用各自的严格参数定义。
   const { positionals: [group, action], tokens } = parseArgs({
     args: argv, options: { ...knowledgeOptions, ...options }, allowPositionals: true, strict: false, tokens: true,
   });
+  if (group === 'openviking') {
+    const token = tokens.find(token => token.kind === 'positional');
+    return runOpenVikingCli(argv.filter((_, index) => index !== token?.index));
+  }
   if (knowledgeCommands.has(group) || (group === 'session' && action === 'review')) {
     return runKnowledgeCli(argv, 'evolve');
   }
@@ -166,7 +177,7 @@ function delegate(root: string, values: {
 async function runWorkflowCli(argv: string[]) {
   const { positionals: [group, action, ...args], values } = parseArgs({ options, args: argv, allowPositionals: true });
   if (!group || values.help) {
-    process.stdout.write(usage + '\n\n' + knowledgeHelp('evolve'));
+    process.stdout.write(usage + '\n\n' + openVikingHelp + '\n\n' + knowledgeHelp('evolve'));
     return;
   }
   const root = resolve(values.root ?? '.');
@@ -200,6 +211,16 @@ async function runWorkflowCli(argv: string[]) {
   if (group === 'skills') {
     if (action === 'install') return print(installSkills(root, args));
     if (action === 'validate') return print(bindWorkflowSkill(root, requireText(args[0], 'Skill command')));
+    if (action === 'inspect') {
+      const entry = workflowPath(requireText(args[0], 'Skill entry'));
+      const commit = requireText(values.commit, 'Skill commit');
+      if (!/^skills\/.+\/SKILL\.md$/.test(entry) || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit)) throw new InputError('Invalid Skill entry or commit');
+      const header = workflowHeader(workflowBlob(root, commit, entry).toString('utf8'));
+      const required_links = workflowStrings(header.required_links ?? [], 'required_links');
+      const packagePath = entry.slice(0, -'SKILL.md'.length);
+      for (const link of required_links) workflowBlob(root, commit, packagePath + workflowPath(link.split('#', 1)[0], '.md'));
+      return print({ entry, commit, header, required_links });
+    }
     if (!action) return print(commandNames.map(command => ({ command })));
     throw new InputError('Unknown Skills command: ' + action);
   }
@@ -239,8 +260,26 @@ async function runWorkflowCli(argv: string[]) {
         const boundaryContract = parseJsonOption(values['boundary-contract'], '--boundary-contract');
         const goals = parseJsonOption(values.goals, '--goals');
         const policy = values.auto || values['goal-mode'] ? { auto_mode: Boolean(values.auto), goal_mode: Boolean(values['goal-mode']) } : undefined;
-        const session = store.open(id(), requireText(args[0], 'objective'), values['definition-of-done'] ?? '', steps, mutation(),
-          { boundaryContract, goals, policy });
+        const profile = readProject(root);
+        const existing = store.find(id());
+        let seed = existing?.openviking ? { project_id: existing.openviking.project_id, release_id: existing.openviking.release_id,
+          manifest_sha256: existing.openviking.manifest_sha256 } : undefined;
+        let fallback: string | undefined;
+        if (!existing && profile && profile.enabled !== false) {
+          try {
+            const { head } = await readProjectHead(new OpenVikingClient(), profile);
+            seed = { project_id: profile.project_id, release_id: head.release_id, manifest_sha256: head.manifest_sha256 };
+          } catch (error) {
+            if (profile.failure_policy === 'fail' || !isUnavailable(error)) throw error;
+            fallback = error instanceof Error ? error.message : 'OPENVIKING_UNAVAILABLE';
+            console.warn('OpenViking unavailable; opening local Session: ' + fallback);
+          }
+        }
+        let session: object = store.open(id(), requireText(args[0], 'objective'), values['definition-of-done'] ?? '', steps, mutation(),
+          { boundaryContract, goals, policy, ...(seed ? { openviking: seed } : {}) });
+        if (seed) session = existing?.openviking?.phase === 'ready'
+          ? store.status(id()) : await prepareSession(root, store, id(), { ...mutation(), requestId: undefined, revision: store.status(id()).revision });
+        if (fallback) session = { ...session, knowledge_backend: { configured: 'openviking', active: 'local', fallback_reason: fallback } };
         if (existsSync(join(root, '.git'))) {
           try {
             await new CodeGraph(root).refresh();
@@ -255,7 +294,25 @@ async function runWorkflowCli(argv: string[]) {
         const cmd = change === 'skip' || values['decision-only'] ? '' : requireText(values.command, 'command');
         return print(store.chain(id(), change, makeStep(cmd, workflowId(values['step-id'], 'step ID')), values['after-step'], mutation()));
       }
-      if (action === 'complete') return print(store.completeSession(id(), mutation()));
+      if (action === 'complete') {
+        const result = store.completeSession(id(), mutation());
+        const completed = store.status(id());
+        if (!completed.openviking) return print(result);
+        try {
+          return print({ ...result, asset_publication: await finishSession(root, store, id(), {
+            ...mutation(), revision: completed.revision, requestId: undefined,
+          }) });
+        } catch (error) {
+          const latest = store.status(id());
+          const fallback = readProject(root)?.failure_policy !== 'fail' && isUnavailable(error);
+          print({ ...result, asset_publication: latest.openviking?.publication, orchestration_revision: latest.revision,
+            ...(fallback ? { knowledge_backend: { active: 'local', fallback_reason: 'OPENVIKING_UNAVAILABLE' } } : {}),
+            recovery: ['evolve', 'openviking', 'finish', '--session', id(), '--actor', mutation().actor,
+              '--expected-orchestration-revision', String(latest.revision)] });
+          if (!fallback) process.exitCode = 1;
+          return;
+        }
+      }
     }
     if (group === 'run') {
       const gates = values.gate ?? [];

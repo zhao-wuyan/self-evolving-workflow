@@ -6,6 +6,8 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { InputError, requireText } from './common.js';
 import { draftSkillAddition, learningDocument, learningIndex } from './skill-addition.js';
 import { validateKnowledgeReads, type KnowledgeReadsReceipt } from './knowledge-reads.js';
+import type { EvolutionTarget } from './openviking/types.js';
+import { frozenKnowledgeHash } from './openviking/frozen.js';
 
 interface Scenario {
   id: string;
@@ -14,7 +16,7 @@ interface Scenario {
   knowledgeReads?: { searchedSources?: string[]; loadedIds?: string[]; boundConstraints?: string[] };
 }
 
-interface ReplayReceipt {
+export interface ReplayReceipt {
   mode?: 'addition' | 'package';
   base: string;
   candidate: string;
@@ -426,7 +428,7 @@ export function replaySkillPackage(root: string, data: unknown, options: { runne
   }
 }
 
-export function changeSkillVersion(root: string, id: string, rollback = false) {
+export function readSkillReplayReceipt(root: string, id: string): ReplayReceipt & { id: string } {
   root = repoRoot(root);
   const content = readFileSync(receiptPath(root, id), 'utf8');
   if (sha256(content) !== id) throw new InputError('Skill replay receipt changed');
@@ -434,12 +436,18 @@ export function changeSkillVersion(root: string, id: string, rollback = false) {
   if (gitText(root, ['rev-parse', '--verify', 'refs/evolve/replays/' + id]) !== receipt.candidate) {
     throw new InputError('Skill candidate no longer matches its replay receipt');
   }
-  const head = gitText(root, ['rev-parse', 'HEAD']);
-  const changedFiles = gitText(root, ['diff', '--name-only', receipt.base, receipt.candidate]).split(/\r?\n/);
+  const changedFiles = gitText(root, ['diff', '--name-only', receipt.base, receipt.candidate]).split(/\r?\n/).filter(Boolean);
   if (!changedFiles.length || changedFiles.some(path => !receipt.files.includes(path)) ||
       gitText(root, ['rev-list', '--parents', '-n', '1', receipt.candidate]) !== `${receipt.candidate} ${receipt.base}`) {
     throw new InputError('Skill candidate has unexpected changes or parent');
   }
+  return { id, ...receipt };
+}
+
+export function changeSkillVersion(root: string, id: string, rollback = false) {
+  root = repoRoot(root);
+  const receipt = readSkillReplayReceipt(root, id);
+  const head = gitText(root, ['rev-parse', 'HEAD']);
   if (!rollback && head === receipt.candidate) return { id, commit: head, replayed: true };
   if (rollback && gitText(root, ['rev-list', '--parents', '-n', '1', head]) === `${head} ${receipt.candidate}` &&
       gitText(root, ['rev-parse', `${head}^{tree}`]) === gitText(root, ['rev-parse', `${receipt.base}^{tree}`])) {
@@ -454,4 +462,52 @@ export function changeSkillVersion(root: string, id: string, rollback = false) {
   if (rollback) git(root, ['revert', '--no-edit', receipt.candidate]);
   else git(root, ['merge', '--ff-only', receipt.candidate]);
   return { id, commit: gitText(root, ['rev-parse', 'HEAD']), replayed: false };
+}
+
+export function verifySkillCommit(root: string, commit: string, targets: readonly EvolutionTarget[], knowledgeSnapshot: string) {
+  root = repoRoot(root);
+  if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit)) throw new InputError('Invalid candidate commit');
+  const knowledge_sha256 = frozenKnowledgeHash(knowledgeSnapshot);
+  const expected = readFileSync(join(knowledgeSnapshot, 'sha256'), 'utf8');
+  if (knowledge_sha256 !== expected) throw new InputError('OPENVIKING_FROZEN_KNOWLEDGE_CHANGED');
+  const scratch = mkdtempSync(join(tmpdir(), 'evolve-verify-commit-'));
+  const worktree = join(scratch, 'candidate');
+  const previousSnapshot = process.env.EVOLVE_KNOWLEDGE_SNAPSHOT;
+  const previousDb = process.env.AGENT_MEMORY_DB;
+  let added = false;
+  try {
+    process.env.EVOLVE_KNOWLEDGE_SNAPSHOT = knowledgeSnapshot;
+    process.env.AGENT_MEMORY_DB = join(knowledgeSnapshot, 'memory.db');
+    git(root, ['worktree', 'add', '--detach', worktree, commit]); added = true;
+    const results = targets.map(target => {
+      const runner = realpathSync(join(root, target.runner));
+      const scenarioPath = join(root, target.scenarios);
+      const runner_sha256 = sha256(readFileSync(runner));
+      const scenarioBytes = readFileSync(scenarioPath);
+      const scenarios = loadScenarios(JSON.parse(scenarioBytes.toString('utf8')));
+      const observations = scenarios.map(scenario => {
+        const observed = runPackageScenario(worktree, commit, runner, target.entry, dirname(target.entry).replaceAll('\\', '/'), scenario, true);
+        if (!observed.passed) throw new InputError('Merged Skill validation failed: ' + scenario.id);
+        assertKnowledgeReads(observed, scenario.knowledgeReads, scenario.id);
+        return { id: scenario.id, input_sha256: sha256(JSON.stringify(scenario.input)), ...observed };
+      });
+      if (sha256(readFileSync(runner)) !== runner_sha256 || !readFileSync(scenarioPath).equals(scenarioBytes)) throw new InputError('Validation inputs changed');
+      return { entry: target.entry, runner_sha256, scenarios_sha256: sha256(scenarioBytes), observations };
+    });
+    if (frozenKnowledgeHash(knowledgeSnapshot) !== knowledge_sha256) throw new InputError('OPENVIKING_FROZEN_KNOWLEDGE_CHANGED');
+    const proof = { commit, knowledge_sha256, targets: results };
+    const content = JSON.stringify(proof);
+    const id = sha256(content);
+    const path = join(gitText(root, ['rev-parse', '--absolute-git-dir']), 'evolve-validations', id + '.json');
+    mkdirSync(dirname(path), { recursive: true });
+    if (existsSync(path)) { if (readFileSync(path, 'utf8') !== content) throw new InputError('Validation receipt changed'); }
+    else writeFileSync(path, content, { flag: 'wx' });
+    git(root, ['update-ref', 'refs/evolve/validations/' + id, commit]);
+    return { id, ...proof };
+  } finally {
+    if (previousSnapshot === undefined) delete process.env.EVOLVE_KNOWLEDGE_SNAPSHOT; else process.env.EVOLVE_KNOWLEDGE_SNAPSHOT = previousSnapshot;
+    if (previousDb === undefined) delete process.env.AGENT_MEMORY_DB; else process.env.AGENT_MEMORY_DB = previousDb;
+    if (added) git(root, ['worktree', 'remove', '--force', worktree]);
+    rmSync(scratch, { recursive: true, force: true });
+  }
 }

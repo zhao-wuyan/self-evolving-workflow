@@ -1,13 +1,12 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, posix, resolve } from 'node:path';
+import { dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { parse } from 'yaml';
 
 const { id, input, entry: rawEntry, commit } = JSON.parse(readFileSync(0, 'utf8').replace(/^\uFEFF/, ''));
 const entry = rawEntry?.replaceAll('\\', '/');
-if (!/^skills\/[a-z0-9]+(?:-[a-z0-9]+)*\/SKILL\.md$/.test(entry) ||
+if (!/^skills\/(?:[a-zA-Z0-9_-]+\/)+SKILL\.md$/.test(entry) ||
     !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit) ||
     typeof input?.task !== 'string' || !input.task.trim() ||
     typeof input.expected !== 'string' || !input.expected.trim()) {
@@ -17,12 +16,6 @@ if (!/^skills\/[a-z0-9]+(?:-[a-z0-9]+)*\/SKILL\.md$/.test(entry) ||
 const root = process.cwd();
 const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', windowsHide: true });
 if (git('rev-parse', 'HEAD').trim() !== commit) throw new Error('Replay checkout must match the requested commit');
-const markdown = git('show', commit + ':' + entry);
-const header = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(markdown.replace(/^\uFEFF/, ''));
-const required = (header ? parse(header[1])?.required_links : undefined) ?? [];
-if (!Array.isArray(required) || required.some(link => typeof link !== 'string' || !link.trim())) {
-  throw new Error('Skill required_links must contain Markdown destinations');
-}
 
 function resolveWindowsCodex() {
   for (const dir of (process.env.PATH || '').split(';').filter(Boolean)) {
@@ -36,6 +29,11 @@ function resolveWindowsCodex() {
 
 const defaultCli = fileURLToPath(new URL('../../../dist/cli.js', import.meta.url));
 const memoryCli = realpathSync(process.env.AGENT_MEMORY_CLI || defaultCli);
+const workflowCli = process.env.EVOLVE_CLI || join(dirname(memoryCli), 'workflow-cli.js');
+if (!existsSync(workflowCli)) throw new Error('Configure EVOLVE_CLI to the workflow-cli.js shipped with AGENT_MEMORY_CLI');
+const { required_links: required } = JSON.parse(execFileSync(process.execPath,
+  [workflowCli, '--root', root, 'skills', 'inspect', entry, '--commit', commit],
+  { cwd: root, encoding: 'utf8', windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }));
 const codex = process.env.CODEX_REPLAY_EXECUTABLE || (process.platform === 'win32' ? resolveWindowsCodex() : 'codex');
 const codexEntry = /\.[cm]?js$/i.test(codex) ? [resolve(codex)] : [];
 const server = fileURLToPath(new URL('./memory-codex-mcp.mjs', import.meta.url));

@@ -41,13 +41,15 @@ workflow-evolve <skill-entry>
   --iterations <positive integer>
   --scenarios <JSON file with >=1 baseline failure and >=1 baseline pass>
   [--runner <replay runner>]
-  --session <Session ID> | --execution <Skill execution ID> | --history <JSON transcript>
+  --session <Session ID> | --execution <Skill execution ID> | --history <JSON transcript> | --review <serialized Session review>
   [--project <project ID>] [--max-retries <n>] [--auto]
 ```
 
 - **Default runner**: `scripts/codex-memory-replay.mjs` (runs `codex exec` read-only against the target Git commit and returns loaded document hashes + `knowledge-reads/1.0`). Set `AGENT_MEMORY_DB` to an absolute path when replay should query existing memories.
 - **Clean commit required**: Commit target Skill changes before replay (`evolve skills replay` creates isolated worktrees under `<git-dir>/evolve-replay/`).
 - **Agy receipts**: Preserve both discussion and confirmation JSON per round; apply only when `approved: true`.
+- **Automatic project review**: OpenViking lifecycle supplies one fixed `--review` with real Run sources, a project business runner, and `EVOLVE_KNOWLEDGE_SNAPSHOT`. Zero attributable signals exit without a candidate; discussion evidence must be a subset of the review sources.
+- **Installed CLI**: Set `AGENT_MEMORY_CLI` and `EVOLVE_CLI` to the matching installed package. Nested `skills/**/SKILL.md` entries are inspected at the requested Git commit; project `node_modules` is not required.
 
 ## Automatic Invocation
 

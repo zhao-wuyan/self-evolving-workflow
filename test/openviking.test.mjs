@@ -1,0 +1,461 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { cli, fixture } from './evolve-workflow-support.mjs';
+import { protocol, projectFixture, releaseFromProject, seed, fakeAgy, completeSample } from './openviking-support.mjs';
+import { OpenVikingClient } from '../dist/openviking/client.js';
+import { readProject, validateProject } from '../dist/openviking/config.js';
+import { loadRelease, manifestBytes, publishRelease, readProjectHead, sha256, stableJson, validateManifest } from '../dist/openviking/assets.js';
+import { cacheRelease, selectMemory, exportMemory, exportWiki, fileRecord } from '../dist/openviking/knowledge.js';
+import { createAssetCommit, gitBytes, skillAssets } from '../dist/openviking/git.js';
+import { mergeProjectAssets } from '../dist/openviking/merge.js';
+import { freezeKnowledge, frozenKnowledgeHash } from '../dist/openviking/frozen.js';
+import { MemoryStore } from '../dist/memory.js';
+import { openKnowledgeSources } from '../dist/knowledge-sources.js';
+import { KnowledgeReads } from '../dist/knowledge-reads.js';
+import { createSearchServer } from '../dist/http.js';
+import { Wiki } from '../dist/wiki.js';
+import { applyWikiChange, proposeWikiChange } from '../dist/wiki-change.js';
+import { WorkflowStore } from '../dist/workflow-runtime.js';
+import { draftSkillAddition } from '../dist/skill-addition.js';
+import { changeSkillVersion, replaySkillAddition, verifySkillCommit } from '../dist/skill-replay.js';
+
+function childModel(f, server) {
+  f.env.AGENT_MEMORY_LLM_BASE_URL = server.url;
+  f.env.AGENT_MEMORY_LLM_MODEL = 'protocol-fixture';
+}
+function approve(wiki, entry, body, metadata = {}) {
+  const change = proposeWikiChange(wiki, { operation: 'create', entry, title: entry, mode: 'constraint', scope: ['project'], body, ...metadata }, ['fixture:human-approval']);
+  applyWikiChange(wiki, change.id);
+  return change;
+}
+function request(id, name, args = {}) { return { jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }; }
+
+async function evolved(f, base, instruction = 'Require migration_approval before creating a release.') {
+  const draft = draftSkillAddition({ entry: join(f.root, f.entry), instruction, priority: 'high', sources: ['fixture:reviewed-run'] });
+  const replay = replaySkillAddition(f.root, draft, { runner: join(f.root, 'tools/replay.mjs'), scenarios: JSON.parse(readFileSync(join(f.root, 'tools/scenarios.json'))) });
+  changeSkillVersion(f.root, replay.id);
+  const cache = await cacheRelease(f.root, f.client, f.project, base.head.release_id, base.manifest);
+  const frozen = await freezeKnowledge(join(f.root, '.agent-memory', 'fixed-input'), cache, f.client, f.project, base.manifest);
+  const validation = verifySkillCommit(f.root, replay.candidate, [{ entry: f.entry, runner: 'tools/replay.mjs', scenarios: 'tools/scenarios.json' }], frozen.path);
+  const next = releaseFromProject(f, base.head.release_id);
+  next.manifest.verification = { kind: 'evolved', session_id: 'fixture', replay_ids: [replay.id], validation_id: validation.id };
+  const previous = await readProjectHead(f.client, f.project);
+  const head = await publishRelease(f.client, f.project, next.manifest, next.bytes, previous.raw);
+  return { ...next, head, replay, validation };
+}
+
+test('project identity, private roots and connection errors remain isolated and redacted', async t => {
+  const server = await protocol(t);
+  const a = projectFixture(t, server);
+  const first = await seed(a);
+  const b = projectFixture(t, server);
+  const second = await seed(b);
+  assert.notEqual(first.head.release_id, second.head.release_id);
+  await assert.rejects(loadRelease(a.client, b.project, first.head.release_id), /NOT_FOUND/);
+  await assert.rejects(readProjectHead(a.client, { ...a.project, account_id: 'different' }), /IDENTITY_MISMATCH/);
+  assert.throws(() => validateProject({ ...a.project, root_uri: b.project.root_uri }), /ROOT_INVALID/);
+  const calls = (await server.inspect()).calls;
+  assert.ok(calls.every(call => Object.values(call.headers).every(value => value === undefined)));
+  const profile = join(a.root, '.evolve', 'openviking.json');
+  const config = join(a.root, '.agent-memory', 'ovcli.conf');
+  writeFileSync(config, JSON.stringify({ url: server.url, api_key: 'wrong-private-key' }));
+  assert.throws(() => a.evolve('openviking', 'status'), error => /UNAUTHENTICATED/.test(String(error.stderr)) && !/private-server-response|wrong-private-key/.test(String(error.stderr)));
+  assert.equal(JSON.parse(readFileSync(profile)).project_id, a.project.project_id);
+});
+
+test('binary, executable, empty, CRLF/BOM and sidecar-named assets round-trip without committing user index', async t => {
+  const server = await protocol(t);
+  const a = projectFixture(t, server);
+  const samples = new Map([
+    ['skills/sample/icon.png', Buffer.from([137, 80, 78, 71, 13, 10, 0, 255, 1, 2])],
+    ['skills/sample/empty', Buffer.alloc(0)], ['skills/sample/crlf.txt', Buffer.from('\uFEFFfirst\r\nsecond\r\n')],
+    ['skills/sample/.abstract.md', Buffer.from('This is a package file, not a server summary.')],
+    ['skills/sample/run.sh', Buffer.from('#!/bin/sh\nprintf ok\n')],
+  ]);
+  for (const [path, body] of samples) a.write(path, body);
+  a.git('add', 'skills'); a.git('update-index', '--chmod=+x', 'skills/sample/run.sh'); a.git('commit', '-qm', '测试: 完整字节样本');
+  const first = await seed(a);
+  const b = projectFixture(t, server, { id: a.project.project_id });
+  b.write('unrelated.txt', 'User staged content'); b.git('add', 'unrelated.txt');
+  const before = b.git('rev-parse', 'HEAD');
+  assert.throws(() => b.open('bytes', 'sample'), /STAGED_CHANGES/);
+  assert.equal(b.status('bytes').openviking.phase, 'preparing');
+  assert.equal(b.git('show', ':unrelated.txt'), 'User staged content');
+  assert.equal(b.git('rev-parse', 'HEAD'), before);
+  b.git('restore', '--staged', 'unrelated.txt');
+  const ready = b.evolve('openviking', 'sync', ...b.fence('bytes'));
+  assert.equal(ready.openviking.phase, 'ready');
+  assert.equal(ready.openviking.release_id, first.head.release_id);
+  for (const [path, body] of samples) assert.deepEqual(gitBytes(b.root, ['show', ready.openviking.skill_commit + ':' + path]), body);
+  assert.match(b.git('ls-tree', ready.openviking.skill_commit, '--', 'skills/sample/run.sh'), /^100755 /);
+  assert.equal(readFileSync(join(b.root, 'unrelated.txt'), 'utf8'), 'User staged content');
+  assert.throws(() => b.git('show', ready.openviking.skill_commit + ':unrelated.txt'));
+  const assets = skillAssets(b.root, ready.openviking.skill_commit);
+  assert.deepEqual(assets.files.filter(file => first.manifest.files.some(expected => expected.path === file.path)), first.manifest.files);
+});
+
+test('sync preserves committed local Skill changes before and after the first materialization', async t => {
+  const server = await protocol(t);
+  for (const [prepared, deleted] of [[false, false], [true, false], [true, true]]) {
+    const f = projectFixture(t, server);
+    const release = await seed(f);
+    if (prepared) {
+      childModel(f, server);
+      f.open('baseline', 'sample'); completeSample(f, 'baseline'); f.sealSession('baseline');
+    }
+    const body = readFileSync(join(f.root, f.entry), 'utf8') + '\nKeep the unpublished local approval rule.\n';
+    if (deleted) f.git('rm', f.entry); else f.write(f.entry, body);
+    f.git('add', 'skills'); f.git('commit', '-qm', '测试: 保留未发布的本地修改');
+    const head = f.git('rev-parse', 'HEAD');
+    assert.throws(() => f.open('local-change', 'sample'), /LOCAL_ASSET_CONFLICT/);
+    assert.equal(f.git('rev-parse', 'HEAD'), head);
+    if (deleted) assert.equal(existsSync(join(f.root, f.entry)), false);
+    else assert.equal(readFileSync(join(f.root, f.entry), 'utf8'), body);
+    assert.equal(f.status('local-change').openviking.phase, 'preparing');
+    assert.equal((await readProjectHead(f.client, f.project)).head.release_id, release.head.release_id);
+  }
+});
+
+test('first sync recognizes a released ancestor and removes its retired package files', async t => {
+  const server = await protocol(t);
+  const a = projectFixture(t, server);
+  a.write('skills/sample/retired.txt', 'Previously published asset');
+  a.git('add', 'skills'); a.git('commit', '-qm', '测试: 旧版完整包');
+  const first = await seed(a);
+  const b = projectFixture(t, server, { id: a.project.project_id });
+  b.write('skills/sample/retired.txt', 'Previously published asset');
+  b.git('add', 'skills'); b.git('commit', '-qm', '测试: 新机器保留旧版包');
+  const body = readFileSync(join(a.root, a.entry), 'utf8') + '\nUse the current published approval rule.\n';
+  a.write(a.entry, body); a.git('rm', 'skills/sample/retired.txt');
+  a.git('add', 'skills'); a.git('commit', '-qm', '测试: 发布新版并移除旧文件');
+  const next = releaseFromProject(a, first.head.release_id);
+  const published = await publishRelease(a.client, a.project, next.manifest, next.bytes, (await readProjectHead(a.client, a.project)).raw);
+  const ready = b.open('new-machine', 'sample');
+  assert.equal(ready.openviking.release_id, published.release_id);
+  assert.equal(readFileSync(join(b.root, b.entry), 'utf8'), body);
+  assert.equal(existsSync(join(b.root, 'skills/sample/retired.txt')), false);
+  assert.deepEqual(skillAssets(b.root, ready.openviking.skill_commit).files, next.manifest.files);
+});
+
+test('corrupt downloads, unsafe manifests and missing files cannot bind ready or advance Git/current', async t => {
+  const server = await protocol(t);
+  const a = projectFixture(t, server);
+  const release = await seed(a);
+  const b = projectFixture(t, server, { id: a.project.project_id });
+  const file = release.manifest.files.find(file => file.path === a.entry);
+  const uri = `${a.project.root_uri}/blobs/${file.sha256}.bin`;
+  const before = b.git('rev-parse', 'HEAD');
+  await server.update({ corrupt: { [uri]: Buffer.from('corrupt').toString('base64') } });
+  assert.throws(() => b.open('corrupt', 'sample'), /HASH_MISMATCH/);
+  assert.equal(b.git('rev-parse', 'HEAD'), before);
+  assert.equal(b.status('corrupt').openviking.phase, 'preparing');
+  const head = await readProjectHead(a.client, a.project);
+  const unsafe = structuredClone(release.manifest);
+  unsafe.files[0].path = 'skills/../../.git/config';
+  assert.throws(() => validateManifest(unsafe, a.project), /path|ASSET_PATH/);
+  const collision = structuredClone(release.manifest);
+  collision.files.push({ ...collision.files[0], path: 'skills/SAMPLE/SKILL.md' });
+  assert.throws(() => validateManifest(collision, a.project), /COLLISION/);
+  await server.update({ corrupt: {}, missing: [uri] });
+  assert.throws(() => b.evolve('openviking', 'sync', ...b.fence('corrupt')), /NOT_FOUND/);
+  assert.equal(b.git('rev-parse', 'HEAD'), before);
+  assert.deepEqual((await readProjectHead(a.client, a.project)).raw, head.raw);
+  await server.update({ missing: [] });
+  assert.equal(b.evolve('openviking', 'sync', ...b.fence('corrupt')).openviking.phase, 'ready');
+});
+
+test('single-pointer CAS has one winner and recognizes server commit after a lost response', async t => {
+  const server = await protocol(t);
+  const f = projectFixture(t, server);
+  const base = await seed(f);
+  const old = await readProjectHead(f.client, f.project);
+  const ours = releaseFromProject(f, base.head.release_id);
+  const theirs = releaseFromProject(f, base.head.release_id);
+  const result = await Promise.allSettled([publishRelease(f.client, f.project, ours.manifest, ours.bytes, old.raw), publishRelease(f.client, f.project, theirs.manifest, theirs.bytes, old.raw)]);
+  assert.equal(result.filter(item => item.status === 'fulfilled').length, 1);
+  assert.match(result.find(item => item.status === 'rejected').reason.message, /PUBLICATION_CONFLICT/);
+  const current = await readProjectHead(f.client, f.project);
+  const next = releaseFromProject(f, current.head.release_id);
+  await server.update({ dropPointer: true });
+  const published = await publishRelease(f.client, f.project, next.manifest, next.bytes, current.raw);
+  assert.equal(published.release_id, sha256(manifestBytes(next.manifest)));
+  assert.equal((await readProjectHead(f.client, f.project)).head.release_id, published.release_id);
+  assert.equal((await publishRelease(f.client, f.project, next.manifest, next.bytes, current.raw)).release_id, published.release_id);
+});
+
+test('remote Session retries bind one commit; the next Session receives the new validated release', async t => {
+  const server = await protocol(t);
+  const f = projectFixture(t, server);
+  childModel(f, server);
+  const first = await seed(f);
+  f.open('pinned', 'sample');
+  const attempt = f.next('pinned');
+  assert.equal(attempt.skill_ref.commit, f.status('pinned').openviking.skill_commit);
+  f.evolve('run', 'skill-read', attempt.run_id, '--session', 'pinned');
+  f.evolve('run', 'cancel', attempt.run_id, ...f.fence('pinned'), '--expected-run-revision', '0', '--reason', 'Observed retry');
+  const next = await evolved(f, first);
+  const retry = f.next('pinned');
+  assert.equal(retry.skill_ref.commit, attempt.skill_ref.commit);
+  assert.doesNotMatch(f.evolve('run', 'skill-read', retry.run_id, '--session', 'pinned').markdown, /migration_approval/);
+  f.finish('pinned', retry, 'Retry finished');
+  assert.equal(f.sealSession('pinned').asset_publication.openviking.publication.state, 'no_change');
+  const second = f.open('new-session', 'sample');
+  assert.equal(second.openviking.release_id, next.head.release_id);
+  const run = f.next('new-session');
+  assert.match(f.evolve('run', 'skill-read', run.run_id, '--session', 'new-session').markdown, /migration_approval/);
+});
+
+test('CLI, HTTP and Run MCP read the same full Memory bytes and all repository-scoped constraints', async t => {
+  const server = await protocol(t);
+  const f = projectFixture(t, server);
+  const wiki = new Wiki(f.root);
+  for (let index = 0; index < 12; index++) approve(wiki, `entries/constraint-${index}`, `Deployment rule ${index}`, { repositories: [f.project.project_id] });
+  approve(wiki, 'entries/other-repository', 'Not applicable here', { repositories: [randomUUID()] });
+  const retired = approve(wiki, 'entries/retired', 'Retired deployment rule');
+  applyWikiChange(wiki, proposeWikiChange(wiki, { operation: 'retire', entry: retired.entry }, ['fixture:retire-approval']).id);
+  approve(wiki, 'entries/reference', 'Deployment reference text', { mode: 'reference' });
+  f.git('add', 'wiki'); f.git('commit', '-qm', '测试: 已审批知识');
+  const content = 'Deployment build 00123 uses Token-AbC_007.\n' + 'Exact source body. '.repeat(5000) + '\nEnd of original record.';
+  const memory = new MemoryStore(join(f.root, '.agent-memory', 'memory.db'));
+  const record = await memory.put({ id: 'original-memory', content, sourceMessageIds: ['source:actual-message-00123'], type: 'verified_fix', session: 'history-1' }); memory.close();
+  selectMemory(f.root, record.id, 'share');
+  const release = await seed(f);
+  const reads = join(f.root, '.agent-memory', 'query-reads.json');
+  const envelope = f.evolve('context', 'Deployment', '--include-memory', '--limit', '1', '--reads', reads);
+  assert.equal(envelope.constraints.length, 12);
+  assert.ok(envelope.constraints.every(item => !/Retired|Not applicable/.test(item.content)));
+  const found = f.evolve('memory', 'search', '00123', '--json', '--reads', reads);
+  assert.equal(found.results.length, 1);
+  const id = found.results[0].id;
+  assert.match(id, /^ov:[a-f0-9]{64}:/);
+  assert.equal(found.results[0].version, record.version);
+  const loaded = f.evolve('memory', 'get', id, '--reads', reads, '--from-search', found.knowledge_reads.searches.at(-1).search_id);
+  assert.equal(loaded.content, content); assert.deepEqual(loaded.sourceMessageIds, record.sourceMessageIds);
+  assert.equal(loaded.openviking_reads[0].content_sha256, sha256(content));
+  assert.equal(loaded.openviking_reads[0].via, 'cache');
+  const sources = await openKnowledgeSources(f.root, { includeMemory: true });
+  const http = createSearchServer(sources);
+  await new Promise(resolve => http.listen(0, '127.0.0.1', resolve));
+  t.after(() => { http.close(); sources.memory?.close?.(); });
+  const httpResult = await (await fetch(`http://127.0.0.1:${http.address().port}/search?q=00123&scope=memory`)).json();
+  assert.equal(httpResult.memory.results[0].content, content);
+  const httpContext = await (await fetch(`http://127.0.0.1:${http.address().port}/context?q=Deployment&limit=1`)).json();
+  assert.equal(httpContext.constraints.length, 12);
+  f.open('reader', 'sample'); const run = f.next('reader');
+  const calls = [request(1, 'read_skill'), request(2, 'memory_search', { query: 'Deployment' }), request(3, 'memory_get', { id }), request(4, 'wiki_context', { query: 'Deployment' })];
+  const output = f.run(process.execPath, [cli, 'mcp', '--session', 'reader', '--run', run.run_id], calls.map(call => JSON.stringify(call)).join('\n') + '\n');
+  const results = output.split(/\r?\n/).map(line => JSON.parse(line).result);
+  assert.ok(results.every(result => !result.isError));
+  assert.equal(JSON.parse(results[2].content[0].text).content, content);
+  assert.equal(JSON.parse(results[3].content[0].text).constraints.length, 12);
+  const sealed = f.finish('reader', run, 'Remote knowledge inspected');
+  assert.equal(sealed.knowledge_reads.schema_version, 'knowledge-reads/1.0');
+  assert.ok(sealed.openviking_reads.some(item => item.record_id === id && item.content_sha256 === sha256(content)));
+  assert.ok((await server.inspect()).calls.filter(call => call.path === '/api/v1/search/find').every(call => call.input.target_uri === `${f.project.root_uri}/releases/${release.head.release_id}/memory`));
+});
+
+test('Memory sharing freezes approval, unshare keeps a tombstone and index failure cannot publish', async t => {
+  const server = await protocol(t);
+  const f = projectFixture(t, server);
+  const local = new MemoryStore(join(f.root, '.agent-memory', 'memory.db'));
+  f.dispose(() => local.close());
+  await local.put({ id: 'm', content: 'Deployment code 00123' }); selectMemory(f.root, 'm', 'share');
+  const first = await seed(f);
+  await local.put({ id: 'm', content: 'Deployment changed 00456' });
+  assert.throws(() => exportMemory(f.root, first.manifest), /APPROVAL_CHANGED/);
+  selectMemory(f.root, 'm', 'share');
+  const next = releaseFromProject(f, first.head.release_id);
+  await server.update({ queueError: true });
+  await assert.rejects(publishRelease(f.client, f.project, next.manifest, next.bytes, (await readProjectHead(f.client, f.project)).raw), /BATCH_INCOMPLETE/);
+  assert.equal((await readProjectHead(f.client, f.project)).head.release_id, first.head.release_id);
+  await server.update({ queueError: false });
+  const published = await publishRelease(f.client, f.project, next.manifest, next.bytes, (await readProjectHead(f.client, f.project)).raw);
+  const oldId = `ov:${first.head.release_id}:${Buffer.from('m').toString('base64url')}`;
+  assert.equal(f.evolve('memory', 'get', oldId).content, 'Deployment code 00123');
+  selectMemory(f.root, 'm', 'unshare');
+  assert.deepEqual(JSON.parse(readFileSync(join(f.root, '.agent-memory/openviking/share.json'))).changes.m, { operation: 'unshare' });
+  assert.equal(exportMemory(f.root, next.manifest).memory.length, 0);
+  assert.notEqual(published.release_id, first.head.release_id);
+});
+
+test('completed Sessions survive model failure and finish recovers once without a zero-signal release', async t => {
+  const server = await protocol(t);
+  const f = projectFixture(t, server);
+  const release = await seed(f);
+  delete f.env.AGENT_MEMORY_LLM_BASE_URL; delete f.env.AGENT_MEMORY_LLM_MODEL;
+  f.open('recovery', 'sample'); completeSample(f, 'recovery');
+  assert.throws(() => f.sealSession('recovery'));
+  assert.equal(f.status('recovery').status, 'completed');
+  assert.equal(f.status('recovery').openviking.publication.state, 'failed');
+  assert.equal((await readProjectHead(f.client, f.project)).head.release_id, release.head.release_id);
+  childModel(f, server);
+  const result = f.evolve('openviking', 'finish', ...f.fence('recovery'));
+  assert.equal(result.openviking.publication.state, 'no_change');
+  const before = (await server.inspect()).calls.filter(call => call.path === '/chat/completions').length;
+  assert.equal(f.evolve('openviking', 'finish', ...f.fence('recovery')).openviking.publication.state, 'no_change');
+  assert.equal((await server.inspect()).calls.filter(call => call.path === '/chat/completions').length, before);
+});
+
+test('automatic Session review drives business replay through the installed CLI boundary without local dependencies', async t => {
+  const server = await protocol(t);
+  await server.update({ model: 'signal' });
+  const f = projectFixture(t, server, { driver: true }); childModel(f, server); fakeAgy(f);
+  const base = await seed(f);
+  assert.equal(existsSync(join(f.root, 'dist')), false); assert.equal(existsSync(join(f.root, 'node_modules')), false);
+  f.open('evolution', 'sample'); completeSample(f, 'evolution', 'Deployment failed: the migration approval check was omitted');
+  const result = f.sealSession('evolution');
+  assert.equal(result.asset_publication.openviking.publication.state, 'published');
+  const release = await loadRelease(f.client, f.project, result.asset_publication.published_release);
+  assert.equal(release.verification.kind, 'evolved'); assert.equal(release.verification.replay_ids.length, 1);
+  assert.match(release.verification.validation_id, /^[a-f0-9]{64}$/);
+  assert.notEqual(result.asset_publication.published_release, base.head.release_id);
+  assert.match(f.git('show', 'HEAD:' + f.entry), /migration_approval/);
+  const snapshot = join(f.root, '.agent-memory/openviking/jobs/evolution/knowledge');
+  assert.equal(frozenKnowledgeHash(snapshot), readFileSync(join(snapshot, 'sha256'), 'utf8'));
+});
+
+test('Agy rejection, foreign evidence and post-apply runner failures never advance the remote pointer', async t => {
+  for (const flag of ['FIXTURE_REJECT_DISCUSSION', 'FIXTURE_REJECT_CONFIRM', 'FIXTURE_BAD_SOURCE', 'FIXTURE_FAIL_AFTER_APPLY']) {
+    await t.test(flag, async t => {
+      const server = await protocol(t); await server.update({ model: 'signal' });
+      const f = projectFixture(t, server, { driver: true }); childModel(f, server); fakeAgy(f); f.env[flag] = '1';
+      const base = await seed(f); f.open('rejected', 'sample'); completeSample(f, 'rejected', 'Deployment failed at the missing migration gate');
+      assert.throws(() => f.sealSession('rejected'));
+      assert.equal(f.status('rejected').status, 'completed'); assert.equal(f.status('rejected').openviking.publication.state, 'failed');
+      assert.equal((await readProjectHead(f.client, f.project)).head.release_id, base.head.release_id);
+    });
+  }
+});
+
+test('three-way merge combines nonoverlapping text and rejects binary or deletion conflicts before publication', async t => {
+  const server = await protocol(t); const f = projectFixture(t, server); const base = releaseFromProject(f);
+  const path = 'skills/sample/notes.txt'; const body = Buffer.from('one\ntwo\nthree\nfour\nfive\nsix\n');
+  base.bytes.set(path, body); base.manifest.files.push(fileRecord(path, body));
+  const ours = structuredClone(base.manifest); const theirs = structuredClone(base.manifest);
+  const ourBytes = new Map(base.bytes), theirBytes = new Map(base.bytes);
+  ourBytes.set(path, Buffer.from('ONE\ntwo\nthree\nfour\nfive\nsix\n')); theirBytes.set(path, Buffer.from('one\ntwo\nthree\nfour\nfive\nSIX\n'));
+  ours.files = ours.files.map(file => file.path === path ? fileRecord(path, ourBytes.get(path)) : file);
+  theirs.files = theirs.files.map(file => file.path === path ? fileRecord(path, theirBytes.get(path)) : file);
+  const merged = mergeProjectAssets(base.manifest, ours, theirs, base.bytes, ourBytes, theirBytes, join(f.root, '.agent-memory/merge-ok'));
+  assert.equal(merged.bytes.get(path).toString(), 'ONE\ntwo\nthree\nfour\nfive\nSIX\n');
+  ourBytes.set(path, Buffer.from([0, 1])); theirBytes.set(path, Buffer.from([0, 2]));
+  ours.files = ours.files.map(file => file.path === path ? fileRecord(path, ourBytes.get(path)) : file);
+  theirs.files = theirs.files.map(file => file.path === path ? fileRecord(path, theirBytes.get(path)) : file);
+  assert.throws(() => mergeProjectAssets(base.manifest, ours, theirs, base.bytes, ourBytes, theirBytes, join(f.root, '.agent-memory/merge-binary')), /MERGE_CONFLICT/);
+  ours.files = ours.files.filter(file => file.path !== path);
+  assert.throws(() => mergeProjectAssets(base.manifest, ours, theirs, base.bytes, ourBytes, theirBytes, join(f.root, '.agent-memory/merge-delete')), /MERGE_CONFLICT/);
+  assert.ok(existsSync(join(f.root, '.agent-memory/merge-delete/conflicts.json')));
+});
+
+test('configuration can unplug OpenViking; outages fall back visibly without bypassing pinned IDs or integrity errors', async t => {
+  const server = await protocol(t); const f = projectFixture(t, server); const release = await seed(f);
+  const local = new MemoryStore(join(f.root, '.agent-memory', 'memory.db')); await local.put({ id: 'local-only', content: 'Local deployment guidance' }); local.close();
+  f.evolve('openviking', 'config', '--enabled', 'false');
+  await server.update({ unavailable: true });
+  assert.equal(f.evolve('openviking', 'status').backend, 'local');
+  assert.equal(f.evolve('memory', 'search', 'deployment', '--json').results[0].id, 'local-only');
+  const disabled = f.open('disabled', 'sample'); assert.equal(disabled.openviking, undefined);
+  f.evolve('openviking', 'config', '--enabled', 'true', '--failure-policy', 'local');
+  const fallback = f.evolve('context', 'deployment', '--include-memory');
+  assert.equal(fallback.knowledge_backend.active, 'local'); assert.match(fallback.knowledge_backend.fallback_reason, /503|UNKNOWN/);
+  assert.equal(f.open('offline', 'sample').knowledge_backend.active, 'local');
+  const id = `ov:${release.head.release_id}:${Buffer.from('local-only').toString('base64url')}`;
+  assert.throws(() => f.evolve('memory', 'get', id));
+  f.evolve('openviking', 'config', '--failure-policy', 'fail');
+  assert.throws(() => f.evolve('context', 'deployment', '--include-memory'), /503/);
+});
+
+test('frozen Memory rejects writes before calling a model and retains identical logical bytes', async t => {
+  const server = await protocol(t); const f = projectFixture(t, server); const release = await seed(f);
+  const cache = await cacheRelease(f.root, f.client, f.project, release.head.release_id, release.manifest);
+  const snapshot = await freezeKnowledge(join(f.root, '.agent-memory/frozen'), cache, f.client, f.project, release.manifest);
+  const reader = new MemoryStore(join(snapshot.path, 'memory.db'), { readOnly: true });
+  await assert.rejects(reader.put({ id: 'forbidden', content: 'must not persist' }), /read-only/);
+  let called = false;
+  await assert.rejects(reader.extract([{ id: 'm', role: 'user', timestamp: 1, content: 'message' }], { session: 's', llm: { chat: async () => { called = true; return '[]'; } } }), /read-only/);
+  assert.equal(called, false); reader.close();
+  assert.equal(frozenKnowledgeHash(snapshot.path), snapshot.hash);
+  f.env.EVOLVE_KNOWLEDGE_SNAPSHOT = snapshot.path; f.env.AGENT_MEMORY_DB = join(snapshot.path, 'memory.db');
+  assert.throws(() => f.evolve('memory', 'put', 'must not persist'), /read-only/);
+  assert.equal(frozenKnowledgeHash(snapshot.path), snapshot.hash);
+});
+
+test('init commits only the profile and missing bundled Skills, and remains explicitly opt-in', async t => {
+  const server = await protocol(t);
+  const f = projectFixture(t, server, { profile: false });
+  f.write('user-note.txt', 'Unrelated user work');
+  const initialized = f.evolve('--root', f.root, 'openviking', 'init', '--policy', 'evolution.json', '--project-id', f.project.project_id);
+  assert.equal(initialized.project.project_id, f.project.project_id);
+  assert.equal(initialized.project.enabled, true);
+  assert.equal(initialized.project.failure_policy, 'local');
+  assert.throws(() => f.git('show', 'HEAD:user-note.txt'));
+  assert.equal(readFileSync(join(f.root, 'user-note.txt'), 'utf8'), 'Unrelated user work');
+  const manifest = await loadRelease(f.client, f.project, initialized.head.release_id);
+  assert.equal(manifest.verification.kind, 'bootstrap');
+  assert.deepEqual(manifest.verification.replay_ids, []);
+  assert.ok(manifest.files.some(file => file.path === 'skills/workflow-evolve/scripts/evolve-loop.mjs'));
+  assert.equal(f.evolve('openviking', 'init', '--policy', 'evolution.json').head.release_id, initialized.head.release_id);
+  assert.equal(f.evolve('openviking', 'config', '--enabled', 'false').backend, 'local');
+});
+
+test('merged Skill trees are replayed on the frozen knowledge before their release can become current', async t => {
+  const server = await protocol(t); const f = projectFixture(t, server); const base = await seed(f);
+  const ours = await evolved(f, base);
+  const theirs = structuredClone(ours.manifest); const theirBytes = new Map(ours.bytes);
+  const path = 'skills/sample/concurrent.txt'; const body = Buffer.from('Independent machine release note.\n');
+  theirs.files.push(fileRecord(path, body)); theirBytes.set(path, body);
+  const merged = mergeProjectAssets(base.manifest, ours.manifest, theirs, base.bytes, ours.bytes, theirBytes, join(f.root, '.agent-memory/merge-validated'));
+  const commit = createAssetCommit(f.root, ours.replay.candidate, merged.manifest.files, merged.bytes, [], '测试: 合并并发资产');
+  const snapshot = join(f.root, '.agent-memory/fixed-input');
+  const proof = verifySkillCommit(f.root, commit, [{ entry: f.entry, runner: 'tools/replay.mjs', scenarios: 'tools/scenarios.json' }], snapshot);
+  assert.ok(proof.targets[0].observations.every(item => item.passed));
+  assert.equal(proof.knowledge_sha256, frozenKnowledgeHash(snapshot));
+  merged.manifest.source_commit = commit; merged.manifest.parent = ours.head.release_id;
+  merged.manifest.verification.validation_id = proof.id;
+  const result = await publishRelease(f.client, f.project, merged.manifest, merged.bytes, (await readProjectHead(f.client, f.project)).raw);
+  assert.equal((await loadRelease(f.client, f.project, result.release_id)).verification.validation_id, proof.id);
+  assert.equal((await readProjectHead(f.client, f.project)).head.release_id, result.release_id);
+});
+
+test('unplugging a pinned Session uses verified cache and local Memory without any new HTTP request', async t => {
+  const server = await protocol(t); const f = projectFixture(t, server);
+  approve(new Wiki(f.root), 'entries/pinned-rule', 'Pinned deployment rule', { repositories: [f.project.project_id] });
+  const store = new MemoryStore(join(f.root, '.agent-memory', 'memory.db'));
+  await store.put({ id: 'remote', content: 'Remote deployment record 00123' });
+  await store.put({ id: 'local', content: 'Local deployment fallback guidance' }); store.close();
+  selectMemory(f.root, 'remote', 'share'); const release = await seed(f);
+  f.open('unplugged', 'sample');
+  const id = `ov:${release.head.release_id}:${Buffer.from('remote').toString('base64url')}`;
+  assert.equal(f.evolve('memory', 'get', id, '--workflow-session', 'unplugged').content, 'Remote deployment record 00123');
+  f.evolve('openviking', 'config', '--enabled', 'false'); await server.update({ unavailable: true });
+  const before = (await server.inspect()).calls.length;
+  assert.equal(f.evolve('memory', 'get', id, '--workflow-session', 'unplugged').content, 'Remote deployment record 00123');
+  assert.equal(f.evolve('context', 'deployment', '--session', 'unplugged').constraints[0].content.trim(), 'Pinned deployment rule');
+  const fallback = f.evolve('memory', 'search', 'deployment', '--workflow-session', 'unplugged', '--json');
+  assert.equal(fallback.knowledge_backend.active, 'local'); assert.match(fallback.knowledge_backend.fallback_reason, /DISABLED/);
+  assert.ok(fallback.results.some(item => item.id === 'local'));
+  assert.equal((await server.inspect()).calls.length, before);
+});
+
+test('frozen readers retain composite IDs and original versions after a newer remote knowledge release', async t => {
+  const server = await protocol(t); const f = projectFixture(t, server);
+  const local = new MemoryStore(join(f.root, '.agent-memory', 'memory.db')); f.dispose(() => local.close());
+  await local.put({ id: 'versioned', content: 'Original deployment version 00123' });
+  const record = await local.put({ id: 'versioned', content: 'Approved deployment version 00123', sourceMessageIds: ['source:reviewed-message-00123'] });
+  selectMemory(f.root, 'versioned', 'share'); const first = await seed(f);
+  const cache = await cacheRelease(f.root, f.client, f.project, first.head.release_id, first.manifest);
+  const snapshot = await freezeKnowledge(join(f.root, '.agent-memory/metadata-frozen'), cache, f.client, f.project, first.manifest);
+  await local.put({ id: 'versioned', content: 'Later deployment version 00456' }); selectMemory(f.root, 'versioned', 'share');
+  const second = releaseFromProject(f, first.head.release_id);
+  await publishRelease(f.client, f.project, second.manifest, second.bytes, (await readProjectHead(f.client, f.project)).raw);
+  f.env.EVOLVE_KNOWLEDGE_SNAPSHOT = snapshot.path; f.env.AGENT_MEMORY_DB = join(snapshot.path, 'memory.db');
+  const id = `ov:${first.head.release_id}:${Buffer.from('versioned').toString('base64url')}`;
+  const loaded = f.evolve('memory', 'get', id);
+  assert.deepEqual(loaded, { ...record, id });
+  assert.equal(f.evolve('memory', 'search', '00123', '--json').results[0].id, id);
+  assert.equal(frozenKnowledgeHash(snapshot.path), snapshot.hash);
+});

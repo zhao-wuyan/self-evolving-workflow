@@ -6,6 +6,8 @@ import { contentSha256, KnowledgeReads, validateKnowledgeReads, type KnowledgePr
 import { Wiki } from './wiki.js';
 import { buildWikiPrior, wikiLookupScope, type WikiLookupScope, type WikiPrior } from './workflow-knowledge.js';
 import { workflowName } from './workflow-names.js';
+import type { AssetBinding, OpenVikingReadEvidence } from './openviking/types.js';
+import { readRemoteReceipt, validateRemoteReads } from './openviking/evidence.js';
 import {
   bindWorkflowSkill, readWorkflowLink, readWorkflowMarkdown, workflowBlob, workflowHash, workflowHeader, workflowMeta,
   workflowPath, workflowRecord, type ArtifactType, type WorkflowSkill, type OutputSlot,
@@ -73,6 +75,7 @@ interface Run {
   finished_at?: string;
   verdict?: 'done' | 'done_with_concerns';
   knowledge_reads?: KnowledgeReadsReceipt;
+  openviking_reads?: OpenVikingReadEvidence[];
   wiki_priors?: WikiPrior[];
   priors_reuse?: KnowledgePriorReuse[];
   assignments?: Record<string, Assignment>;
@@ -102,6 +105,7 @@ interface Session {
   goals?: SessionGoal[];
   amendments?: SessionAmendment[];
   policy?: SessionPolicy;
+  openviking?: AssetBinding;
   status: 'open' | 'completed';
   revision: number;
   created_at: string;
@@ -329,13 +333,15 @@ export class WorkflowStore {
 
   open(id: string, objective: string, definition: string, steps: WorkflowStep[], change: Mutation, options?: {
     boundaryContract?: BoundaryContract; goals?: SessionGoal[]; policy?: SessionPolicy;
+    openviking?: Pick<AssetBinding, 'project_id' | 'release_id' | 'manifest_sha256'>;
   }) {
     workflowId(id, 'Session ID');
     return this.change(id, 'session.open', change, { objective, definition, steps, ...options }, () => {
       if (this.find(id) || existsSync(join(this.root, '.workflow', 'sessions', id))) throw new InputError('Session ID already exists: ' + id);
+      if (options?.openviking) this.assertAssetSessionAvailable(id);
       const existing = new Set<string>();
       const chain = steps.map(step => {
-        this.validateStep(step);
+        this.validateStep(step, undefined, Boolean(options?.openviking));
         if (existing.has(step.id) || (step.decision_ref && steps.filter(item => item.decision_ref === step.decision_ref).length > 1)) {
           throw new InputError('Duplicate chain step or decision: ' + step.id);
         }
@@ -347,6 +353,7 @@ export class WorkflowStore {
         ...(options?.boundaryContract ? { boundary_contract: options.boundaryContract } : {}),
         ...(options?.goals ? { goals: options.goals } : {}),
         ...(options?.policy ? { policy: options.policy } : {}),
+        ...(options?.openviking ? { openviking: { ...options.openviking, phase: 'preparing' as const } } : {}),
         created_at: new Date().toISOString(), revision: 0, status: 'open', steps: chain, runs: [], aliases: {}, artifacts: {},
       };
       this.save(session);
@@ -354,7 +361,7 @@ export class WorkflowStore {
     });
   }
 
-  private validateStep(step: WorkflowStep) {
+  private validateStep(step: WorkflowStep, commit?: string, preparing = false) {
     workflowId(step.id, 'step ID');
     if (step.decision_ref) workflowId(step.decision_ref, 'decision ID');
     if (step.retry_max !== undefined && (!Number.isSafeInteger(step.retry_max) || step.retry_max < 1)) {
@@ -365,10 +372,57 @@ export class WorkflowStore {
       if (step.command) throw new InputError('Decision-only steps cannot bind a Skill command');
       return;
     }
-    bindWorkflowSkill(this.root, step.command);
+    if (!preparing) bindWorkflowSkill(this.root, step.command, commit);
     if (/^ew-odyssey-(security|defensive)$/.test(workflowName(step.command)) && step.args.includes('--fix')) {
       throw new InputError('This Odyssey mode uses a read-only audit');
     }
+  }
+
+  assertAssetSessionAvailable(id: string) {
+    for (const row of this.db.prepare('SELECT body FROM sessions WHERE id <> ?').all(id)) {
+      const session = JSON.parse(String(row.body)) as Session;
+      if (session.openviking && (session.status === 'open' || ['pending', 'running'].includes(session.openviking.publication?.state ?? ''))) {
+        throw new InputError('OPENVIKING_ACTIVE_SESSION: ' + session.id);
+      }
+    }
+  }
+
+  bindAssets(id: string, binding: { release_id: string; manifest_sha256: string; skill_commit: string }, change: Mutation) {
+    return this.mutate(id, 'session.bind-assets', change, binding, session => {
+      const assets = session.openviking;
+      if (!assets || assets.release_id !== binding.release_id || assets.manifest_sha256 !== binding.manifest_sha256 ||
+          assets.phase === 'ready' && assets.skill_commit !== binding.skill_commit) throw new InputError('OPENVIKING_BINDING_MISMATCH');
+      for (const step of session.steps) this.validateStep(step, binding.skill_commit);
+      Object.assign(assets, binding, { phase: 'ready' });
+      return { openviking: assets };
+    });
+  }
+
+  recordAssetPublication(id: string, publication: NonNullable<AssetBinding['publication']>, change: Mutation) {
+    return this.change(id, 'session.asset-publication', change, publication, () => {
+      const session = this.status(id);
+      changed(id, change.revision, session.revision);
+      if (session.status !== 'completed' || !session.openviking) throw new InputError('OPENVIKING_SESSION_NOT_COMPLETED');
+      const previous = session.openviking.publication?.state;
+      const terminal = ['no_change', 'published'];
+      if (terminal.includes(previous ?? '')) {
+        if (JSON.stringify(session.openviking.publication) !== JSON.stringify(publication)) throw new InputError('OPENVIKING_PUBLICATION_TERMINAL');
+      } else if (publication.state === 'running') this.assertAssetSessionAvailable(id);
+      else if (previous !== 'running' || !['no_change', 'published', 'failed', 'conflict'].includes(publication.state)) {
+        throw new InputError('OPENVIKING_PUBLICATION_TRANSITION');
+      }
+      session.openviking.publication = publication;
+      session.revision++;
+      const { continuation: _continuation, orchestration_revision: _revision, ...saved } = session;
+      this.save(saved);
+      return { session_id: id, orchestration_revision: session.revision, openviking: session.openviking, continuation: nextAction(session) };
+    });
+  }
+
+  wikiRoot(id: string) {
+    const assets = this.status(id).openviking;
+    if (assets?.phase === 'preparing') throw new InputError('OPENVIKING_ASSETS_NOT_READY');
+    return assets ? join(this.root, '.agent-memory', 'openviking', 'releases', assets.release_id, 'wiki') : this.root;
   }
 
   amend(id: string, objective: string, definition: string | undefined, change: Mutation) {
@@ -394,10 +448,11 @@ export class WorkflowStore {
 
   chain(id: string, action: 'insert' | 'replace' | 'skip', step: WorkflowStep, after: string | undefined, change: Mutation) {
     return this.mutate(id, 'chain.' + action, change, { step, after }, session => {
+      if (session.openviking?.phase === 'preparing') throw new InputError('OPENVIKING_ASSETS_NOT_READY');
       const current = session.steps.findIndex(item => item.id === step.id);
       if (action === 'insert') {
         if (current >= 0) throw new InputError('Step already exists: ' + step.id);
-        this.validateStep(step);
+        this.validateStep(step, session.openviking?.skill_commit);
         if (step.decision_ref && session.steps.some(item => item.decision_ref === step.decision_ref)) throw new InputError('Decision already exists');
         const index = after ? session.steps.findIndex(item => item.id === after) + 1 : session.steps.length;
         const firstPending = session.steps.findIndex(item => item.status === 'pending');
@@ -410,7 +465,7 @@ export class WorkflowStore {
         if (original.status !== 'pending') throw new InputError('Select a pending step');
         if (action === 'replace') {
           const replacement = { ...original, ...step, decision_ref: step.decision_ref ?? original.decision_ref };
-          this.validateStep(replacement);
+          this.validateStep(replacement, session.openviking?.skill_commit);
           if (replacement.decision_ref && session.steps.some(item => item.id !== step.id && item.decision_ref === replacement.decision_ref)) {
             throw new InputError('Decision already exists');
           }
@@ -441,11 +496,14 @@ export class WorkflowStore {
       ...(session.amendments ? { amendments: session.amendments } : {}),
       ...(session.policy ? { policy: session.policy } : {}),
       ...(run.knowledge_reads ? { knowledge_reads: run.knowledge_reads } : {}),
+      ...(session.openviking ? { openviking: session.openviking } : {}),
+      ...(run.openviking_reads ? { openviking_reads: run.openviking_reads } : {}),
     };
   }
 
   next(id: string, change: Mutation, gates: string[] = [], stepId?: string) {
     const packet = this.mutate(id, 'run.next', change, { gates, stepId }, session => {
+      if (session.openviking?.phase === 'preparing') throw new InputError('OPENVIKING_ASSETS_NOT_READY');
       if (nextAction(session).action !== 'next') throw new InputError('Workflow continuation does not dispatch a Run');
       const step = session.steps.find(item => item.status === 'pending')!;
       if (stepId && step.id !== stepId) throw new InputError('Run creation must follow the pending chain');
@@ -454,7 +512,7 @@ export class WorkflowStore {
         throw new InputError('Retry limit exceeded for step: ' + step.id);
       }
       const command = workflowName(step.command);
-      const skill = bindWorkflowSkill(this.root, command);
+      const skill = bindWorkflowSkill(this.root, command, session.openviking?.skill_commit);
       const missing = skill.gates.entry.filter(gate => !gates.includes(gate));
       if (missing.length) throw new InputError('Missing entry gates: ' + missing.join(', '));
       const args = step.args.map(arg => arg.replaceAll('{session}', session.id).replaceAll('{intent}', session.objective));
@@ -550,10 +608,11 @@ export class WorkflowStore {
     };
   }
 
-  private cliWikiPriors(knowledge: KnowledgeReadsReceipt | undefined) {
+  private cliWikiPriors(session: Session, knowledge: KnowledgeReadsReceipt | undefined) {
     if (!knowledge || (!knowledge.constraints_bound.length && !knowledge.reads.some(item => item.kind === 'wiki'))) return;
-    if (!existsSync(join(this.root, 'wiki'))) return;
-    const wiki = new Wiki(this.root);
+    const root = this.wikiRoot(session.id);
+    if (!existsSync(join(root, 'wiki'))) return;
+    const wiki = new Wiki(root);
     const priors: WikiPrior[] = [];
     for (const bound of knowledge.constraints_bound) {
       const page = wiki.getEntry(bound.knowledge_id);
@@ -588,6 +647,15 @@ export class WorkflowStore {
     if (trace && knowledge?.priors_reuse) errors.push('Run reuse evidence comes from bound artifact reads');
     const receipt = run.priors_reuse?.length
       ? { ...(knowledge ?? new KnowledgeReads().toJSON()), priors_reuse: run.priors_reuse } : knowledge;
+    const remotePath = join(directory, 'knowledge-reads.json.openviking.json');
+    const remoteBytes = safeFile(directory, 'knowledge-reads.json.openviking.json');
+    const remoteReceipt = remoteBytes ? readRemoteReceipt(remotePath) : undefined;
+    const remoteReads = remoteReceipt?.reads ?? run.openviking_reads;
+    if (remoteReceipt && (remoteReceipt.project_id !== session.openviking?.project_id || remoteReceipt.release_id !== session.openviking?.release_id)) throw new InputError('OPENVIKING_READ_BINDING_MISMATCH');
+    if (remoteReads?.length) {
+      if (!session.openviking) throw new InputError('OPENVIKING_READ_BINDING_MISMATCH');
+      validateRemoteReads(remoteReads, session.openviking.release_id, receipt, this.root);
+    }
     const reportBytes = safeFile(directory, 'report.md');
     if (reportBytes) {
       const reportMeta = workflowHeader(reportBytes.toString('utf8'));
@@ -595,7 +663,7 @@ export class WorkflowStore {
         for (const item of reportMeta.next) {
           if (item && typeof item === 'object' && typeof (item as Record<string, unknown>).command === 'string') {
             const cmd = (item as Record<string, string>).command;
-            try { bindWorkflowSkill(this.root, cmd); } catch { errors.push('Invalid report.md next command: ' + cmd); }
+            try { bindWorkflowSkill(this.root, cmd, session.openviking?.skill_commit); } catch { errors.push('Invalid report.md next command: ' + cmd); }
           }
         }
       }
@@ -604,7 +672,7 @@ export class WorkflowStore {
     for (const slot of run.skill.produces) {
       const isPriorsSlot = slot.alias === 'session-priors' && slot.kind === 'priors' && slot.schema === 'priors/1.0'
         && slot.path === 'outputs/priors.json';
-      const priors = isPriorsSlot ? (run.wiki_priors?.length ? run.wiki_priors : this.cliWikiPriors(knowledge)) : undefined;
+      const priors = isPriorsSlot ? (run.wiki_priors?.length ? run.wiki_priors : this.cliWikiPriors(session, knowledge)) : undefined;
       const generated = priors?.length ? Buffer.from(JSON.stringify({
         _meta: { alias: slot.alias, kind: slot.kind, schema: slot.schema, role: slot.role },
         source_run_id: run.id,
@@ -631,7 +699,7 @@ export class WorkflowStore {
       }
       if (!discovered && slot.required) errors.push('Required artifact: ' + slot.path);
     }
-    return { errors, publications, knowledge: receipt };
+    return { errors, publications, knowledge: receipt, remoteReads };
   }
 
   check(id: string, runId: string, gates: string[]) {
@@ -649,7 +717,7 @@ export class WorkflowStore {
     return this.mutate(id, 'run.complete', change, { runId, summary, verdict, gates }, session => {
       const run = findRun(session, runId);
       changed(runId, change.runRevision, run.revision);
-      const { errors, publications, knowledge } = this.outputs(session, run, gates);
+      const { errors, publications, knowledge, remoteReads } = this.outputs(session, run, gates);
       if (errors.length) throw new InputError(errors.join('\n'));
       const artifacts: Record<string, Artifact> = {};
       const aliases: Record<string, string> = {};
@@ -666,6 +734,7 @@ export class WorkflowStore {
       run.verdict = verdict;
       run.summary = requireText(summary, 'Run summary');
       run.knowledge_reads = knowledge;
+      run.openviking_reads = remoteReads;
       delete run.wiki_priors;
       delete run.priors_reuse;
       findStep(session, run.step_id).status = 'completed';
@@ -737,6 +806,7 @@ export class WorkflowStore {
       if (!session.steps.length || nextAction(session).action !== 'complete') throw new InputError('Resolve pending workflow steps and decisions');
       session.status = 'completed';
       session.completed_at = new Date().toISOString();
+      if (session.openviking) session.openviking.publication = { state: 'pending' };
       const completion = evolveSessionReceipt({ ...session, revision: session.revision + 1 });
       return { status: session.status, completed_at: session.completed_at, completion_id: completion.id };
     });
@@ -794,7 +864,8 @@ export class WorkflowStore {
     return { controller_dir: target, script: join(target, 'aco.py'), config_template: join(target, 'swarm-config-template.json') };
   }
 
-  recordKnowledge(id: string, runId: string, update: (trace: KnowledgeReads, pin: (prior: Omit<WikiPrior, 'content_sha256'>) => void) => void) {
+  recordKnowledge(id: string, runId: string, update: (trace: KnowledgeReads, pin: (prior: Omit<WikiPrior, 'content_sha256'>) => void) => void,
+    remoteReads?: OpenVikingReadEvidence[]) {
     return transaction(this.db, () => {
       const session = this.status(id);
       const run = findRun(session, runId);
@@ -816,6 +887,11 @@ export class WorkflowStore {
         throw new InputError('Wiki snapshot exceeds the Run artifact size limit');
       }
       run.knowledge_reads = trace.toJSON();
+      if (remoteReads?.length) {
+        if (!session.openviking || remoteReads.some(item => item.release_id !== session.openviking!.release_id)) throw new InputError('OPENVIKING_READ_BINDING_MISMATCH');
+        validateRemoteReads(remoteReads, session.openviking.release_id, trace.toJSON(), this.root);
+        (run.openviking_reads ??= []).push(...remoteReads);
+      }
       const { continuation: _continuation, orchestration_revision: _revision, ...saved } = session;
       this.save(saved);
       return run.knowledge_reads;

@@ -1,10 +1,8 @@
 import { createInterface } from 'node:readline';
-import { join } from 'node:path';
-import { InputError, requireText, searchLimit } from './common.js';
-import { MemoryStore } from './memory.js';
-import { Wiki } from './wiki.js';
 import { buildWikiPrior, wikiLookupScope } from './workflow-knowledge.js';
 import { WorkflowStore } from './workflow-runtime.js';
+import { InputError, requireText } from './common.js';
+import { openKnowledgeSources } from './knowledge-sources.js';
 
 const text = { type: 'string' };
 const textList = { type: 'array', items: text };
@@ -19,14 +17,15 @@ const tools = [
   definition('read_artifact', 'Read a bound artifact. For session-priors, use scope if the Wiki lookup had task, path, category or repository filters.', { id: text, scope }, ['id']),
   definition('wiki_context', 'Find applicable project Wiki constraints and reference IDs by keyword. The Run records this search.', { query: text, scope }, ['query']),
   definition('wiki_reference', 'Read the exact Wiki body for an ID returned by wiki_context. The Run records its search and content hash.', { id: text }, ['id']),
-  definition('memory_search', 'Search the local Agent Memory store and record the search for this Run.', { query: text }, ['query']),
+  definition('memory_search', 'Search Agent Memory and record the selected backend and results for this Run.', { query: text }, ['query']),
   definition('memory_get', 'Read the exact Memory record selected from this Run’s search results.', { id: text }, ['id']),
 ];
 
 export async function serveWorkflowRun(store: WorkflowStore, session: string, run: string, db?: string) {
   store.brief(session, run);
-  const memory = new MemoryStore(db ?? join(store.root, '.agent-memory', 'memory.db'));
-  const wiki = new Wiki(store.root);
+  const sources = await openKnowledgeSources(store.root, { session, db, includeMemory: true });
+  const { memory, wiki } = sources;
+  if (!memory) throw new InputError('Memory reader is not configured');
   try {
     for await (const line of createInterface({ input: process.stdin, crlfDelay: Infinity })) {
       const req = JSON.parse(line);
@@ -52,9 +51,9 @@ export async function serveWorkflowRun(store: WorkflowStore, session: string, ru
                 break;
               case 'wiki_context': {
                 const query = requireText(args.query, 'Wiki query');
-                const lookupScope = wikiLookupScope(args.scope);
+                const lookupScope = wikiLookupScope({ ...args.scope, repository: args.scope?.repository ?? sources.repositoryId });
                 const references = wiki.references(query, lookupScope).results;
-                const constraints = wiki.constraints(lookupScope).slice(0, searchLimit());
+                const constraints = wiki.constraints(lookupScope);
                 const trace = store.recordKnowledge(session, run, (receipt, pin) => {
                   const searchId = receipt.recordSearch({
                     source: 'wiki_references', query, filters: lookupScope, returnedIds: references.map(item => item.id),
@@ -86,19 +85,21 @@ export async function serveWorkflowRun(store: WorkflowStore, session: string, ru
                 const found = await memory.search(query);
                 const trace = store.recordKnowledge(session, run, receipt => receipt.recordSearch({
                   source: 'memory', query, returnedIds: found.results.map(item => item.id),
-                }));
-                result = { ...found, search_id: trace.searches.at(-1)?.search_id };
+                }), memory.drainRemoteReads?.());
+                result = { ...found, search_id: trace.searches.at(-1)?.search_id, ...(sources.backend ? { knowledge_backend: sources.backend } : {}) };
                 break;
               }
               case 'memory_get': {
                 const id = requireText(args.id, 'memory ID');
-                const item = memory.get(id);
+                const searched = store.brief(session, run).knowledge_reads?.searches.some(search => search.source === 'memory' && search.returned_ids.includes(id));
+                if (!searched) throw new InputError('Select an ID from this Run’s search results');
+                const item = await memory.get(id);
                 if (!item) throw new InputError('Memory is unavailable: ' + id);
                 store.recordKnowledge(session, run, receipt => {
                   const search = receipt.toJSON().searches.findLast(item => item.source === 'memory' && item.returned_ids.includes(id));
                   if (!search) throw new InputError('Select an ID from this Run’s search results');
                   receipt.recordRead({ kind: 'memory', id, fromSearchId: search.search_id, content: item.content, version: item.version });
-                });
+                }, memory.drainRemoteReads?.());
                 result = item;
                 break;
               }
@@ -122,6 +123,6 @@ export async function serveWorkflowRun(store: WorkflowStore, session: string, ru
       process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: req.id, result: value }) + '\n');
     }
   } finally {
-    memory.close();
+    memory.close?.();
   }
 }

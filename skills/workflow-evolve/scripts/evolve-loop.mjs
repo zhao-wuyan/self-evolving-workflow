@@ -30,10 +30,10 @@ const memoryCli = resolve(root, option('--memory-cli', process.env.AGENT_MEMORY_
 const agy = option('--agy', 'agy');
 const maxRetries = Number(option('--max-retries', '1'));
 if (!Number.isInteger(maxRetries) || maxRetries < 0) throw new Error('--max-retries must be a non-negative integer');
-const historyFlags = ['--session', '--execution', '--history'].filter(name => option(name) !== undefined);
-if (historyFlags.length > 1) throw new Error('Use only one of --session, --execution or --history');
+const historyFlags = ['--session', '--execution', '--history', '--review'].filter(name => option(name) !== undefined);
+if (historyFlags.length > 1) throw new Error('Use only one of --session, --execution, --history or --review');
 if (!historyFlags.length && !has('--allow-empty-history')) {
-  throw new Error('Provide --session, --execution or --history. Use --allow-empty-history only for an explicitly history-free fixture.');
+  throw new Error('Provide --session, --execution, --history or --review. Use --allow-empty-history only for an explicitly history-free fixture.');
 }
 if (!existsSync(entry)) throw new Error(`Skill entry not found: ${entry}`);
 if (!existsSync(scenariosPath)) throw new Error(`Scenario file not found: ${scenariosPath}`);
@@ -43,9 +43,10 @@ process.env.AGENT_MEMORY_CLI = memoryCli;
 if (process.env.AGENT_MEMORY_DB) process.env.AGENT_MEMORY_DB = resolve(root, process.env.AGENT_MEMORY_DB);
 
 const skillEntry = entry.replaceAll('\\', '/').replace(`${root.replaceAll('\\', '/')}/`, '');
-if (!/^skills\/[a-z0-9]+(?:-[a-z0-9]+)*\/SKILL\.md$/i.test(skillEntry)) {
-  throw new Error('--skill must point to skills/<id>/SKILL.md');
-}
+if (!/^skills\/(?:[a-zA-Z0-9_-]+\/)+SKILL\.md$/.test(skillEntry)) throw new Error('--skill must point to skills/**/SKILL.md');
+const workflowCli = process.env.EVOLVE_CLI || join(dirname(memoryCli), 'workflow-cli.js');
+if (!existsSync(workflowCli)) throw new Error('Configure EVOLVE_CLI to the workflow-cli.js shipped with AGENT_MEMORY_CLI');
+jsonCommand(process.execPath, [workflowCli, '--root', root, 'skills', 'inspect', skillEntry, '--commit', git(['rev-parse', 'HEAD'])]);
 const scenarios = JSON.parse(readFileSync(scenariosPath, 'utf8'));
 if (!Array.isArray(scenarios) || scenarios.length < 2 ||
     !scenarios.some(item => item.baseline === false) || !scenarios.some(item => item.baseline === true)) {
@@ -96,8 +97,12 @@ function parseAgyResponse(output) {
 }
 
 function askAgy(prompt) {
-  const output = run(agy, ['--mode', 'plan', '--output-format', 'text', `--print=${prompt}`], { timeout: 600_000 });
-  return parseAgyResponse(output);
+  const promptPath = join(outputDir, 'agy-request-' + randomUUID() + '.txt');
+  writeFileSync(promptPath, prompt);
+  const result = jsonCommand(process.execPath, [workflowCli, '--root', root, 'delegate', '--to', 'agy', '--mode', 'analysis', '--prompt-file', promptPath], {
+    timeout: 600_000, env: option('--agy') ? { AGY_EXECUTABLE: agy } : {},
+  });
+  return parseAgyResponse(result.output);
 }
 
 function validateDiscussion(value) {
@@ -106,6 +111,11 @@ function validateDiscussion(value) {
       typeof value.instruction !== 'string' || !value.instruction.trim() ||
       !Array.isArray(value.evidence) || value.evidence.length === 0 || value.evidence.some(item => typeof item !== 'string' || !item.trim())) {
     throw new Error('Agy discussion omitted approved, priority, instruction or evidence');
+  }
+  if (option('--review')) {
+    const review = JSON.parse(readFileSync(resolve(root, option('--review')), 'utf8'));
+    const sources = new Set(review.signals.flatMap(signal => signal.sources));
+    if (value.evidence.some(source => !sources.has(source))) throw new Error('Agy discussion evidence is outside the current Session review');
   }
   return value;
 }
@@ -118,6 +128,17 @@ function validateConfirmation(value) {
 }
 
 function reviewHistory(roundDir) {
+  const reviewFile = option('--review');
+  if (reviewFile) {
+    const review = JSON.parse(readFileSync(resolve(root, reviewFile), 'utf8'));
+    if (!Array.isArray(review.runs) || !Array.isArray(review.signals)) throw new Error('Invalid serialized Session review');
+    const sources = new Set(review.runs.flatMap(run => [run.source, run.skillReads?.source, run.knowledgeReads?.source, run.retryOf ? run.source + ':retry' : undefined]).filter(Boolean));
+    if (review.signals.some(signal => !Array.isArray(signal.sources) || !signal.sources.length || signal.sources.some(source => !sources.has(source)))) {
+      throw new Error('Session review contains unverifiable sources');
+    }
+    writeFileSync(join(roundDir, 'history.json'), JSON.stringify(review, null, 2) + '\n');
+    return { source: reviewFile, history: review };
+  }
   const session = option('--session');
   const execution = option('--execution');
   const historyFile = option('--history');
@@ -174,6 +195,11 @@ try {
     const roundDir = join(outputDir, `round-${round}`);
     mkdirSync(roundDir, { recursive: true });
     const base = git(['rev-parse', 'HEAD']);
+    const history = reviewHistory(roundDir);
+    if (option('--review') && !history.history.signals.length) {
+      state.rounds.push({ round, base, status: 'no_signals', history: history.source });
+      break;
+    }
     const baseline = scenarioSet.map(scenario => ({ id: scenario.id, expected: scenario.input?.expected,
       observation: runReplay(scenario, base) }));
     writeFileSync(join(roundDir, 'baseline.json'), JSON.stringify(baseline, null, 2) + '\n');
@@ -194,7 +220,6 @@ try {
       state.rounds.push({ round, base, status: 'converged', history: 'all scenarios passed' });
       break;
     }
-    const history = reviewHistory(roundDir);
     let discussion;
     let attempt = 0;
     while (attempt <= maxRetries) {
@@ -225,7 +250,13 @@ try {
     }
     if (has('--auto')) {
       const applied = jsonCommand(process.execPath, [memoryCli, '--root', root, 'evolve', 'apply', replay.id]);
-      const verified = scenarioSet.map(scenario => ({ id: scenario.id, observation: runReplay(scenario, applied.commit) }));
+      let verified;
+      try { verified = scenarioSet.map(scenario => ({ id: scenario.id, observation: runReplay(scenario, applied.commit) })); }
+      catch (error) {
+        const rollback = jsonCommand(process.execPath, [memoryCli, '--root', root, 'evolve', 'rollback', replay.id]);
+        state.rounds.push({ ...result, status: 'rolled_back', applied, rollback, reason: 'Post-apply runner failed' });
+        throw error;
+      }
       const passed = verified.every(item => item.observation.passed);
       if (!passed) {
         jsonCommand(process.execPath, [memoryCli, '--root', root, 'evolve', 'rollback', replay.id]);

@@ -6,7 +6,8 @@ import {
 } from './context-envelope.js';
 import type { CodeGraph } from './code.js';
 import { InputError, NotFoundError, requireText, searchLimit } from './common.js';
-import type { MemorySearchOptions, MemoryStore } from './memory.js';
+import type { MemorySearchOptions } from './memory.js';
+import type { MemoryReader, MemorySearchResult } from './memory-reader.js';
 import type { Wiki, WikiSearchOptions } from './wiki.js';
 import type { WikiContext } from './wiki-entry.js';
 import type { KnowledgeReads } from './knowledge-reads.js';
@@ -14,10 +15,11 @@ import type { KnowledgeReads } from './knowledge-reads.js';
 export interface SearchSources {
   code?: CodeGraph;
   wiki?: Wiki;
-  memory?: MemoryStore;
+  memory?: MemoryReader;
+  repositoryId?: string;
 }
 
-export type SearchScope = keyof SearchSources | 'all';
+export type SearchScope = 'code' | 'wiki' | 'memory' | 'all';
 
 export interface SearchOptions {
   scope?: SearchScope;
@@ -40,7 +42,7 @@ export interface ContextOptions {
 export interface SearchResults {
   code?: Awaited<ReturnType<CodeGraph['search']>>;
   wiki?: ReturnType<Wiki['search']>;
-  memory?: Awaited<ReturnType<MemoryStore['search']>>;
+  memory?: MemorySearchResult;
 }
 
 export function parseScope(scope: string): SearchScope {
@@ -87,8 +89,9 @@ export async function context(
 ): Promise<AgentMemoryEnvelope> {
   const text = requireText(query, 'query');
   const limit = searchLimit(options.limit);
-  const wikiContext = options.context ?? {};
-  const constraints = sources.wiki?.constraints(wikiContext).slice(0, limit) ?? [];
+  const wikiContext = { ...options.context, repository: options.context?.repository ?? sources.repositoryId };
+  const constraints = sources.wiki?.constraints(wikiContext) ?? [];
+  if (Buffer.byteLength(JSON.stringify(constraints)) > 5 * 1024 * 1024) throw new InputError('Wiki snapshot exceeds the Run artifact size limit');
   const references = sources.wiki?.references(text, wikiContext, { ...options.wiki, limit }).results ?? [];
   const workingMemories = options.includeWorkingMemory && sources.memory
     ? (await sources.memory.search(text, { ...options.memory, limit })).results

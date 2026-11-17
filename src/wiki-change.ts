@@ -1,12 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { linkSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import type { DatabaseSync } from 'node:sqlite';
 import { stringify } from 'yaml';
 import { InputError, NotFoundError, openDb, requireText, transaction } from './common.js';
 import { parseFrontmatter } from './upstream/frontmatter.js';
 import { unionSources } from './upstream/merge.js';
 import { readWikiEntryMetadata } from './wiki-entry.js';
 import type { Wiki } from './wiki.js';
+import type { WikiApproval } from './openviking/types.js';
 
 type Operation = 'create' | 'update' | 'promote' | 'retire';
 type State = 'pending' | 'applying' | 'applied';
@@ -215,26 +217,47 @@ export function proposeWikiChange(wiki: Wiki, value: unknown, evidence: readonly
         ...(candidate ? { candidate: { closeout: candidate.closeout, id: candidate.id } } : {}),
         ...(decision ? { review: decision } : {}),
       };
-      const payload = JSON.stringify(change);
-      const id = hash(payload);
-      const previous = db.prepare('SELECT * FROM wiki_changes WHERE id = ?').get(id);
-      if (previous) {
-        const existing = readChange(id, previous);
-        return preview(id, existing.change, existing.state, existing.appliedAt);
-      }
-      if (operation === 'create' && before !== null && before !== after) {
-        throw new InputError(`Wiki entry already exists: ${draft.entry}`);
-      }
-      if (operation !== 'create' && before === after) throw new InputError('Wiki change has no effect');
-      if (operation !== 'retire') assertUniqueContent(wiki, draft.entry, after);
-      db.prepare('INSERT INTO wiki_changes VALUES (?, ?, ?, ?, ?, NULL)').run(
-        id, change.entry, payload, 'pending', new Date().toISOString(),
-      );
-      return preview(id, change, 'pending');
+      return saveChange(wiki, db, change, before);
     });
   } finally {
     db.close();
   }
+}
+
+function saveChange(wiki: Wiki, db: DatabaseSync, change: Change, before: string | null) {
+  const payload = JSON.stringify(change);
+  const id = hash(payload);
+  const previous = db.prepare('SELECT * FROM wiki_changes WHERE id = ?').get(id);
+  if (previous) {
+    const existing = readChange(id, previous);
+    return preview(id, existing.change, existing.state, existing.appliedAt);
+  }
+  if (change.operation === 'create' && before !== null && before !== change.after) {
+    throw new InputError(`Wiki entry already exists: ${change.entry}`);
+  }
+  if (change.operation !== 'create' && before === change.after) throw new InputError('Wiki change has no effect');
+  if (change.operation !== 'retire') assertUniqueContent(wiki, change.entry, change.after);
+  db.prepare('INSERT INTO wiki_changes VALUES (?, ?, ?, ?, ?, NULL)').run(id, change.entry, payload, 'pending', new Date().toISOString());
+  return preview(id, change, 'pending');
+}
+
+export function proposeWikiSnapshot(wiki: Wiki, input: { entry: string; content: string; approval: WikiApproval }, evidence: readonly string[]) {
+  if (hash(input.approval.payload_json) !== exactChangeId(input.approval.id)) throw new InputError('OPENVIKING_WIKI_UNAPPROVED');
+  const approval = object(JSON.parse(input.approval.payload_json), 'Wiki snapshot approval');
+  if (approval.entry !== input.entry || approval.after !== input.content || !['create', 'update', 'promote', 'retire'].includes(String(approval.operation)) ||
+      !Array.isArray(approval.sources) || !approval.sources.length || approval.sources.some(source => typeof source !== 'string' || !source.trim())) {
+    throw new InputError('OPENVIKING_WIKI_UNAPPROVED');
+  }
+  const parsed = parseFrontmatter(input.content.replace(/^\uFEFF/, ''));
+  readWikiEntryMetadata(`wiki/${input.entry}.md`, parsed.frontmatter, parsed.body);
+  const sources = [...new Set(evidence.map(source => requireText(source, 'release evidence')))].sort();
+  if (!sources.length || sources.some(source => /[\r\n]/.test(source))) throw new InputError('Missing release evidence');
+  const db = openChanges(wiki);
+  try {
+    return transaction(db, () => saveChange(wiki, db, {
+      operation: 'create', entry: input.entry, before: null, after: input.content, sources,
+    }, readEntry(entryPath(wiki, input.entry))));
+  } finally { db.close(); }
 }
 
 function assertUniqueContent(wiki: Wiki, entry: string, after: string): void {
