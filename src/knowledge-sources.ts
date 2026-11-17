@@ -14,6 +14,13 @@ import { appendRemoteReads, readRemoteReceipt } from './openviking/evidence.js';
 import { FrozenMemoryReader } from './openviking/frozen.js';
 import type { MemorySearchOptions } from './memory.js';
 import type { KnowledgeReads } from './knowledge-reads.js';
+import { contentSha256 } from './knowledge-reads.js';
+
+export function knowledgeSourceFingerprint(root: string) {
+  const config = process.env.EVOLVE_OPENVIKING_CONFIG;
+  return contentSha256(JSON.stringify([resolve(root), readProject(root), process.env.AGENT_MEMORY_DB,
+    process.env.EVOLVE_KNOWLEDGE_SNAPSHOT, config, config && existsSync(config) ? readFileSync(config, 'utf8') : undefined]));
+}
 
 export interface KnowledgeBackend { configured: 'local' | 'openviking'; active: 'local' | 'openviking' | 'cache'; fallback_reason?: string }
 
@@ -45,7 +52,7 @@ export interface KnowledgeSources {
 }
 export async function openKnowledgeSources(root: string, options: {
   session?: string; db?: string; namespace?: string; wikiRoot?: string; traceFile?: string;
-  memoryBackend?: 'local' | 'openviking'; includeMemory: boolean;
+  memoryBackend?: 'local' | 'openviking'; includeMemory: boolean; releaseId?: string; pinMemory?: boolean;
 }): Promise<KnowledgeSources> {
   const frozen = process.env.EVOLVE_KNOWLEDGE_SNAPSHOT;
   if (frozen) return { wiki: new Wiki(frozen), repositoryId: JSON.parse(readFileSync(join(frozen, 'snapshot.json'), 'utf8')).repository_id,
@@ -71,11 +78,14 @@ export async function openKnowledgeSources(root: string, options: {
   if (receipt && (receipt.project_id !== project.project_id || session?.openviking && receipt.release_id !== session.openviking.release_id)) {
     throw new InputError('OPENVIKING_READ_BINDING_MISMATCH');
   }
-  const pinnedRelease = session?.openviking?.release_id ?? receipt?.release_id;
+  if (options.releaseId && session?.openviking && options.releaseId !== session.openviking.release_id) {
+    throw new InputError('OPENVIKING_READ_BINDING_MISMATCH');
+  }
+  const pinnedRelease = session?.openviking?.release_id ?? receipt?.release_id ?? options.releaseId;
   try {
     const client = new OpenVikingClient(project.enabled === false);
     const release = pinnedRelease ?? (await readProjectHead(client, project)).head.release_id;
-    const cacheScope = session?.openviking ? 'all' : 'wiki';
+    const cacheScope = session?.openviking || options.pinMemory ? 'all' : 'wiki';
     const cached = join(root, '.agent-memory', 'openviking', cacheScope === 'all' ? 'releases' : 'wiki-releases', release, 'manifest.json');
     let manifest;
     if (pinnedRelease && existsSync(cached)) {
@@ -94,7 +104,7 @@ export async function openKnowledgeSources(root: string, options: {
     const openLocal = () => new MemoryStore(options.db ?? join(root, '.agent-memory', 'memory.db'), { namespace: options.namespace });
     let memory: MemoryReader | undefined;
     if (options.includeMemory) {
-      memory = options.memoryBackend === 'local' ? openLocal() : new OpenVikingMemoryReader(root, client, project, release, manifest, Boolean(options.session || sidecar));
+      memory = options.memoryBackend === 'local' ? openLocal() : new OpenVikingMemoryReader(root, client, project, release, manifest, Boolean(options.session || sidecar || options.pinMemory));
       if (options.memoryBackend !== 'local' && (project.enabled === false || project.failure_policy !== 'fail')) memory = new FallbackMemoryReader(memory, openLocal, backend);
     }
     return { wiki: new Wiki(wikiRoot), ...(memory ? { memory } : {}), releaseId: release, repositoryId: project.project_id, backend };

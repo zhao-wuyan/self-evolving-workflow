@@ -15,6 +15,9 @@
     "agent-memory": "dist/cli.js",
     "evolve": "dist/workflow-cli.js"
   },
+  "omp": {
+    "extensions": ["./dist/omp-extension.js"]
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

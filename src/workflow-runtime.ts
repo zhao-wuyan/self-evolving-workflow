@@ -12,6 +12,8 @@ import {
   bindWorkflowSkill, readWorkflowLink, readWorkflowMarkdown, workflowBlob, workflowHash, workflowHeader, workflowMeta,
   workflowPath, workflowRecord, type ArtifactType, type WorkflowSkill, type OutputSlot,
 } from './workflow-skills.js';
+import { initializeHostKnowledge, branchHostKnowledge, findHostKnowledge, recordHostKnowledge, type HostKnowledgeState } from './workflow-host-knowledge.js';
+import type { OmpInvocationContext } from './omp-contract.js';
 
 type StepStatus = 'pending' | 'running' | 'completed' | 'skipped';
 type RunStatus = 'running' | 'blocked' | 'failed' | 'cancelled' | 'sealed';
@@ -251,6 +253,7 @@ export function evolveSessionReceipt(session: Session) {
 
 export class WorkflowStore {
   private readonly db: ReturnType<typeof openDb>;
+  private knowledgeTransactionActive = false;
   constructor(readonly root: string) {
     const path = workflowDbPath(root);
     mkdirSync(dirname(path), { recursive: true });
@@ -261,6 +264,7 @@ export class WorkflowStore {
       'CREATE TABLE IF NOT EXISTS requests (session TEXT NOT NULL, id TEXT NOT NULL, fingerprint TEXT NOT NULL, receipt TEXT NOT NULL, PRIMARY KEY (session, id), FOREIGN KEY (session) REFERENCES sessions(id)) STRICT;',
       'CREATE TABLE IF NOT EXISTS artifacts (session TEXT NOT NULL, id TEXT NOT NULL, body BLOB NOT NULL, PRIMARY KEY (session, id), FOREIGN KEY (session) REFERENCES sessions(id)) STRICT;',
     ].join('\n'));
+    initializeHostKnowledge(this.db);
   }
 
   close() { this.db.close(); }
@@ -556,7 +560,7 @@ export class WorkflowStore {
   }
 
   readSkill(id: string, runId: string, from?: string, destination?: string) {
-    return transaction(this.db, () => {
+    return this.knowledgeTransaction(() => {
       const session = this.find(id);
       if (!session) throw new InputError('Evolve Session not found: ' + id);
       const run = findRun(session, runId);
@@ -589,7 +593,7 @@ export class WorkflowStore {
       if (!Array.isArray(scopes) || !scopes.some(item => JSON.stringify(wikiLookupScope(item)) === expected)) {
         throw new InputError('Wiki scope is outside session-priors; use wiki_context in this Run');
       }
-      transaction(this.db, () => {
+      this.knowledgeTransaction(() => {
         const latest = this.status(id);
         const consumer = findRun(latest, runId);
         if (consumer.status !== 'running' || consumer.priors_reuse?.some(item => item.artifact_id === artifact.id)) return;
@@ -864,12 +868,35 @@ export class WorkflowStore {
     return { controller_dir: target, script: join(target, 'aco.py'), config_template: join(target, 'swarm-config-template.json') };
   }
 
+  private knowledgeTransaction<T>(apply: () => T): T {
+    if (this.knowledgeTransactionActive) return apply();
+    return transaction(this.db, () => {
+      this.knowledgeTransactionActive = true;
+      try { return apply(); }
+      finally { this.knowledgeTransactionActive = false; }
+    });
+  }
+
+  hostKnowledge(eventId: string, hostSession: string) {
+    return branchHostKnowledge(this.db, eventId, hostSession);
+  }
+
+  hostKnowledgeCall(hostSession: string, toolCall: string) {
+    return findHostKnowledge(this.db, hostSession, toolCall);
+  }
+
+  recordHostKnowledge(context: OmpInvocationContext, operation: string, args: unknown, parentId: string | undefined,
+    apply: (state: HostKnowledgeState) => unknown) {
+    return this.knowledgeTransaction(() => recordHostKnowledge(this.db, context, operation, args, parentId, apply));
+  }
+
   recordKnowledge(id: string, runId: string, update: (trace: KnowledgeReads, pin: (prior: Omit<WikiPrior, 'content_sha256'>) => void) => void,
     remoteReads?: OpenVikingReadEvidence[]) {
-    return transaction(this.db, () => {
+    return this.knowledgeTransaction(() => {
       const session = this.status(id);
       const run = findRun(session, runId);
       if (run.status !== 'running') throw new InputError('Select a running Run for knowledge reads');
+      if (safeFile(this.runDir(id, runId), 'knowledge-reads.json')) throw new InputError('Select a single Run knowledge receipt source');
       const trace = new KnowledgeReads(run.knowledge_reads);
       update(trace, prior => {
         const hash = contentSha256(prior.content);

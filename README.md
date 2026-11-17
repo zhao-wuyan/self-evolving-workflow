@@ -63,6 +63,32 @@ evolve --help
 
 严格 `analysis` 在独立进程中仅开放 `read`/`grep`/`glob` 和绑定的 6 个 Run 知识工具，不开放 `bash`/`eval`/`write`/`task` 或环境 MCP；`write` 开放读写工具、`bash`/`lsp` 和绑定知识工具，不覆盖用户审批、不启用 yolo。Codex/OMP 均支持同时传入 `--session`/`--run` 绑定，Agy 保持 standalone，现有 Codex 默认值不变。原生 OMP `task`/eval `agent()` 的职责或 `tools` 名单不是 OS 权限隔离；第二意见须显式选获授权模型，同模型子代理不等于独立模型验证。详见 [OMP 宿主适配](skills/ew-orchestrate/SKILL.md#omp-native-delegation-and-strict-cli-analysis)。
 
+### OMP 插件入口
+
+当前源码尚未发布新版本，开发时先构建再链接；普通 CLI、MCP 和 OMP delegate 入口继续保留：
+
+```sh
+npm run build
+omp plugin link /path/to/self-evolving-workflow
+# 发布包含插件入口的版本后，可用 omp plugin install self-evolving-workflow
+```
+
+插件不要求全局 `evolve`，但工作流控制仍需 `Node.js >= 22.16.0` 可执行文件在 PATH 中。知识工具在 OMP 进程内运行，不启动 CLI/MCP 子进程；只有 `evolve_workflow` 以固定项目目录、argv 数组和 `exec` 审批调用包内 CLI，不经过 shell。原生 npm 插件安装与 marketplace catalog 的 npm source 支持是两回事。
+
+| 工具 | 使用边界 |
+| --- | --- |
+| `evolve_wiki_context` / `evolve_memory_search` | 搜索并记录当前真实 OMP session 的知识使用证据 |
+| `evolve_wiki_reference` / `evolve_memory_get` | 只读取当前有效分支知识范围内已搜索到的 ID |
+| `evolve_read_skill` / `evolve_read_artifact` | 必须显式绑定运行中的 Evolve Run；仍读取固定 Git 版本和已绑定工件 |
+| `evolve_run_binding` | `action: "bind"` 加 `session`、`run` 显式绑定；`unbind` 或 `reset` 清除绑定与搜索资格 |
+| `evolve_workflow` | 用 `argv` 调用 Session、Run、Skills、安装等控制命令；不用于绕过进程内知识工具 |
+
+插件不会自动安装全局 Skills 或改写指令文件。需要运行工作流时，先显式调用 `evolve_workflow`，参数为 `{"argv":["install","--scope","project","--yes"]}`，再由用户将项目 `skills/` 与 `AGENTS.md` 提交到 Git；插件发现 Skills 不替代这份 Git 固定契约。已有副本保留，安装结果的 `kept_sources` 提供路径、版本和内容哈希用于识别冲突，不静默覆盖或删除。
+
+绑定示例：`evolve_run_binding({"action":"bind","session":"your-session","run":"your-run"})`。绑定前的知识使用只留在宿主审计，不补记到后来绑定的 Run；同一 Run 不混用文件与 store 两种知识回执来源。
+
+宿主证据保存在项目 `.agent-memory/workflow.db` 的独立表，OMP 分支只保存关联 ID。切换、分支回退和恢复按活动分支重建状态；`/clear`、unbind、reset 清除搜索资格和 Run 绑定。OpenViking release 在知识范围内固定，配置变化后需显式 reset，再重新绑定和搜索。记录仅覆盖本插件的知识调用，不采集聊天全文或其他插件调用，也不把知识正文注入高优先级提示。
+
 ### 3. 30 秒验证知识检索与首轮 Run
 
 先写入一条本地经验并检索确认生效：

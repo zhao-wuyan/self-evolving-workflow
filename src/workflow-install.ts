@@ -5,6 +5,7 @@ import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { InputError } from './common.js';
 import { workflowName } from './workflow-names.js';
+import { contentSha256 } from './knowledge-reads.js';
 
 const bundle = fileURLToPath(new URL('../', import.meta.url));
 const source = join(bundle, 'skills');
@@ -42,6 +43,11 @@ export function workflowDocument(id: string) {
   const document = workflowDocuments().find(item => item.id === name);
   if (!document) throw new InputError('Unknown workflow: ' + id);
   return readFileSync(join(bundle, document.path), 'utf8');
+}
+
+function skillVersion(content: string) {
+  const header = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(content)?.[1];
+  return header?.match(/^version:[ \t]*(.+)$/m)?.[1] ?? null;
 }
 
 function shippedSkills() {
@@ -158,9 +164,19 @@ export async function installWorkflow(root: string, options: InstallOptions) {
   const { target, instructions } = scopeAndHost(root, scope, host);
   const skills = installSkills(target, requested);
   provisionInstructions(instructions);
+  const keptSources = skills.skills.filter(name => !skills.installed.includes(name)).map(name => {
+    const path = join(target, 'skills', name, 'SKILL.md');
+    const bundledPath = join(source, name, 'SKILL.md');
+    const current = readFileSync(path, 'utf8');
+    const bundled = readFileSync(bundledPath, 'utf8');
+    return { name, path, version: skillVersion(current), sha256: contentSha256(current),
+      bundled_path: bundledPath, bundled_version: skillVersion(bundled),
+      bundled_sha256: contentSha256(bundled), differs: current !== bundled };
+  });
   return {
     status: 'installed', scope, ...(scope === 'user' ? { host: host ?? 'codex' } : {}), root: target, instructions,
     ...skills, kept: skills.skills.filter(name => !skills.installed.includes(name)),
+    kept_sources: keptSources,
     workflows: workflowDocuments().filter(item => skills.skills.includes(item.path.split('/')[1])),
   };
 }
