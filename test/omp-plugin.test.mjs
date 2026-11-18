@@ -157,7 +157,7 @@ test('OMP host and all three Run evidence paths roll back together; unbind never
   const search = await h.call('wiki_context', { query: 'atomic' });
   assert.ok(search.references.some(item => item.id === 'entries/atomic-reference'));
   const page = await h.call('wiki_reference', { id: 'entries/atomic-reference' });
-  assert.equal(page.body, f.agent('kb', 'get', 'entries/atomic-reference', '--kind', 'wiki', '--resolved').content);
+  assert.equal(page.body, f.agent('kb', 'get', 'entries/atomic-reference', '--kind', 'reference', '--resolved').content);
   const selectedPath = join(f.root, 'wiki/entries/atomic-reference.md');
   writeFileSync(selectedPath, readFileSync(selectedPath, 'utf8').replace('Atomic reference body.', 'Changed atomic body.'));
   const beforeChanged = snapshot();
