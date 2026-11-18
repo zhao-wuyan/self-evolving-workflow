@@ -182,7 +182,7 @@ export default function ompExtension(api: OmpExtensionApi) {
   });
   api.registerTool({
     name: 'evolve_workflow', label: 'Evolve workflow', approval: 'exec',
-    description: 'Run workflow control through the bundled CLI using argv (no shell, no global evolve). Knowledge reads use the six in-process evolve_ tools. Project Skills must be explicitly installed and committed; existing copies are preserved, not silently upgraded.',
+    description: 'Run workflow control through the bundled CLI using argv (no shell, no global evolve). Project knowledge reads use the six in-process evolve_ tools. Personal experience accepts experience status/search/get only; these are references, not project constraints. Project Skills must be explicitly installed and committed; existing copies are preserved, not silently upgraded.',
     parameters: z.object({ argv: z.array(z.string()) }),
     execute: (id, args, signal, _onUpdate, ctx) => invoke(id, ctx, signal, async (context, guard) => {
       const result = await runBundledWorkflow(context.root, args.argv, signal);

@@ -251,6 +251,33 @@ export function evolveSessionReceipt(session: Session) {
   };
 }
 
+export function* readCompletedVerificationArtifacts(root: string, id?: string) {
+  const sessions = readEvolveSessions(root, id).filter(session => session.status === 'completed');
+  if (!sessions.length) return;
+  const db = openDb(workflowDbPath(root), true);
+  try {
+    const read = db.prepare('SELECT body FROM artifacts WHERE session = ? AND id = ?');
+    for (const session of sessions) {
+      const finalRuns = new Set(session.steps.flatMap(step => step.status === 'completed' && step.run_id ? [step.run_id] : []));
+      const verified = new Map(session.runs.filter(run => finalRuns.has(run.id) && run.status === 'sealed' && run.verdict === 'done')
+        .map(run => [run.id, run.skill.skill_id]));
+      for (const artifact of Object.values(session.artifacts)) {
+        if (artifact.role !== 'primary' || artifact.status !== 'sealed' || !(
+          artifact.schema === 'test-results/1.0' && verified.get(artifact.run_id) === 'ew-test' ||
+          artifact.schema === 'verification/1.0' && verified.get(artifact.run_id) === 'ew-verify'
+        )) continue;
+        const value = read.get(session.id, artifact.id)?.body;
+        const bytes = value instanceof Uint8Array ? Buffer.from(value.buffer, value.byteOffset, value.byteLength) : undefined;
+        if (!bytes || workflowHash(bytes) !== artifact.sha256) {
+          throw new InputError('Sealed verification bytes are unavailable or changed: ' + artifact.id);
+        }
+        yield { session: session.id, id: artifact.id, sha256: artifact.sha256, schema: artifact.schema,
+          body: workflowRecord(JSON.parse(bytes.toString('utf8').replace(/^\uFEFF/, '')), 'verification artifact') };
+      }
+    }
+  } finally { db.close(); }
+}
+
 export class WorkflowStore {
   private readonly db: ReturnType<typeof openDb>;
   private knowledgeTransactionActive = false;

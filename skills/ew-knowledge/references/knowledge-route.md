@@ -45,6 +45,17 @@ evolve --root <project> search "<query>" --scope memory --scene <scene> --type <
 - 写入接口（`propose`、`changes`、`apply`）必须使用规范化条目 ID、候选 ID 或变更 ID 并校验基线哈希，不接受别名。
 - 零命中时保留查询条件与空结果，禁止把“缺少参考”误写成新的 `constraint`。
 
+## 个人跨项目经验（可选）
+
+个人经验在 OpenViking 私有 `resources/evolve/personal-experience` 下独立保存，不是原生会话采集、项目 release、Memory 或正式 Wiki 约束。默认没有配置，不改变现有项目行为。
+
+在目标 Git 仓库根目录运行 `evolve experience enable`。它用现有 OpenViking 连接确认身份，自动创建或更新用户级 `~/.evolve/experience.json`，只把当前工作树真实路径加入采集名单，不保存或复制 API key。用 `evolve experience status` 查看开关；`evolve experience disable` 在本地关闭当前仓库，不删除远端经验。隔离测试可用绝对路径的 `EVOLVE_EXPERIENCE_CONFIG` 覆盖配置位置。
+
+未启用的仓库可查询已有参考，但不贡献候选；仓库内文件不能代替用户授权。由执行 `ew-verify` / `ew-test` 的 AI 根据实际通过的检查写入提炼字段，不另起模型；只有完成 Session 后的封存证据可被列入 `evolve experience pending`。候选审阅及发布规则见[收尾协议](closeout-protocol.md)。已有项目需更新并提交对应 Skill，已绑定的 Run 不自动换版本。
+
+项目约束优先；当语言、框架及其版本已从当前项目确认，且任务确实有参考需求时，用 `evolve experience search python python@3.12 "并发延迟"` / `evolve experience get python python@3.12 <id>`。在 OMP 中可用 `evolve_workflow` 传对应的 `argv`；不能通过该工具审批或发布。查询词会发给 OpenViking，不包含项目机密。结果应核对适用条件、验证摘要和冲突关系，以正文哈希记录引用；不混入项目 Knowledge Gate，也不当作授权。
+
+
 ## 搜索回执与 `session-priors`
 
 Run MCP 的 `wiki_context` 与 `wiki_reference` 自动记录 `knowledge_reads/1.0` 并在封存时写入回执。分析 Run 还会把已读 Wiki 正文和约束封存为 `session-priors`；后续 Run 通过 `artifact-read` 打开该产物后，`priors_reuse` 自动记录产物 ID、哈希和原 Run ID。

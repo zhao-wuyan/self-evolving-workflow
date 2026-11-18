@@ -58,8 +58,9 @@ export class OpenVikingClient {
 
   async health(): Promise<{ version: string; account_id: string; user_id: string }> {
     // health 是服务状态接口，不使用业务 API envelope。
+    const { url, api_key } = this.config;
     let response: Response;
-    try { response = await fetch(this.config.url + '/health', { headers: { 'X-API-Key': this.config.api_key, Connection: 'close' },
+    try { response = await fetch(url + '/health', { headers: { 'X-API-Key': api_key, Connection: 'close' },
       redirect: 'error', signal: AbortSignal.timeout(120_000) }); }
     catch (error) { if (error instanceof OpenVikingError) throw error; throw new OpenVikingError('OPENVIKING_RESULT_UNKNOWN'); }
     const data = workflowRecord(await response.json(), 'OpenViking health');
@@ -94,7 +95,9 @@ export class OpenVikingClient {
     }
   }
 
-  async identity(project: OpenVikingProject) {
+  get endpoint() { return this.config.url; }
+
+  async identity(project: Pick<OpenVikingProject, 'account_id' | 'user_id'>) {
     const health = this.verifiedIdentity ??= await this.health();
     if (health.account_id !== project.account_id || health.user_id !== project.user_id) throw new OpenVikingError('OPENVIKING_IDENTITY_MISMATCH');
     return health;
@@ -132,6 +135,22 @@ export class OpenVikingClient {
       (item.if_absent && item.expected_sha256) || (!item.if_absent && !item.expected_sha256))) {
       throw new OpenVikingError('OPENVIKING_INVALID_WRITE');
     }
+    await this.writeBatch(root, operations, deferred);
+  }
+
+  async writeExperience(identity: Pick<OpenVikingProject, 'account_id' | 'user_id'>, path: string, body: Buffer, previous?: string) {
+    if (!/^[a-zA-Z0-9_-]+$/.test(identity.user_id) ||
+        !/^[a-z][a-z0-9-]{0,31}\/[a-f0-9]{64}\/[a-f0-9]{64}\.md$/.test(path) ||
+        body.length > 64 * 1024 || previous !== undefined && !/^[a-f0-9]{64}$/.test(previous)) {
+      throw new OpenVikingError('OPENVIKING_INVALID_EXPERIENCE_WRITE');
+    }
+    await this.identity(identity);
+    const root = personalExperienceUri(identity.user_id);
+    await this.writeBatch(root, [{ uri: root + '/' + path, mode: 'replace', content_base64: body.toString('base64'),
+      ...(previous ? { expected_sha256: previous } : { if_absent: true }) }], false);
+  }
+
+  private async writeBatch(root: string, operations: WriteOperation[], deferred: boolean): Promise<void> {
     const value = workflowRecord(await this.request('/api/v1/content/batch-write', {
       root_uri: root, operations, wait: true, skip_conflicts: false, defer_processing: deferred,
     }), 'OpenViking batch result');
@@ -152,6 +171,11 @@ export class OpenVikingClient {
         typeof value.task_id === 'string' && /^[\w-]+$/.test(value.task_id) ? value.task_id : undefined);
     }
   }
+}
+
+export function personalExperienceUri(user: string) {
+  if (!/^[a-zA-Z0-9_-]+$/.test(user)) throw new OpenVikingError('OPENVIKING_IDENTITY_MISMATCH');
+  return `viking://user/${user}/resources/evolve/personal-experience`;
 }
 
 export async function ensureDirectory(client: OpenVikingClient, uri: string) {

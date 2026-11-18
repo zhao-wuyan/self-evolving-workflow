@@ -18,6 +18,8 @@ import { readProject } from './openviking/config.js';
 import { isUnavailable, OpenVikingClient } from './openviking/client.js';
 import { readProjectHead } from './openviking/assets.js';
 import { prepareSession, finishSession } from './openviking/lifecycle.js';
+import { experienceCommand, experienceHelp } from './openviking/experience.js';
+import { completedExperience } from './openviking/experience-candidates.js';
 import { delegate } from './workflow-delegate.js';
 
 const string = { type: 'string' } as const;
@@ -35,6 +37,7 @@ const options = {
   project: string, global: bool, apply: bool, 'knowhow-only': bool,
   scope: string, host: string, skill: strings, yes: bool,
   commit: string, timeout: string,
+  relation: string, related: string, approval: string, limit: string,
 } as const;
 
 const usage = [
@@ -51,6 +54,7 @@ const usage = [
   'evolve install [--scope project|user | --global] [--host codex|claude|agy|omp] [--skill <package>] [--root <project>] [--yes]',
   'evolve workflows [show <id>]',
   'evolve knowledge import [<source>] [--root <destination>] [--project <legacy-id>] [--global] [--knowhow-only] [--apply]',
+  'evolve experience enable|disable|status|pending|review|publish|search|get',
   'evolve mcp --session <id> --run <id>',
   'evolve delegate <prompt> --to codex|agy|omp --mode analysis|write [--role <OMP role>] [--model <selector>] [--timeout <seconds>]',
 ].join('\n');
@@ -110,12 +114,21 @@ function importLegacyKnowledge(root: string, sourceArg: string | undefined, valu
 
 async function runWorkflowCli(argv: string[]) {
   const { positionals: [group, action, ...args], values } = parseArgs({ options, args: argv, allowPositionals: true });
+  if (group === 'experience' && (!action || values.help)) {
+    process.stdout.write(experienceHelp + '\n');
+    return;
+  }
   if (!group || values.help) {
     process.stdout.write(usage + '\n\n' + openVikingHelp + '\n\n' + knowledgeHelp('evolve'));
     return;
   }
   const root = resolve(values.root ?? '.');
   const print = (value: unknown) => process.stdout.write(JSON.stringify(value, null, 2) + '\n');
+  if (group === 'experience') {
+    return print(await experienceCommand(root, action, args, {
+      relation: values.relation, related: values.related, approval: values.approval, limit: values.limit,
+    }));
+  }
   if (group === 'capabilities') return print({ schema_version: 'evolve-workflow/1.0', session: 'evolve-session/1.0',
     features: ['revision-cas', 'request-receipts', 'git-skill-binding', 'atomic-artifact-seal', 'run-knowledge', 'swarm-coordination'] });
   if (group === 'knowledge') {
@@ -229,7 +242,9 @@ async function runWorkflowCli(argv: string[]) {
         return print(store.chain(id(), change, makeStep(cmd, workflowId(values['step-id'], 'step ID')), values['after-step'], mutation()));
       }
       if (action === 'complete') {
-        const result = store.completeSession(id(), mutation());
+        const completion = store.completeSession(id(), mutation());
+        const experience = completedExperience(root, id());
+        const result = experience ? { ...completion, personal_experience: experience } : completion;
         const completed = store.status(id());
         if (!completed.openviking) return print(result);
         try {

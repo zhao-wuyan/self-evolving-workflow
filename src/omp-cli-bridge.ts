@@ -3,11 +3,14 @@ import { basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { InputError } from './common.js';
 
-const commands: Record<string, true> = { session: true, run: true, team: true, skills: true, install: true, workflows: true, capabilities: true, '--help': true };
+const commands: Record<string, true> = { session: true, run: true, team: true, skills: true, install: true, workflows: true, capabilities: true, '--help': true, experience: true };
 
 export async function runBundledWorkflow(root: string, argv: unknown, signal?: AbortSignal) {
   if (!Array.isArray(argv) || !argv.length || argv.some(arg => typeof arg !== 'string' || arg.includes('\0')) || !Object.hasOwn(commands, argv[0])) {
     throw new InputError('Supply a workflow control argv array (session/run/team/skills/install/workflows/capabilities/--help)');
+  }
+  if (argv[0] === 'experience' && !['status', 'search', 'get'].includes(argv[1])) {
+    throw new InputError('OMP may only read personal experience (status/search/get)');
   }
   if (argv.some(arg => arg === '--root' || arg.startsWith('--root='))) throw new InputError('The project root is fixed by the OMP context');
   signal?.throwIfAborted();

@@ -9,13 +9,13 @@
 [![Hosts](https://img.shields.io/badge/Hosts-Codex%20%C2%B7%20Claude%20%C2%B7%20Antigravity%20%C2%B7%20OMP-111827)](#2-安装工作流-skill)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-[30 秒上手](#-快速开始) · [为什么选择它](#-为什么选择-self-evolving-workflow) · [八大工作流 Skills](#-随包提供的-skills) · [Session 与 Run 指南](skills/ew-orchestrate/references/orchestrator-run-loop.md)
+[30 秒上手](#-快速开始) · [为什么选择它](#-为什么选择-self-evolving-workflow) · [跨项目经验开关](#openviking-个人经验库可选) · [八大工作流 Skills](#-随包提供的-skills) · [Session 与 Run 指南](skills/ew-orchestrate/references/orchestrator-run-loop.md)
 
 </div>
 
 ![Self-Evolving Workflow 总览，展示从任务到 Session、Run、验证封存及知识复用的流程](docs/images/workflow-overview.png)
 
-`evolve` 为 Codex CLI、Claude Code、Antigravity、OMP 等代码助手提供可恢复的 **Session / Run 状态机**、自动同步的 **代码图谱 + 项目 Wiki + 工作记忆**，以及依据执行证据提案与回放的 **Skill 自我进化机制**——零外部服务依赖，全部沉淀在你的 Git 仓库中。
+`evolve` 为 Codex CLI、Claude Code、Antigravity、OMP 等代码助手提供可恢复的 **Session / Run 状态机**、**代码图谱 + 项目 Wiki + 工作记忆**，以及依据执行证据提案与回放的 **Skill 自我进化机制**。这些基础能力默认在本地运行，无需 OpenViking；需要跨项目复用验证过的经验时，可按仓库启用 OpenViking 个人经验库。
 
 ---
 
@@ -26,6 +26,7 @@
 | 常见痛点 | 传统提示词模式 | Self-Evolving Workflow |
 | --- | --- | --- |
 | **经验流失** | 会话结束即清零，规范靠每次粘贴提醒 | 本地工作记忆 + 项目 Wiki + 代码图谱，每次 Run 自动触发 `Knowledge Gate` 并记录读取回执 |
+| **跨项目重复踩坑** | Java、Python、Go、前端项目各自重复排查 | 从通过的验证提炼经验，人工确认后才共享，按领域和技术栈版本查找 |
 | **长链路失控** | 中断后难接续，产物散落对话记录 | Session / Run 绑定 Git Skill 版本，支持 `evolve run brief` 断点接管与失败重试链 |
 | **Skill 越改越乱** | 凭感觉改指令，退化难察觉 | 依据真实失败/重试证据起草改进，经沙盒回放对比基线与候选后再应用或回滚 |
 | **界面千篇一律** | 容易落入默认模板，“AI 味”重 | 内置 Impeccable 4.1.3，覆盖方向决策、像素级对照检查、缺陷检测与打磨收尾 |
@@ -73,7 +74,7 @@ omp plugin link /path/to/self-evolving-workflow
 # 发布包含插件入口的版本后，可用 omp plugin install self-evolving-workflow
 ```
 
-插件不要求全局 `evolve`，但工作流控制仍需 `Node.js >= 22.16.0` 可执行文件在 PATH 中。知识工具在 OMP 进程内运行，不启动 CLI/MCP 子进程；只有 `evolve_workflow` 以固定项目目录、argv 数组和 `exec` 审批调用包内 CLI，不经过 shell。原生 npm 插件安装与 marketplace catalog 的 npm source 支持是两回事。
+插件不要求全局 `evolve`，但工作流控制仍需 `Node.js >= 22.16.0` 可执行文件在 PATH 中。项目知识工具在 OMP 进程内运行，不启动 CLI/MCP 子进程；`evolve_workflow` 以固定项目目录、argv 数组和 `exec` 审批调用包内 CLI，不经过 shell。原生 npm 插件安装与 marketplace catalog 的 npm source 支持是两回事。
 
 | 工具 | 使用边界 |
 | --- | --- |
@@ -81,7 +82,7 @@ omp plugin link /path/to/self-evolving-workflow
 | `evolve_wiki_reference` / `evolve_memory_get` | 只读取当前有效分支知识范围内已搜索到的 ID |
 | `evolve_read_skill` / `evolve_read_artifact` | 必须显式绑定运行中的 Evolve Run；仍读取固定 Git 版本和已绑定工件 |
 | `evolve_run_binding` | `action: "bind"` 加 `session`、`run` 显式绑定；`unbind` 或 `reset` 清除绑定与搜索资格 |
-| `evolve_workflow` | 用 `argv` 调用 Session、Run、Skills、安装等控制命令；不用于绕过进程内知识工具 |
+| `evolve_workflow` | 用 `argv` 调用 Session、Run、Skills、安装等控制命令；个人经验只开放 `status`、`search`、`get`，不能启停或发布 |
 
 插件不会自动安装全局 Skills 或改写指令文件。需要运行工作流时，先显式调用 `evolve_workflow`，参数为 `{"argv":["install","--scope","project","--yes"]}`，再由用户将项目 `skills/` 与 `AGENTS.md` 提交到 Git；插件发现 Skills 不替代这份 Git 固定契约。已有副本保留，安装结果的 `kept_sources` 提供路径、版本和内容哈希用于识别冲突，不静默覆盖或删除。
 
@@ -108,6 +109,25 @@ evolve context "回归测试" --session quickstart --include-memory
 - `evolve session status --session <id>` —— 查看当前步骤与进度
 - `evolve run brief <run-id> --session <id>` —— 接管断点时读取任务参数、绑定的 Skill 版本与上游产物引用
 - `evolve run artifact-read <run-id> <alias> --session <id>` —— 读取上游或历史 Run 产物（详见 `evolve workflows show session-run`）
+
+### OpenViking 个人经验库（可选）
+
+**默认关闭。** 在要采集经验的 Git 仓库根目录运行：
+
+```sh
+evolve experience enable    # 复用已有连接，只启用当前仓库
+evolve experience status    # collecting: true 表示当前仓库已启用
+evolve experience disable   # 只停止当前仓库采集，不删除已发布经验
+```
+
+`enable` 使用已有 OpenViking 连接（默认 `~/.openviking/ovcli.conf`；可用绝对路径的 `EVOLVE_OPENVIKING_CONFIG` 覆盖）确认身份，自动创建或更新 `~/.evolve/experience.json`，保留其他仓库的设置。无需手写经验配置、重填 API key 或执行 `evolve openviking init`。`EVOLVE_EXPERIENCE_CONFIG` 可用绝对路径覆盖经验配置文件，适用于隔离测试。若全局安装的版本还没有该命令，源码构建后在本仓库用 `node dist/workflow-cli.js experience enable`。
+
+- **只收有验证证据的经验**：由当前 `ew-test` / `ew-verify` 的 AI 提炼适用条件和验证结果；Session 完成后进本地待审队列，不另调模型。项目需使用并提交包含经验提炼支持的新版 Skills，已有 Run 不换绑。
+- **人确认后才共享**：用 `evolve experience pending` 查看待审候选，`evolve experience review <候选ID>` 预览。启用不上传对话、源码或日志；经明确批准后只发布审阅过的经验，重复项补验证来源，冲突不覆盖旧条目。
+- **按领域和版本按需查**：例如 `evolve experience search python python@3.12 "异步请求阻塞"`。未启用采集的仓库也能查已发布经验；经验仅作参考，项目规则优先。
+
+详见[配置与检索](skills/ew-knowledge/references/knowledge-route.md#个人跨项目经验可选)和[审阅与发布](skills/ew-knowledge/references/closeout-protocol.md#个人跨项目经验审阅)。
+
 
 ---
 

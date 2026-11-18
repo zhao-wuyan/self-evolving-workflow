@@ -66,3 +66,11 @@ evolve --root <project> skills review <execution-id> --project <source-project-i
 ### 5. Verify（回读确认）
 
 执行后回读 `evolve wiki get <id>` / `evolve wiki changes <change-id>` / `evolve closeout show <receipt-id>`，如实报告成功发布的条目 ID 与仍处于待审查/延期/阻塞状态的候选项。
+
+## 个人跨项目经验审阅
+
+`evolve experience pending` 读取配置允许的已完成项目，按封存证据列出本地候选；不上传内容、不另调模型。候选提炼与正式 Wiki 发布、项目完成互不阻塞。
+
+用 `evolve experience review <候选ID>` 查看精确待发正文、目标账号、同栈可能相关项、建议关系和审批哈希。任何正文或验证摘要含有内部信息时暂缓，不应发布。相同经验仅补验证来源；发现冲突先展示双方，不覆盖旧条目。人工裁决重复或冲突时，用 `--relation duplicate|conflict --related <条目ID>` 重新预览。相似候选列表不是完整的冲突证明。
+
+按本协议一次获取固定条目及动作的授权；拒绝或延期不执行写入。批准后由操作者在 CLI 运行 `evolve experience publish <候选ID> --relation <已确认关系> --approval <该预览的哈希>`，如预览指定过 `--related`，发布时带上相同 ID。候选、目的地或参考版本变化须重新预览和确认；`-y` 不是授权。发布回读成功后保留本地回执。服务返回失败或结果未知时，不自动重发，先重新预览并核对远端状态。

@@ -23,6 +23,7 @@ version: 0.2.0
 | Session 或独立 Skill 完成后的收尾沉淀 | `closeout` | 生成候选（不写 Wiki） | `evolve closeout session\|skill\|harvest\|scan` |
 | 审查重复、重叠、冲突与证据 | `review` | 只读 | `evolve closeout show`、`evolve wiki get\|search` |
 | 批准并发布 / 更新 Wiki 候选 | `publish` | 需明确人类授权 | `evolve wiki propose` → `evolve wiki apply` 或 `evolve closeout publish` |
+| 个人跨项目经验 | `experience` | 查询和候选审阅只读，发布需固定人类授权 | `evolve experience status\|pending\|review\|search\|get\|publish` |
 | 迁移 Maestro Flow 旧知识目录 | `migrate` | 先预览再 `--apply` | `evolve knowledge import` / `evolve wiki migrate` |
 | 归因于具体 Skill 的问题或新流程需求 | `evolve` / `skill-design` | 只读回溯 / 路由 | `evolve session review` / `skills review` / `closeout route` → 交由 `workflow-evolve` 或 `ew-skill-design` |
 

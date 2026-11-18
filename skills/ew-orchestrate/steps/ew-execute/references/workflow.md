@@ -33,6 +33,8 @@ Resolve `executionMethod`, `defaultExecutor`, and `domainRouting`. **Checkpoint 
 
 Reuse bound `session-priors` for covered `coding` Wiki scope. Query `wiki_context` + `wiki_reference` (or CLI fallback `evolve context "<query>" --session <session> --include-memory --reads "<run-dir>/knowledge-reads.json"` with `--from-search`) for additional paths/categories, and pass resolved constraints into each Step 4 task prompt.
 
+When a concrete problem warrants cross-project research, optionally run `evolve experience status`, then search personal experience with a domain and versioned stack verified from the current project. Use non-sensitive query terms. Check applicability and conflicts before using a result. These references never override project rules or enter the required Knowledge Gate.
+
 ## Step 4: Wave Parallel Execution
 
 - **Executor routing** (priority: task assignment > explicit method > auto domain routing):
