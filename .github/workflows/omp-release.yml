@@ -1,0 +1,112 @@
+name: 发布 OMP 插件
+
+on:
+  push:
+    tags:
+      - 'omp-v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: omp-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.event.created && !github.event.deleted
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+
+      - name: 校验分支、版本与上游基线
+        id: version
+        shell: bash
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^omp-v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))\.([1-9][0-9]*)$ ]]; then
+            echo '发布标签格式为 omp-v<上游版本>.<OMP 修订号>，例如 omp-v0.2.0.1。' >&2
+            exit 1
+          fi
+          upstream=${BASH_REMATCH[1]}
+          revision=${BASH_REMATCH[5]}
+          if ! git merge-base --is-ancestor HEAD origin/omp-plugin-integration; then
+            echo '标签必须指向 omp-plugin-integration 分支上的提交。' >&2
+            exit 1
+          fi
+          if [[ "$(node -p "require('./package.json').version")" != "$upstream" ]]; then
+            echo "标签中的上游版本 $upstream 与源码 package.json 不一致。" >&2
+            exit 1
+          fi
+          git fetch --no-tags https://github.com/catlog22/self-evolving-workflow.git "refs/tags/v$upstream"
+          base=$(git rev-parse 'FETCH_HEAD^{commit}')
+          if ! git merge-base --is-ancestor "$base" HEAD; then
+            echo "当前提交不包含上游 v$upstream ($base)。" >&2
+            exit 1
+          fi
+          {
+            echo "upstream=$upstream"
+            echo "base=$base"
+            echo "package=$upstream-omp.$revision"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 构建预编译包
+        shell: bash
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.package }}
+        run: |
+          npm ci --no-audit --no-fund
+          npm version "$PACKAGE_VERSION" --no-git-tag-version --ignore-scripts
+          mkdir -p "$RUNNER_TEMP/omp-release"
+          npm pack --json --pack-destination "$RUNNER_TEMP/omp-release" > "$RUNNER_TEMP/omp-pack.json"
+          name=$(jq -er --arg version "$PACKAGE_VERSION" '.[0] | select(.version == $version) | (.files | map(.path)) as $files | select(($files | index("dist/omp-extension.js")) != null and ($files | index("dist/workflow-cli.js")) != null) | .filename' "$RUNNER_TEMP/omp-pack.json")
+          mv "$RUNNER_TEMP/omp-release/$name" "$RUNNER_TEMP/omp-release/self-evolving-workflow-omp.tgz"
+
+      - name: 发布版本并更新 omp-latest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_VERSION: ${{ steps.version.outputs.upstream }}
+          UPSTREAM_SHA: ${{ steps.version.outputs.base }}
+          PACKAGE_VERSION: ${{ steps.version.outputs.package }}
+        run: |
+          tag=$GITHUB_REF_NAME
+          asset=self-evolving-workflow-omp.tgz
+          path=$RUNNER_TEMP/omp-release/$asset
+          upstream_url="https://github.com/catlog22/self-evolving-workflow/commit/$UPSTREAM_SHA"
+          version_notes="来源：omp-plugin-integration ($GITHUB_SHA)。上游基线：[v$UPSTREAM_VERSION]($upstream_url)。包版本：$PACKAGE_VERSION。"
+          if gh release view "$tag" --json isDraft --jq '.isDraft' > "$RUNNER_TEMP/omp-release-draft"; then
+            test "$(cat "$RUNNER_TEMP/omp-release-draft")" = false
+            # 重跑时使用已发布附件，不覆盖固定版本的包。
+            gh release download "$tag" --pattern "$asset" --output "$path" --clobber
+          else
+            gh release create "$tag" "$path" --verify-tag --latest=false \
+              --title "OMP 插件 $tag" --notes "$version_notes"
+          fi
+
+          title="OMP Latest ($tag)"
+          notes="$version_notes 固定下载入口；对应的版本发布：[$tag](/$GITHUB_REPOSITORY/releases/tag/$tag)。"
+          if current=$(gh release view omp-latest --json name --jq '.name'); then
+            if [[ ! "$current" =~ ^OMP\ Latest\ \((omp-v[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?)\)$ ]]; then
+              echo "无法识别 omp-latest 的当前版本：$current" >&2
+              exit 1
+            fi
+            current_tag=${BASH_REMATCH[1]}
+            if [[ "$current_tag" == "$tag" ]]; then
+              exit 0
+            fi
+            # 发布旧版本或重跑旧任务不会把更新入口拨回旧包。
+            if [[ "$(printf '%s\n' "$current_tag" "$tag" | sort -V | tail -n1)" != "$tag" ]]; then
+              exit 0
+            fi
+            gh release upload omp-latest "$path" --clobber
+            gh release edit omp-latest --title "$title" --notes "$notes" --latest=false
+          else
+            gh release create omp-latest "$path" --target "$GITHUB_SHA" --prerelease --latest=false \
+              --title "$title" --notes "$notes"
+          fi
