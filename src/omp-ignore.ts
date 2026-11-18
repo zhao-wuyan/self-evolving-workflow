@@ -6,6 +6,8 @@ import type { OmpExtensionApi } from './omp-contract.js';
 import { gitText } from './openviking/git.js';
 
 const directories = ['.evolve/', '.agent-memory/', '.codegraph/'];
+const projectConfiguration = ['.evolve/openviking.json', '.evolve/evolution.json'];
+const evolveRuntimeExamples = ['.evolve/workflow.db', '.evolve/install-manifest.json', '.evolve/runs/example/report.md', '.evolve/ovcli.conf'];
 const usage = '/evolve-ignore [check|apply|help]';
 const actions = [
   { value: 'check', label: 'check', description: '检查缺少的忽略规则，不写入' },
@@ -32,9 +34,13 @@ export function registerOmpIgnore(api: OmpExtensionApi) {
         if (stat && !stat.isFile()) throw new InputError('仓库根 .gitignore 不是普通文件，未修改。');
         const current = stat ? readFileSync(path, 'utf8') : '';
         const matcher = ignore({ ignorecase: false }).add(current);
-        const missing = directories.filter(dir => !matcher.ignores(dir)).map(dir => `/${dir}`);
+        const missing = directories.slice(1).filter(dir => !matcher.ignores(dir)).map(dir => `/${dir}`);
+        if (!matcher.test('.evolve/').unignored || projectConfiguration.some(file => !matcher.test(file).unignored) ||
+            evolveRuntimeExamples.some(file => !matcher.ignores(file))) {
+          missing.unshift('!/.evolve/', '/.evolve/*', ...projectConfiguration.map(file => `!/${file}`));
+        }
         const indexed = gitText(root, ['ls-files', '-z', '--', ...directories]).split('\0');
-        const tracked = directories.filter(dir => indexed.some(file => file.startsWith(dir)));
+        const tracked = directories.filter(dir => indexed.some(file => file.startsWith(dir) && !projectConfiguration.includes(file)));
         if (missing.length && input === 'apply') {
           const eol = current.match(/\r?\n/)?.[0] ?? '\n';
           const separator = current ? (current.endsWith('\n') ? eol : eol + eol) : '';

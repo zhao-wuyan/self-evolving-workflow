@@ -27,6 +27,7 @@ function harness(root, session = randomUUID(), history = []) {
   const state = { root, session, entries: [...history], failAppend: false };
   const ctx = {
     get cwd() { return state.root; },
+    agent: { kind: 'main' },
     sessionManager: {
       getSessionId: () => state.session,
       getLeafId: () => state.entries.at(-1)?.id ?? null,
@@ -377,7 +378,7 @@ test('OMP experience batches only selected candidates and requires one interacti
 
 test('OMP OpenViking initialization changes Git and publishes only after confirmation', async t => {
   const server = await protocol(t);
-  const f = projectFixture(t, server, { profile: false });
+  const f = projectFixture(t, server, { profile: false, minimalSkills: true });
   const h = harness(f.root);
   f.dispose(() => closeHarnesses(f.root));
   const { handler } = h.commands['evolve-openviking'];
@@ -387,16 +388,17 @@ test('OMP OpenViking initialization changes Git and publishes only after confirm
   const ctx = Object.assign(h.ctx, { hasUI: true, ui: {
     notify(message, level) { assert.equal(level, 'info', message); output = message; },
     async confirm(_title, message) {
-      assert.match(message, /evolution\.json.*\n.*Git 基线.*共享的记忆/);
+      assert.match(message, /\.evolve\/evolution\.json.*只同步资产/);
       return approve;
     },
   } });
   await handler('', ctx);
-  assert.match(output, /默认策略文件：evolution\.json/);
+  assert.match(output, /\.evolve\/evolution\.json，缺失则创建空策略/);
   await handler('init', ctx);
   assert.match(output, /已取消/);
   assert.equal(f.git('rev-parse', 'HEAD'), before);
   assert.equal(existsSync(join(f.root, '.evolve/openviking.json')), false);
+  assert.equal(existsSync(join(f.root, '.evolve/evolution.json')), false);
   assert.deepEqual((await server.inspect()).files, {});
 
   approve = true;
@@ -404,6 +406,68 @@ test('OMP OpenViking initialization changes Git and publishes only after confirm
   assert.match(output, /项目初始化完成/);
   assert.notEqual(f.git('rev-parse', 'HEAD'), before);
   const project = JSON.parse(f.git('show', 'HEAD:.evolve/openviking.json'));
+  assert.equal(project.evolution_policy, '.evolve/evolution.json');
+  assert.deepEqual(JSON.parse(f.git('show', 'HEAD:.evolve/evolution.json')).targets, []);
+  assert.equal(existsSync(join(f.root, 'evolution.json')), true);
   const { head } = await readProjectHead(f.client, project);
   assert.ok(output.includes(head.release_id));
+
+  await h.event('session_start');
+  const args = ['openviking', 'policy', '--entry', f.entry, '--runner', 'tools/replay.mjs', '--scenarios', 'tools/scenarios.json'];
+  const gitBefore = f.git('rev-parse', 'HEAD');
+  const preview = JSON.parse((await h.call('workflow', { argv: args })).stdout);
+  assert.equal(preview.status, 'preview');
+  assert.equal(f.git('rev-parse', 'HEAD'), gitBefore);
+  const argv = [...args, '--apply', preview.preview_id];
+  ctx.agent.kind = 'sub';
+  ctx.ui.confirm = async () => assert.fail('subagent must not prompt');
+  assert.equal((await h.call('workflow', { argv: args })).status, 'deferred');
+  assert.equal((await h.call('workflow', { argv })).status, 'deferred');
+  await handler('init', ctx);
+  ctx.agent.kind = 'main';
+  ctx.ui.confirm = async (title, message) => {
+    assert.match(title, /提交 OpenViking 演进策略/);
+    assert.match(message, /仅创建本地 Git 提交/);
+    return approve;
+  };
+  approve = false;
+  assert.equal((await h.call('workflow', { argv })).status, 'cancelled');
+  assert.equal(f.git('rev-parse', 'HEAD'), gitBefore);
+  approve = true;
+  const policy = JSON.parse((await h.call('workflow', { argv })).stdout);
+  assert.equal(policy.status, 'applied');
+  assert.equal(f.git('rev-parse', 'HEAD'), policy.commit);
+  assert.equal((await readProjectHead(f.client, project)).head.release_id, head.release_id);
+
+  const remoteBefore = (await server.inspect()).calls.length;
+  f.open('child-closeout', 'sample');
+  const run = f.next('child-closeout');
+  f.evolve('run', 'skill-read', run.run_id, '--session', 'child-closeout');
+  f.finish('child-closeout', run, 'Task done');
+  const beforeComplete = (await server.inspect()).calls.length;
+  assert.ok(beforeComplete > remoteBefore);
+  ctx.agent.kind = 'sub';
+  const result = await h.call('workflow', { argv: ['session', 'complete', ...f.fence('child-closeout')] });
+  assert.deepEqual(JSON.parse(result.stdout).asset_publication, { state: 'deferred', reason: 'main_session_required' });
+  assert.equal(f.status('child-closeout').status, 'completed');
+  assert.equal((await server.inspect()).calls.length, beforeComplete);
+});
+
+test('OMP ignore migrates old directory rules without exposing runtime data', async t => {
+  const f = fixture('evolve-omp-ignore-');
+  t.after(async () => { await closeHarnesses(f.root); f.cleanup(); });
+  f.write('.gitignore', '/.evolve/\n/bin/\n');
+  const h = harness(f.root);
+  let prompt;
+  h.ctx.hasUI = true;
+  h.ctx.ui = { notify(text, level) { assert.equal(level, 'info', text); prompt = text; } };
+  const { handler } = h.commands['evolve-ignore'];
+  await handler('check', h.ctx);
+  assert.match(prompt, /未写入/);
+  assert.equal(readFileSync(join(f.root, '.gitignore'), 'utf8'), '/.evolve/\n/bin/\n');
+  await handler('apply', h.ctx);
+  const runtime = ['.evolve/workflow.db', '.evolve/runs/session/report.md', '.evolve/ovcli.conf', '.agent-memory/index', '.codegraph/index'];
+  assert.deepEqual(f.git('check-ignore', '--no-index', '--', ...runtime, '.evolve/openviking.json', '.evolve/evolution.json').split('\n'), runtime);
+  await handler('apply', h.ctx);
+  assert.match(prompt, /规则已齐全/);
 });

@@ -33,9 +33,11 @@ omp plugin install 'https://github.com/zhao-wuyan/self-evolving-workflow/release
 | `/evolve-ignore check` / `/evolve-ignore apply` | 检查或补齐仓库根 `.gitignore` 的 Evolve 运行产物规则。 |
 | `/evolve-migrate [旧项目目录]` | 预览并确认导入 Maestro Flow 的旧知识。 |
 | `/evolve-experience enable` | 为当前仓库开启个人经验采集；发布前需审阅确认。 |
-| `/evolve-openviking init [策略文件]` | 启用项目资产同步。先提交策略及其引用的文件。 |
+| `/evolve-openviking init` | 启用项目资产同步；首次自动准备 `.evolve/evolution.json`。 |
 
 输入命令名后加空格，可查看支持的子命令。后两项需要先[配置 OpenViking](docs/openviking-integration-plan.md#可拔插后端与故障策略)。
+
+空策略只同步资产。需要自动演进 Skill？在 OMP 主会话中说「为当前项目检查可复用的回放用例，并预览 OpenViking 演进策略」。项目绑定和策略可提交到 Git，运行产物和凭据留在本地。
 
 要跑工作流，可请 OMP 用 `evolve_workflow` 为当前项目安装 Skills，再提交新增的 Skill 和引导文件。
 

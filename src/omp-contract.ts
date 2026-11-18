@@ -25,6 +25,7 @@ export interface OmpBranchEntry {
 
 export interface OmpContext {
   cwd: string;
+  agent?: { kind: 'main' | 'sub' };
   sessionManager: {
     getSessionId(): string;
     getLeafId(): string | null;

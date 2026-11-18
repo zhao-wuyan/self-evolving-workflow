@@ -3,13 +3,13 @@ import { basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { InputError } from './common.js';
 
-const commands: Record<string, true> = { session: true, run: true, skill: true, experience: true };
+const commands: Record<string, true> = { session: true, run: true, skill: true, experience: true, openviking: true };
 const skillActions: Record<string, true> = { list: true, install: true, status: true, validate: true, inspect: true, workflows: true };
 
-export async function runBundledWorkflow(root: string, argv: unknown, signal?: AbortSignal) {
+export async function runBundledWorkflow(root: string, argv: unknown, signal?: AbortSignal, agentKind?: 'main' | 'sub') {
   if (!Array.isArray(argv) || !argv.length || argv.some(arg => typeof arg !== 'string' || arg.includes('\0')) ||
       !(Object.hasOwn(commands, argv[0]) || argv.length === 1 && argv[0] === '--help')) {
-    throw new InputError('Supply a workflow control argv array (session/run/skill/experience/--help)');
+    throw new InputError('Supply a workflow control argv array (session/run/skill/experience/openviking/--help)');
   }
   if (argv[0] === 'skill' && !Object.hasOwn(skillActions, argv[1] ?? 'list')) {
     throw new InputError('OMP supports Skill list/install/status/validate/inspect/workflows');
@@ -17,12 +17,17 @@ export async function runBundledWorkflow(root: string, argv: unknown, signal?: A
   if (argv[0] === 'experience' && !['status', 'search', 'get'].includes(argv[1])) {
     throw new InputError('OMP may only read personal experience (status/search/get)');
   }
+  if (argv[0] === 'openviking' && argv[1] !== 'policy') throw new InputError('OMP Agent may only manage OpenViking policy');
+  if (argv[0] === 'openviking' && argv.slice(2).some(arg => !/^(?:--(?:entry|runner|scenarios|apply)(?:=|$))/.test(arg) && arg.startsWith('-'))) {
+    throw new InputError('Invalid OpenViking policy option');
+  }
   if (argv.some(arg => arg === '--root' || arg.startsWith('--root='))) throw new InputError('The project root is fixed by the OMP context');
   signal?.throwIfAborted();
   // OMP 的 process.execPath 是 omp.exe；只依赖 Node，不依赖全局 evolve。
   const node = /^node(?:\.exe)?$/i.test(basename(process.execPath)) ? process.execPath : 'node';
   const cli = fileURLToPath(new URL('./workflow-cli.js', import.meta.url));
   const child = spawn(node, [cli, '--root', root, ...argv], {
+    env: agentKind ? { ...process.env, EVOLVE_OMP_AGENT_KIND: agentKind } : process.env,
     cwd: root, shell: false, windowsHide: true, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stdout = '';

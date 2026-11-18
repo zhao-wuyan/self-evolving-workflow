@@ -433,6 +433,9 @@ async function runWorkflowCli(argv: string[]) {
         const result = experience ? { ...completion, personal_experience: experience } : completion;
         const completed = store.status(id());
         if (!completed.openviking) return print(result);
+        if (process.env.EVOLVE_OMP_AGENT_KIND === 'sub') {
+          return print({ ...result, asset_publication: { state: 'deferred', reason: 'main_session_required' } });
+        }
         try {
           return print({ ...result, asset_publication: await finishSession(root, store, id(), {
             ...mutation(), revision: completed.revision, requestId: undefined,

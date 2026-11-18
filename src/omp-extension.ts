@@ -193,10 +193,23 @@ export default function ompExtension(api: OmpExtensionApi) {
   });
   api.registerTool({
     name: 'evolve_workflow', label: 'Evolve workflow', approval: 'exec',
-    description: 'Run session, run (including run task), and skill control through the bundled CLI using argv (no shell, no global evolve). Project knowledge uses the six in-process evolve_ tools. Personal experience accepts status/search/get only; these are references, not project constraints. Use skill install for project Skills, then commit them; existing copies are preserved unless explicitly upgraded.',
+    description: 'Run session, run (including run task), and skill control through the bundled CLI using argv (no shell, no global evolve). For OpenViking policy use ["openviking","policy"] to inspect; identify an existing reproducible Skill entry, runner and scenarios from the repository or verified Run evidence, then pass --entry, --runner and --scenarios to preview. Never guess tests. Summarize the preview; re-submit the same arguments with --apply <preview_id> to request approval for a local Git commit, not a release. Personal experience accepts status/search/get only. Use skill install for project Skills, then commit them.',
     parameters: z.object({ argv: z.array(z.string()) }),
     execute: (id, args, signal, _onUpdate, ctx) => invoke(id, ctx, signal, async (context, guard) => {
-      const result = await runBundledWorkflow(context.root, args.argv, signal);
+      const argv = args.argv;
+      const mainSession = ctx.agent?.kind === 'main';
+      if (!mainSession && Array.isArray(argv) && argv[0] === 'openviking') {
+        return toolResult({ status: 'deferred', reason: 'OpenViking policy is handled by the main session' });
+      }
+      if (Array.isArray(argv) && argv[0] === 'openviking' && argv[1] === 'policy' &&
+          argv.some(arg => typeof arg === 'string' && (arg === '--apply' || arg.startsWith('--apply=')))) {
+        if (!ctx.hasUI) throw new InputError('OpenViking policy apply requires interactive approval');
+        if (!await ctx.ui.confirm('提交 OpenViking 演进策略？', `${JSON.stringify(argv)}\n仅创建本地 Git 提交，不会发布到 OpenViking。`)) {
+          return toolResult({ status: 'cancelled' });
+        }
+        guard();
+      }
+      const result = await runBundledWorkflow(context.root, argv, signal, mainSession ? 'main' : 'sub');
       guard();
       return { ...toolResult(result), ...(result.exit_code !== 0 ? { isError: true } : {}) };
     }),
