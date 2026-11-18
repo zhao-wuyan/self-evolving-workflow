@@ -40,10 +40,10 @@ contract:
 
 Brainstorm is a planning step inside the Evolve Skill. Explore the problem space, record assumptions and alternatives, and leave a bounded option set for the next chain step.
 
-1. Read the current Session objective, `boundary_contract`, optional `upstream-context`, and available Wiki evidence. Reuse `session-priors` when the lookup scope matches; otherwise query `wiki_context` + `wiki_reference` (Run MCP) or `evolve context "<intent keywords>" --category arch --include-memory --session <session> --reads "<run_dir>/knowledge-reads.json"` + `--from-search` (CLI fallback).
-2. Separate observed facts, user constraints, open questions, and proposed options.
+1. Read the current Session objective, `boundary_contract`, optional `upstream-context`, and available Wiki evidence. Complete the Run Knowledge Gate (`evolve skill workflows show session-run`, reusing `session-priors` or searching `arch` scope with `--category arch` when using CLI `--reads`).
+2. Separate observed facts, user constraints, open questions, and proposed options (`-y` skips interactive prompts and resolves defaults from codebase/Wiki evidence). When deeper codebase grounding or parallel option evaluation is needed, dispatch `cli-explore-agent` / `workflow-analyzer` (`cli_explore_agent` / `workflow_analyzer` in Codex, or inline role instructions when absent; always join/cancel before Step 4).
 3. Compare options against scope, risk, reversibility, and verification cost.
 4. Write `{run_dir}/outputs/brainstorm.json` (with `_meta: { kind: "brainstorm", schema: "brainstorm/1.0", role: "primary", alias: "current-brainstorm" }`) and optional `outputs/context-package.json` (`_meta` matching `context-package/1.0`), citing source evidence for every material conclusion.
-5. Write `{run_dir}/report.md` (`next` proposing `ew-blueprint`, `ew-roadmap`, `ew-analyze`, or `ew-plan` only when durable follow-up artifacts are needed), then seal via `evolve run complete <run_id> --session <session> --actor <actor> --expected-orchestration-revision <rev> --expected-run-revision <rev> --summary "<summary>" --verdict done|done_with_concerns`. If blocked, inspect `evolve run check` and recover via `evolve run transition` / `run cancel`.
+5. Write `{run_dir}/report.md` (`verdict: ready|ready_with_concerns|blocked|failed`; `next` proposing `ew-blueprint`, `ew-roadmap`, `ew-analyze`, or `ew-plan` only when durable follow-up artifacts are needed), then seal or transition the Run per `evolve skill workflows show session-run`.
 
 Do not implement changes in this step. Do not replace the Session chain with an untracked recommendation.

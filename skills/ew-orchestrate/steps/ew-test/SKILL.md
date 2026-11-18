@@ -1,7 +1,7 @@
 ---
 name: ew-test
 description: Run conversational UAT, smoke checks, coverage verification, and optional browser acceptance on verified deliverables
-argument-hint: '[scope] [--smoke] [--auto-fix] [--frontend-verify]'
+argument-hint: '[scope] [-y] [--smoke] [--auto-fix] [--frontend-verify]'
 wiki_categories: [test, review]
 search_profile:
   wiki: [constraints, references]
@@ -71,6 +71,7 @@ contract:
     schema: coverage/1.0
   - path: outputs/uat.md
     kind: uat-log
+    alias: uat-log
     role: attachment
     required: false
     schema: uat-log/1.0

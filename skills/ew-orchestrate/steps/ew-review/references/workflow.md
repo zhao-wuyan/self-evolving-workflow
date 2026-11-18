@@ -14,10 +14,10 @@ Multi-dimensional code and artifact review inside an Evolve Run. Consumes `curre
 
 ## Step 1: Resolve Target & Load Context
 
-1. Read bound inputs via Run MCP (`read_artifact`) or `evolve run artifact-read <run> <alias> --session <session>`:
+1. Read bound inputs via `evolve run read artifact <run> <alias> --session <session>`:
    - `current-execution`: extract changed files, task results, and self-check evidence.
    - `session-priors`: reuse applicable `review` and `coding` Wiki rules for the matching scope.
-2. When the target adds paths or categories outside `session-priors`, query `wiki_context` / `memory_search` and open selected entries with `wiki_reference` / `memory_get` (in CLI-only runs, use `evolve context "<query>" --session <session> --include-memory --reads "<run_dir>/knowledge-reads.json"`, then `evolve wiki get <id> --resolved` / `evolve memory get <id>` with `--reads` and `--from-search <search-id>`).
+2. Complete the Run Knowledge Gate (`evolve skill workflows show session-run`) when the target adds paths or categories outside `session-priors`.
 3. Resolve the target file set:
    - Explicit file/dir path -> inspect those files.
    - `HEAD` / `staged` -> `git diff HEAD` / `git diff --staged`.
@@ -37,10 +37,10 @@ Audit every target file across all four dimensions (under `--tier quick`, focus 
 | `architecture` | Layer/boundary violations, circular dependencies, contract drift, duplicated logic, abstraction leaks |
 
 Parallel execution options:
-- Launch one read-only subagent per dimension (`invoke_subagent` in Antigravity; `spawn_agent` / `spawn_agents_on_csv` in Codex; native `task`/eval `agent()` with `reviewer` in OMP, shared `context` + `tasks[]`; join/cancel every child before advancing, never poll) returning structured findings. Native agent duties do not enforce OS read-only permissions; strict OMP analysis uses the separate CLI bridge below.
-- For an independent cross-model check, explicitly select an authorized model different from the original model. The existing Codex bound command remains:
-  `evolve delegate "<review prompt with target files and scope>" --to codex --mode analysis --session <session> --run <run>`
-  For OMP use `--to omp --mode analysis --model <authorized-selector> --session <session> --run <run>` with the same prompt; for Agy use `--to agy --mode analysis` without binding flags. Explicitly resolve the authorized second-opinion model on each host before claiming cross-model independence. Same-model children are another perspective, not independent-model verification; apply the [host contract](../../../SKILL.md#omp-native-delegation-and-strict-cli-analysis).
+- Launch one read-only subagent per dimension (`workflow-reviewer` / `workflow_reviewer`, via `invoke_subagent` in Antigravity, or `spawn_agent` / `spawn_agents_on_csv` in Codex; OMP hosts use native `task`/eval `agent()` with `reviewer`, batching independent slices through `context` + `tasks[]`; fall back to inline role instructions when absent; join/cancel every spawned subagent before advancing, never poll) returning structured findings. Native agent duties do not enforce OS read-only permissions; strict OMP analysis uses the one-shot CLI worker below.
+- For an independent cross-model check, explicitly select an authorized model different from the original model and run:
+  `evolve agent exec "<review prompt with target files and scope>" --to codex --mode analysis --session <session> --run <run>`
+  (or `--to agy --mode analysis` without `--session`/`--run` for an unbound second opinion; for OMP use `--to omp --mode analysis --model <authorized-selector> --session <session> --run <run>` with the same prompt — OMP is a one-shot restricted worker). Explicitly resolve the authorized second-opinion model on each host before claiming cross-model independence. Same-model children are another perspective, not independent-model verification; apply the [host contract](../../../SKILL.md#omp-native-delegation-and-strict-cli-analysis).
 
 ---
 
@@ -49,7 +49,7 @@ Parallel execution options:
 Cross-check implementation completeness against disk state:
 
 1. Verify every claimed file change and convergence criterion in `current-execution` matches actual repository files.
-2. Check for residual `TODO`/`FIXME`/debug statements, dead imports, broken relative Markdown links, or skipped/weakened assertions in tests.
+2. Check for untracked residual defects in reviewed diffs (`TODO`/`FIXME`/debug statements, dead imports, broken relative Markdown links, or skipped/weakened test assertions), building on `ew-verify`'s `antipattern-report.json` when present rather than duplicating its full scan.
 3. Run the narrowest relevant verification command(s) if not already evidenced in `current-execution` and record the exact exit status and output summary.
 4. Deduplicate findings by `(file, line, root_cause)` and classify each by severity (`critical`, `high`, `medium`, `low`).
 
@@ -64,7 +64,8 @@ Write `{run_dir}/outputs/review.json` matching `review-findings/1.0`:
   "_meta": {
     "kind": "review-findings",
     "schema": "review-findings/1.0",
-    "role": "primary"
+    "role": "primary",
+    "alias": "latest-review"
   },
   "target": "<resolved target>",
   "tier": "standard",
@@ -99,18 +100,12 @@ Write `{run_dir}/outputs/review.json` matching `review-findings/1.0`:
 ```
 
 Write `{run_dir}/report.md` with frontmatter (`verdict`, `summary`, `constraints`, `decisions`, `concerns`, `next`) and fixed sections (`Summary`, `Conclusion/Verdict`, `Discussion/Retrospective`, `Artifacts`, `Handoff/Next`):
-- Set `verdict: ready` when `critical == 0` and `high == 0` and zero-residual check passes.
-- Set `verdict: ready_with_concerns` when non-blocking findings or unverified limits remain; route `next` to `ew-plan` or `ew-execute` when fixes are needed.
-- Set `verdict: blocked` when `critical > 0` or a hard verification failure prevents acceptance.
+- Set `verdict: ready` when `critical == 0` and `high == 0` and the zero-residual check passes -> seal with `--verdict done`.
+- Set `verdict: ready_with_concerns` whenever the review itself finished (`outputs/review.json` written) yet actionable findings remain (`critical > 0`, `high > 0`, non-blocking findings, or unverified limits) so `latest-review` seals and binds for downstream remediation -> route `next` to `ew-plan` (`--gaps`, `needs: [latest-review]`) for multi-file/multi-step fixes, `ew-companion` (`<= 3` findings, `<= 2` files, single concern), or `ew-odyssey-review` (iterative standalone repair campaign) — **never** route `next` directly to `ew-execute` — and seal with `--verdict done_with_concerns`.
+- Set `verdict: blocked` or `failed` ONLY when `ew-review` itself cannot perform a grounded review (missing/unreadable target or broken verification tools) -> do **not** call `run complete`; transition via `evolve run transition` per `evolve skill workflows show session-run`.
 
 ---
 
 ## Step 5: Seal Run & Knowledge Hooks
 
-Seal the Run via:
-
-```text
-evolve run complete <run_id> --session <session_id> --actor <actor_id> --expected-orchestration-revision <orchestration_revision> --expected-run-revision <run_revision> --summary "<observed review summary>" --verdict done|done_with_concerns
-```
-
-Use `--verdict done_with_concerns` when actionable findings remain. Stage any reusable review constraints or defect patterns after sealing through `ew-knowledge` (`evolve workflows show knowledge`).
+Seal or transition the Run per `evolve skill workflows show session-run` (all required reads satisfied; no extra exit gates on `ew-review`). When high-signal recurring defect patterns surface, record them via `evolve kb add --kind episodic "<pattern>" --type error --scene review --session <session_id>`, and after sealing stage reusable review constraints or defect patterns through `ew-knowledge` (`evolve skill workflows show ew-knowledge`).

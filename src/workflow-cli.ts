@@ -1,24 +1,29 @@
 #!/usr/bin/env node
-import { existsSync, lstatSync, realpathSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { CodeGraph } from './code.js';
-import { InputError, requireText } from './common.js';
+import { InputError, NotFoundError, requireText } from './common.js';
 import { knowledgeHelp, knowledgeOptions, runKnowledgeCli } from './knowledge-cli.js';
+import {
+  AgentManager,
+  agentIdentifier,
+  type AgentMode,
+  type AgentSessionStatus,
+  type WorktreeSpec,
+} from './orchestrator.js';
 import { WorkflowStore, workflowId, type Mutation, type WorkflowStep } from './workflow-runtime.js';
-import { bindWorkflowSkill, commandNames, workflowHash, workflowBlob, workflowHeader, workflowPath, workflowStrings } from './workflow-skills.js';
-import { serveWorkflowRun } from './workflow-mcp.js';
-import { Wiki } from './wiki.js';
-import { migrateLegacyWiki } from './wiki-migration.js';
+import { bindWorkflowSkill, commandNames, workflowBlob, workflowHeader, workflowPath, workflowStrings } from './workflow-skills.js';
 import { wikiLookupScope } from './workflow-knowledge.js';
-import { installSkills, installWorkflow, workflowDocument, workflowDocuments } from './workflow-install.js';
+import { installSkills, installStatus, installWorkflow, workflowDocument, workflowDocuments } from './workflow-install.js';
 import { runOpenVikingCli, openVikingHelp } from './openviking/cli.js';
 import { readProject } from './openviking/config.js';
 import { isUnavailable, OpenVikingClient } from './openviking/client.js';
 import { readProjectHead } from './openviking/assets.js';
 import { prepareSession, finishSession } from './openviking/lifecycle.js';
-import { delegate } from './workflow-delegate.js';
+import { experienceCommand, experienceHelp } from './openviking/experience.js';
+import { completedExperience } from './openviking/experience-candidates.js';
+import { delegateOmp } from './workflow-delegate.js';
 
 const string = { type: 'string' } as const;
 const strings = { type: 'string', multiple: true } as const;
@@ -32,31 +37,32 @@ const options = {
   'boundary-contract': string, goals: string, auto: bool, 'goal-mode': bool, status: string, query: string,
   'retry-max': string, 'decision-only': bool, 'target-step': string, confidence: string,
   to: string, tool: string, role: string, mode: string, model: string, cd: string, 'prompt-file': string, path: string,
+  worktree: string, isolate: bool, 'keep-worktree': bool, 'remove-worktree': bool, 'agent-session': string,
+  stream: bool, timeout: string, force: bool, 'delete-branch': bool, branch: string, 'base-ref': string,
   project: string, global: bool, apply: bool, 'knowhow-only': bool,
-  scope: string, host: string, skill: strings, yes: bool,
-  commit: string, timeout: string,
+  scope: string, host: string, skill: strings, yes: bool, upgrade: bool, prune: bool,
+  commit: string, relation: string, related: string, approval: string, limit: string,
 } as const;
 
 const usage = [
-  'evolve capabilities',
-  'evolve session open <objective> --id <id> [--chain <commands>] --actor <id>',
-  'evolve session status|amend|complete --session <id>',
+  'evolve session create <objective> --id <id> [--chain <commands>] --actor <id>',
+  'evolve session get|update|complete --session <id>',
   'evolve session list|resume-view',
-  'evolve session chain insert|replace|skip --session <id> --step-id <id>',
-  'evolve run next|brief|check|skill-read|artifact-read|complete|transition|cancel|decide --session <id>',
+  'evolve session step add|update|delete --session <id> --step-id <id>',
+  'evolve run create|get|check|read|update|complete|cancel|decide --session <id>',
   'evolve run skill-read <run> [<path> --from <from>] --session <id>',
   'evolve run artifact-read <run> <alias> --session <id> [--scope <Wiki scope JSON>]',
-  'evolve team controller|assign|report|cancel|list --session <id> --run <id>',
-  'evolve skills [install <package>... | validate <command> | inspect <entry> --commit <sha>]',
-  'evolve install [--scope project|user | --global] [--host codex|claude|agy|omp] [--skill <package>] [--root <project>] [--yes]',
-  'evolve workflows [show <id>]',
-  'evolve knowledge import [<source>] [--root <destination>] [--project <legacy-id>] [--global] [--knowhow-only] [--apply]',
-  'evolve mcp --session <id> --run <id>',
-  'evolve delegate <prompt> --to codex|agy|omp --mode analysis|write [--role <OMP role>] [--model <selector>] [--timeout <seconds>]',
+  'evolve run decide <decision-id> --verdict proceed|fix|escalate --summary <text> [--confidence <0-100>] [--target-step <step-id>] [--evidence <ref>] --session <id> --actor <id>',
+  'evolve run task controller|add|update|delete|list --session <id> --run <id>',
+  'evolve skill install|upgrade [<package>...] [--scope project|user] [--host codex|claude|agy|omp|all] [--yes]',
+  'evolve skill status|validate|workflows [show <id>]',
+  'evolve agent exec <prompt> --to codex|agy|claude|omp --mode analysis|write [--timeout <ms>]',
+  'evolve agent providers|list|get|create|send|delete|worktree [options]',
+  'evolve experience enable|disable|status|pending|review|publish|search|get',
 ].join('\n');
 
-const knowledgeCommands = new Set(['code', 'wiki', 'memory', 'search', 'context', 'serve', 'closeout', 'skill-design']);
-const skillEvolutionActions = new Set(['review', 'draft', 'replay', 'apply', 'rollback']);
+const knowledgeCommands = new Set(['code', 'kb', 'search']);
+const skillEvolutionActions = new Set(['review', 'draft', 'replay', 'apply', 'rollback', 'retire', 'learnings', 'design']);
 
 async function main(argv: string[]) {
   if (argv[0] === 'openviking') return runOpenVikingCli(argv.slice(1));
@@ -65,15 +71,13 @@ async function main(argv: string[]) {
     args: argv, options: { ...knowledgeOptions, ...options }, allowPositionals: true, strict: false, tokens: true,
   });
   if (group === 'openviking') {
-    const token = tokens.find(token => token.kind === 'positional');
-    return runOpenVikingCli(argv.filter((_, index) => index !== token?.index));
+    const command = tokens.find(token => token.kind === 'positional');
+    return runOpenVikingCli(argv.filter((_, index) => index !== command?.index));
   }
   if (knowledgeCommands.has(group) || (group === 'session' && action === 'review')) {
     return runKnowledgeCli(argv, 'evolve');
   }
-  if (group === 'skills' && skillEvolutionActions.has(action)) {
-    const command = tokens.find(token => token.kind === 'positional');
-    if (command) argv[command.index] = 'evolve';
+  if (group === 'skill' && skillEvolutionActions.has(action)) {
     return runKnowledgeCli(argv, 'evolve');
   }
   return runWorkflowCli(argv);
@@ -91,74 +95,269 @@ function select<T extends string>(value: string | undefined, choices: readonly T
   throw new InputError(label + ' must be one of: ' + choices.join(', '));
 }
 
-function importLegacyKnowledge(root: string, sourceArg: string | undefined, values: {
-  root?: string; global?: boolean; project?: string; apply?: boolean; 'knowhow-only'?: boolean;
-}) {
-  const scope = values.global ? 'global' : 'project';
-  const source = realpathSync(sourceArg ?? (values.global ? join(homedir(), '.maestro') : root));
-  if (!lstatSync(source).isDirectory()) throw new InputError('Legacy knowledge source must be a directory');
-  const destination = values.root ? root : values.global ? join(homedir(), '.evolve') : source;
-  const project = values.project ?? (values.global && !sourceArg ? 'maestro-global' : 'legacy-' + workflowHash(source).slice(7, 23));
-  const entries = migrateLegacyWiki(new Wiki(destination), source, project, values.apply, {
-    scope, knowhowOnly: values['knowhow-only'],
-  });
-  return { source, destination, project, scope, applied: values.apply ?? false,
-    new_entries: entries.filter(entry => !entry.existing).length,
-    existing_entries: entries.filter(entry => entry.existing).length,
-    needs_review: entries.filter(entry => entry.status === 'needs_review').length, entries };
+function withRunContext(root: string, prompt: string, session?: string, run?: string): string {
+  if ((session === undefined) !== (run === undefined)) throw new InputError('Supply both Session and Run identifiers');
+  if (!session || !run) return prompt;
+  const sessionId = workflowId(session, 'Session ID');
+  const runId = workflowId(run, 'Run ID');
+  const store = new WorkflowStore(root);
+  try {
+    const packet = store.brief(sessionId, runId);
+    return prompt + '\n\nEvolve Run context: ' + JSON.stringify({
+      root, session_id: sessionId, run_id: runId, run_dir: packet.run_dir,
+    }) + '\nUse the Evolve CLI to read this Run: evolve run get ' + runId +
+      ' --session ' + sessionId + ' --root ' + JSON.stringify(root) +
+      '. Resolve knowledge with evolve search "<query>" --mode context --session ' + sessionId +
+      ' --reads ' + JSON.stringify(join(packet.run_dir, 'knowledge-reads.json')) +
+      '. Read bound Skills and artifacts with evolve run skill-read and evolve run artifact-read.';
+  } finally {
+    store.close();
+  }
+}
+
+function buildWorktreeSpec(values: {
+  worktree?: string; isolate?: boolean; branch?: string; 'base-ref'?: string;
+}): WorktreeSpec | undefined {
+  if (!values.worktree && !values.isolate && !values.branch && !values['base-ref']) return undefined;
+  return {
+    ...(values.worktree ? { name: values.worktree } : {}),
+    ...(values.branch ? { branch: values.branch } : {}),
+    ...(values['base-ref'] ? { baseRef: values['base-ref'] } : {}),
+  };
+}
+
+function resolvePromptText(cwd: string, promptFile: string | undefined, args: string[]): string {
+  return requireText(promptFile ? readFileSync(resolve(cwd, promptFile), 'utf8') : args.join(' '), 'prompt');
+}
+
+async function delegate(root: string, values: {
+  to?: string; tool?: string; mode?: string; model?: string; role?: string; cd?: string; session?: string; run?: string; 'prompt-file'?: string;
+  worktree?: string; isolate?: boolean; 'keep-worktree'?: boolean; 'agent-session'?: string;
+  stream?: boolean; timeout?: string; branch?: string; 'base-ref'?: string;
+}, args: string[]) {
+  const provider = values.to ?? values.tool ?? 'codex';
+  const mode = select(values.mode ?? 'analysis', ['analysis', 'write'] as const, 'mode') as AgentMode;
+  const cwd = resolve(root, values.cd ?? '.');
+  if (provider === 'omp') {
+    if (buildWorktreeSpec(values) || values['keep-worktree'] || values['agent-session'] || values.stream) {
+      throw new InputError('The restricted OMP worker supports one-shot execution without worktree management, agent sessions or streaming');
+    }
+    return delegateOmp(root, cwd, resolvePromptText(cwd, values['prompt-file'], args), mode, values);
+  }
+  const prompt = withRunContext(root, resolvePromptText(cwd, values['prompt-file'], args), values.session, values.run);
+  const worktree = buildWorktreeSpec(values);
+  const timeoutMs = revision(values.timeout);
+  const stream = Boolean(values.stream);
+
+  const manager = new AgentManager({ root });
+  try {
+    const result = await manager.delegate({
+      provider,
+      prompt,
+      cwd,
+      mode,
+      model: values.model,
+      worktree,
+      keepWorktree: values['keep-worktree'],
+      timeoutMs,
+      agentSessionId: values['agent-session'],
+      inheritStderr: !stream,
+      providerOptions: stream ? { jsonEvents: true } : undefined,
+      onEvent: stream ? event => process.stdout.write(JSON.stringify(event) + '\n') : undefined,
+    });
+    if (stream) return undefined;
+    return {
+      executor: result.executor,
+      output: result.output,
+      ...(result.sessionId ? { session_id: result.sessionId } : {}),
+      ...(result.externalSessionId ? { external_session_id: result.externalSessionId } : {}),
+      ...(result.worktree ? { worktree: result.worktree } : {}),
+    };
+  } finally {
+    await manager.close();
+  }
+}
+
+async function runAgentCommand(root: string, action: string | undefined, args: string[], values: {
+  id?: string; 'agent-session'?: string; to?: string; tool?: string; mode?: string; model?: string; cd?: string; path?: string;
+  session?: string; run?: string; 'prompt-file'?: string; worktree?: string; isolate?: boolean;
+  'remove-worktree'?: boolean; stream?: boolean; timeout?: string; status?: string;
+  force?: boolean; 'delete-branch'?: boolean; branch?: string; 'base-ref'?: string;
+}, print: (value: unknown) => void) {
+  const manager = new AgentManager({ root });
+  try {
+    if (action === 'providers') {
+      return print(manager.listProviders());
+    }
+    if (action === 'list') {
+      const status = values.status === undefined
+        ? undefined
+        : select(values.status, ['idle', 'running', 'completed', 'interrupted', 'failed', 'closed'] as const, 'agent session status') as AgentSessionStatus;
+      return print(manager.listSessions({ provider: values.to ?? values.tool, status }));
+    }
+    if (action === 'status') {
+      const id = agentIdentifier(values.id ?? values['agent-session'] ?? args[0]);
+      const record = manager.getSession(id);
+      if (!record) throw new NotFoundError(`Agent session not found: ${id}`);
+      return print(record);
+    }
+    if (action === 'close') {
+      const id = agentIdentifier(values.id ?? values['agent-session'] ?? args[0]);
+      return print(await manager.closeSession(id, {
+        removeWorktree: Boolean(values['remove-worktree']),
+        forceWorktree: Boolean(values.force),
+        deleteBranch: values['delete-branch'] === undefined ? true : Boolean(values['delete-branch']),
+      }));
+    }
+    if (action === 'start') {
+      const provider = values.to ?? values.tool ?? 'codex';
+      const mode = select(values.mode ?? 'analysis', ['analysis', 'write'] as const, 'mode') as AgentMode;
+      const cwd = resolve(root, values.cd ?? '.');
+      const prompt = withRunContext(root, resolvePromptText(cwd, values['prompt-file'], args), values.session, values.run);
+      const worktree = buildWorktreeSpec(values);
+      const timeoutMs = revision(values.timeout);
+      const stream = Boolean(values.stream);
+      const session = await manager.createSession({
+        sessionId: values.id ?? values['agent-session'],
+        provider,
+        cwd,
+        mode,
+        model: values.model,
+        worktree,
+        timeoutMs,
+        persistent: true,
+        inheritStderr: !stream,
+        providerOptions: stream ? { jsonEvents: true } : undefined,
+      });
+      const turn = await manager.runTurn(session.id, {
+        prompt,
+        mode,
+        model: values.model,
+        timeoutMs,
+        onEvent: stream ? event => process.stdout.write(JSON.stringify(event) + '\n') : undefined,
+      });
+      if (stream) return;
+      return print({ session: manager.getSession(session.id) ?? session, turn });
+    }
+    if (action === 'send') {
+      const id = agentIdentifier(values.id ?? values['agent-session'] ?? args[0]);
+      const promptArgs = values.id || values['agent-session'] ? args : args.slice(1);
+      const cwd = resolve(root, values.cd ?? '.');
+      const prompt = resolvePromptText(cwd, values['prompt-file'], promptArgs);
+      const mode = values.mode === undefined ? undefined : select(values.mode, ['analysis', 'write'] as const, 'mode') as AgentMode;
+      const timeoutMs = revision(values.timeout);
+      const stream = Boolean(values.stream);
+      await manager.resumeSession(id, {
+        ...(mode ? { mode } : {}),
+        ...(values.model ? { model: values.model } : {}),
+        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+        inheritStderr: !stream,
+        ...(stream ? { providerOptions: { jsonEvents: true } } : {}),
+      });
+      const turn = await manager.runTurn(id, {
+        prompt,
+        mode,
+        model: values.model,
+        timeoutMs,
+        onEvent: stream ? event => process.stdout.write(JSON.stringify(event) + '\n') : undefined,
+      });
+      if (stream) return;
+      return print({ session: manager.getSession(id), turn });
+    }
+    if (action === 'worktree') {
+      const sub = select(args[0] ?? 'list', ['list', 'remove'] as const, 'worktree action');
+      if (sub === 'list') return print(manager.worktrees.list(root));
+      const target = requireText(args[1] ?? values.path, 'worktree path');
+      return print(manager.worktrees.remove(resolve(root, target), {
+        force: Boolean(values.force),
+        deleteBranch: Boolean(values['delete-branch']),
+        repoRoot: root,
+      }));
+    }
+    throw new InputError('Unknown agent command: ' + (action ?? ''));
+  } finally {
+    await manager.close();
+  }
 }
 
 async function runWorkflowCli(argv: string[]) {
-  const { positionals: [group, action, ...args], values } = parseArgs({ options, args: argv, allowPositionals: true });
+  const { positionals, values } = parseArgs({ options, args: argv, allowPositionals: true });
+  let [group, action, ...args] = positionals;
+  if (group && !['session', 'run', 'agent', 'skill', 'experience'].includes(group)) throw new InputError('Unknown command: ' + group);
+  if (group === 'experience' && (!action || values.help)) {
+    process.stdout.write(experienceHelp + '\n');
+    return;
+  }
   if (!group || values.help) {
     process.stdout.write(usage + '\n\n' + openVikingHelp + '\n\n' + knowledgeHelp('evolve'));
     return;
   }
+  if (group === 'session') {
+    action = ({ create: 'open', get: 'status', update: 'amend' } as Record<string, string>)[action] ?? action;
+    if (action === 'step') {
+      action = 'chain';
+      args[0] = ({ add: 'insert', update: 'replace', delete: 'skip' } as Record<string, string>)[args[0]] ?? args[0];
+    }
+  }
+  if (group === 'run') {
+    action = ({ get: 'brief', update: 'transition' } as Record<string, string>)[action] ?? action;
+    if (action === 'read') {
+      const kind = select(args.shift(), ['skill', 'artifact'] as const, 'read kind');
+      action = kind === 'skill' ? 'skill-read' : 'artifact-read';
+    }
+  }
+  if (group === 'agent') action = ({ create: 'start', get: 'status', delete: 'close' } as Record<string, string>)[action] ?? action;
   const root = resolve(values.root ?? '.');
   const print = (value: unknown) => process.stdout.write(JSON.stringify(value, null, 2) + '\n');
-  if (group === 'capabilities') return print({ schema_version: 'evolve-workflow/1.0', session: 'evolve-session/1.0',
-    features: ['revision-cas', 'request-receipts', 'git-skill-binding', 'atomic-artifact-seal', 'run-knowledge', 'swarm-coordination'] });
-  if (group === 'knowledge') {
-    if (action !== 'import' || args.length > 1) {
-      throw new InputError('Usage: evolve knowledge import [<source>] [--root <destination>] [--project <legacy-id>] [--global] [--knowhow-only] [--apply]');
-    }
-    return print(importLegacyKnowledge(root, args[0], values));
-  }
-  if (group === 'workflows') {
-    if (!action) return print(workflowDocuments());
-    if (action === 'show' && args.length === 1) {
-      process.stdout.write(workflowDocument(args[0]));
+  if (group === 'experience') return print(await experienceCommand(root, action, args, {
+    relation: values.relation, related: values.related, approval: values.approval, limit: values.limit,
+  }));
+  if (group === 'skill' && action === 'workflows') {
+    if (!args.length) return print(workflowDocuments());
+    if (args[0] === 'show' && args.length === 2) {
+      process.stdout.write(workflowDocument(args[1]));
       return;
     }
-    throw new InputError('Usage: evolve workflows [show <id>]');
+    throw new InputError('Usage: evolve skill workflows [show <id>]');
   }
-  if (group === 'install' && !action) {
+  const installScope = () => {
     if (values.global && values.scope === 'project') throw new InputError('--global selects the user scope');
-    const scope = values.global ? 'user'
+    return values.global ? 'user' as const
       : values.scope === undefined ? undefined : select(values.scope, ['project', 'user'] as const, 'Install scope');
-    return print(await installWorkflow(root, {
-      scope,
-      host: values.host === undefined ? undefined : select(values.host, ['codex', 'claude', 'agy', 'omp'] as const, 'Install host'),
-      skill: values.skill, yes: values.yes,
-    }));
-  }
-  if (group === 'skills') {
-    if (action === 'install') return print(installSkills(root, args));
+  };
+  if (group === 'skill') {
+    if (action === 'install' || action === 'upgrade') {
+      if (args.length) return print(installSkills(root, args, values.host, {
+        upgrade: action === 'upgrade' || Boolean(values.upgrade), prune: Boolean(values.prune), force: Boolean(values.force),
+      }));
+      return print(await installWorkflow(root, {
+        scope: installScope(), host: values.host, skill: values.skill, yes: values.yes,
+        upgrade: action === 'upgrade' || Boolean(values.upgrade), prune: Boolean(values.prune), force: Boolean(values.force),
+      }));
+    }
+    if (action === 'status' && !args.length) return print(installStatus(root, { scope: installScope(), host: values.host }));
     if (action === 'validate') return print(bindWorkflowSkill(root, requireText(args[0], 'Skill command')));
     if (action === 'inspect') {
       const entry = workflowPath(requireText(args[0], 'Skill entry'));
       const commit = requireText(values.commit, 'Skill commit');
       if (!/^skills\/.+\/SKILL\.md$/.test(entry) || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit)) throw new InputError('Invalid Skill entry or commit');
       const header = workflowHeader(workflowBlob(root, commit, entry).toString('utf8'));
-      const required_links = workflowStrings(header.required_links ?? [], 'required_links');
+      const required_links = workflowStrings(header.required_links, 'required_links');
       const packagePath = entry.slice(0, -'SKILL.md'.length);
       for (const link of required_links) workflowBlob(root, commit, packagePath + workflowPath(link.split('#', 1)[0], '.md'));
-      return print({ entry, commit, header, required_links });
+      return print({ entry, commit, required_links });
     }
-    if (!action) return print(commandNames.map(command => ({ command })));
-    throw new InputError('Unknown Skills command: ' + action);
+    if (!action || action === 'list') return print(commandNames.map(command => ({ command })));
+    throw new InputError('Unknown Skill command: ' + action);
   }
-  if (group === 'delegate') return print(await delegate(root, values, action === undefined ? args : [action, ...args]));
+  if (group === 'agent' && action === 'exec') {
+    const delegated = await delegate(root, values, args);
+    if (delegated !== undefined) print(delegated);
+    return;
+  }
+  if (group === 'agent') {
+    return runAgentCommand(root, action, args, values, print);
+  }
   const store = new WorkflowStore(root);
   const id = () => workflowId(values.session ?? values.id, 'Session ID');
   const runId = () => workflowId(values.run ?? args[0], 'Run ID');
@@ -229,7 +428,9 @@ async function runWorkflowCli(argv: string[]) {
         return print(store.chain(id(), change, makeStep(cmd, workflowId(values['step-id'], 'step ID')), values['after-step'], mutation()));
       }
       if (action === 'complete') {
-        const result = store.completeSession(id(), mutation());
+        const completion = store.completeSession(id(), mutation());
+        const experience = completedExperience(root, id());
+        const result = experience ? { ...completion, personal_experience: experience } : completion;
         const completed = store.status(id());
         if (!completed.openviking) return print(result);
         try {
@@ -269,10 +470,12 @@ async function runWorkflowCli(argv: string[]) {
           confidence: values.confidence === undefined ? undefined : Number(values.confidence),
         }));
     }
-    if (group === 'team') {
-      if (action === 'list') return print(store.teamList(id(), runId()));
-      if (action === 'controller') return print(store.swarmController(id(), runId()));
-      const operation = select(action, ['assign', 'report', 'cancel'], 'team operation');
+    if (group === 'run' && action === 'task') {
+      const taskAction = requireText(args.shift(), 'task action');
+      const operationName = ({ add: 'assign', update: 'report', delete: 'cancel' } as Record<string, string>)[taskAction] ?? taskAction;
+      if (operationName === 'list') return print(store.teamList(id(), runId()));
+      if (operationName === 'controller') return print(store.swarmController(id(), runId()));
+      const operation = select(operationName, ['assign', 'report', 'cancel'], 'task operation');
       return print(store.team(id(), workflowId(values.run, 'Run ID'), operation, {
         id: workflowId(values.id ?? args[0], 'assignment ID'),
         role: operation === 'assign' ? workflowId(values.role, 'worker role') : '',
@@ -280,7 +483,6 @@ async function runWorkflowCli(argv: string[]) {
         ...(operation === 'report' ? { result: { summary: requireText(values.summary, 'assignment summary'), sha256: '' } } : {}),
       }, mutation()));
     }
-    if (group === 'mcp') return await serveWorkflowRun(store, id(), workflowId(values.run, 'Run ID'), values.db);
     throw new InputError('Unknown workflow command: ' + [group, action].filter(Boolean).join(' '));
   } finally {
     store.close();

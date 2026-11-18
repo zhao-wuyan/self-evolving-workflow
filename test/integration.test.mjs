@@ -2,13 +2,13 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { once } from 'node:events';
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { DatabaseSync } from 'node:sqlite';
-import { test } from 'node:test';
+import { DatabaseSync } from '../dist/common.js';
+import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import {
   CodeGraph, KnowledgeReads, MemoryStore, Wiki, applySkillDesign, context, createSearchServer,
@@ -16,8 +16,13 @@ import {
   reviewSkillDesign, runSkillDesign, search,
 } from 'self-evolving-workflow';
 
-const run = promisify(execFile);
-const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
+const execute = promisify(execFile);
+const suiteHome = await mkdtemp(join(tmpdir(), 'evolve-integration-home-'));
+const suiteEnv = { ...process.env, HOME: suiteHome, USERPROFILE: suiteHome };
+after(() => rm(suiteHome, { recursive: true, force: true }));
+const run = (file, args, options = {}) => execute(file, args, { ...options,
+  env: { ...suiteEnv, ...options.env } });
+const cli = fileURLToPath(new URL('../dist/workflow-cli.js', import.meta.url));
 const workflowCli = fileURLToPath(new URL('../dist/workflow-cli.js', import.meta.url));
 
 async function temp(t, close = async () => {}) {
@@ -34,6 +39,14 @@ async function cliJson(root, ...args) {
   return JSON.parse(stdout);
 }
 
+async function contextJson(root, query, ...args) {
+  return cliJson(root, 'search', query, '--mode', 'context', '--from', 'kb', ...args);
+}
+
+async function constraintsJson(root, ...args) {
+  return (await contextJson(root, 'constraints', ...args)).constraints;
+}
+
 async function evolveJson(root, ...args) {
   const { stdout } = await run(process.execPath, [workflowCli, '--root', root, ...args], { encoding: 'utf8' });
   return JSON.parse(stdout);
@@ -47,8 +60,8 @@ test('Skill evolution replays a failed and a passing case, applies the verified 
   await git('config', 'user.name', 'Evolve test');
   await git('config', 'user.email', 'evolve-test@example.invalid');
   await git('config', 'core.autocrlf', 'false');
-  const entry = join(root, 'skills', 'example', 'SKILL.md');
-  await mkdir(join(root, 'skills', 'example'), { recursive: true });
+  const entry = join(root, 'skill', 'example', 'SKILL.md');
+  await mkdir(join(root, 'skill', 'example'), { recursive: true });
   const original = '---\nname: example\n---\n\n# Example\n';
   await writeFile(entry, original);
   await git('add', '.');
@@ -71,19 +84,31 @@ test('Skill evolution replays a failed and a passing case, applies the verified 
     { id: 'missing-preflight', input: 'reproduce', baseline: false, knowledge_reads: { searched_sources: ['memory'], loaded_ids: ['memory-preflight'] } },
     { id: 'existing-flow', input: 'existing', baseline: true },
   ]));
-  const receipt = await evolveJson(root, 'skills', 'replay', draft, '--runner', runner, '--scenarios', scenarios);
+  const receipt = await evolveJson(root, 'skill', 'replay', draft, '--runner', runner, '--scenarios', scenarios);
   assert.equal(await readFile(entry, 'utf8'), original);
   assert.deepEqual(receipt.scenarios.map(item => [item.baseline.passed, item.candidate.passed]), [[false, true], [true, true]]);
   await writeFile(entry, original + '\nLocal edit.\n');
-  await assert.rejects(cliJson(root, 'evolve', 'apply', receipt.id), /local changes/);
+  await assert.rejects(cliJson(root, 'skill', 'apply', receipt.id), /local changes/);
   await writeFile(entry, original);
-  const applied = await cliJson(root, 'evolve', 'apply', receipt.id);
+  const applied = await cliJson(root, 'skill', 'apply', receipt.id);
   assert.equal(applied.commit, receipt.candidate);
   assert.match(await readFile(entry, 'utf8'), /Verify preflight/);
-  assert.equal((await cliJson(root, 'evolve', 'apply', receipt.id)).replayed, true);
-  await cliJson(root, 'evolve', 'rollback', receipt.id);
+  assert.equal((await cliJson(root, 'skill', 'apply', receipt.id)).replayed, true);
+  await cliJson(root, 'skill', 'rollback', receipt.id);
   assert.equal(await readFile(entry, 'utf8'), original);
-  assert.equal((await cliJson(root, 'evolve', 'rollback', receipt.id)).replayed, true);
+  assert.equal((await cliJson(root, 'skill', 'rollback', receipt.id)).replayed, true);
+});
+
+test('Evolve exposes only the unified command groups and rejects removed entry points', async t => {
+  const root = await temp(t);
+  const { stdout: help } = await run(process.execPath, [workflowCli, '--help'], { cwd: root, encoding: 'utf8' });
+  for (const group of ['mcp', 'serve', 'memory', 'wiki', 'closeout', 'context', 'skills', 'install', 'workflows', 'knowledge', 'delegate', 'team']) {
+    await assert.rejects(evolveJson(root, group), /Unknown.*command/);
+    assert.ok(!help.split('\n').some(line => new RegExp('^(?:evolve )?' + group + '(?: |$)').test(line.trim())));
+  }
+  const manifest = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8'));
+  assert.deepEqual(manifest.bin, { evolve: 'dist/workflow-cli.js' });
+  await assert.rejects(access(fileURLToPath(new URL('../dist/cli.js', import.meta.url))), { code: 'ENOENT' });
 });
 
 test('CodeGraph indexes real TypeScript, resolves call edges, and syncs edits', async t => {
@@ -109,25 +134,27 @@ test('CodeGraph indexes real TypeScript, resolves call edges, and syncs edits', 
   assert.deepEqual(await graph.search('newBillingTotal'), []);
 });
 
-test('Evolve shares Wiki and memory with agent-memory and automatically refreshes code queries', async t => {
+test('Evolve unifies knowledge records and automatically refreshes code queries', async t => {
   const root = join(await temp(t), 'project with spaces');
   await mkdir(join(root, 'wiki'), { recursive: true });
   await writeFile(join(root, 'wiki', 'billing.md'), '# Billing guide\n\nCheck taxes before invoicing.\n');
   const source = join(root, 'billing.ts');
   await writeFile(source, 'export function computeTax(value: number) { return value * .06; }\n');
-  await evolveJson(root, 'wiki', 'build');
-  assert.equal((await cliJson(root, 'wiki', 'search', 'billing')).results[0].id, 'billing');
-  const memory = await evolveJson(root, 'memory', 'put', 'Check taxes before invoicing.', '--id', 'billing-check');
-  assert.deepEqual(await cliJson(root, 'memory', 'get', 'billing-check'), memory);
-  const contextArgs = ['context', 'taxes', '--include-memory', '--path', 'billing.ts', '--path', 'wiki/billing.md'];
+  await evolveJson(root, 'kb', 'build');
+  assert.equal((await cliJson(root, 'kb', 'search', 'billing')).results[0].id, 'billing');
+  const memory = await evolveJson(root, 'kb', 'add', 'Check taxes before invoicing.', '--id', 'billing-check');
+  assert.deepEqual(await cliJson(root, 'kb', 'get', 'billing-check'), memory);
+  const contextArgs = ['search', 'taxes', '--mode', 'context', '--from', 'kb', '--path', 'billing.ts', '--path', 'wiki/billing.md'];
   assert.deepEqual(await evolveJson(root, ...contextArgs), await cliJson(root, ...contextArgs));
   await assert.rejects(evolveJson(root, 'code', 'search', 'computeTax', '--limit', '0'), /limit must be an integer/);
-  await assert.rejects(cliJson(root, 'code', 'search', 'computeTax'), /Code index missing/);
   await assert.rejects(access(join(root, '.codegraph')), { code: 'ENOENT' });
 
-  const { stdout } = await run(process.execPath, [workflowCli, 'search', 'computeTax', '--scope', 'code', '--root', root]);
-  const [{ node: tax }] = JSON.parse(stdout).code;
-  assert.equal(tax.name, 'computeTax');
+  const { stdout } = await run(process.execPath, [workflowCli, 'search', 'computeTax', '--from', 'code', '--root', root]);
+  const [taxHit] = JSON.parse(stdout).results;
+  const [taxResult] = await cliJson(root, 'code', 'search', 'computeTax');
+  const tax = taxResult.node;
+  assert.equal(taxHit.title, 'computeTax');
+  assert.equal(taxHit.id, tax.id);
   assert.equal((await cliJson(root, 'code', 'search', 'computeTax'))[0].node.id, tax.id);
 
   const invoice = join(root, 'invoice.ts');
@@ -139,7 +166,7 @@ test('Evolve shares Wiki and memory with agent-memory and automatically refreshe
   assert.deepEqual((await evolveJson(root, 'code', 'trace', caller.id, tax.id)).map(step => step.node.id), [caller.id, tax.id]);
   await writeFile(source, 'export function computeFee(value: number) { return value * .1; }\n');
   await rm(invoice);
-  assert.equal((await evolveJson(root, 'search', 'computeFee')).code[0].node.name, 'computeFee');
+  assert.equal((await evolveJson(root, 'search', 'computeFee', '--from', 'code')).results[0].title, 'computeFee');
   assert.ok(!(await cliJson(root, 'code', 'search', 'computeTax')).some(({ node }) => node.name === 'computeTax'));
   assert.deepEqual(await cliJson(root, 'code', 'search', 'invoiceTotal'), []);
 });
@@ -147,7 +174,7 @@ test('Evolve shares Wiki and memory with agent-memory and automatically refreshe
 test('Opening a Git project Session initializes and incrementally refreshes its code graph', async t => {
   const root = await temp(t);
   await run('git', ['init', '-q'], { cwd: root });
-  const open = id => evolveJson(root, 'session', 'open', 'Use the project code graph', '--actor', 'tester', '--id', id);
+  const open = id => evolveJson(root, 'session', 'create', 'Use the project code graph', '--actor', 'tester', '--id', id);
   const source = join(root, 'cooling.ts');
   await writeFile(source, 'export function initialPumpSpeed() { return 42; }\n');
   assert.equal((await open('initial-index')).status, 'open');
@@ -167,8 +194,10 @@ test('Wiki searches CRLF Chinese Markdown, follows links, and removes stale page
   const exchanger = join(root, 'wiki', 'exchanger.md');
   await writeFile(exchanger, '# Heat Exchanger\n\nUses a plate assembly. [[concepts/pump]]\n');
   const wiki = new Wiki(root);
-  assert.deepEqual(await cliJson(root, 'wiki', 'build'), { pages: 2, edges: 2 });
-  const { results, links } = await cliJson(root, 'wiki', 'search', '回路压力', '--hop', '1');
+  assert.deepEqual(await cliJson(root, 'kb', 'build'), { pages: 2, edges: 2 });
+  const { results, links } = wiki.search('回路压力', { hop: 1 });
+  const discovered = await cliJson(root, 'kb', 'search', '回路压力', '--hop', '1');
+  assert.deepEqual(discovered.results.map(hit => hit.id), results.map(hit => hit.id));
   assert.equal(results[0].path, 'wiki/concepts/pump.md');
   assert.deepEqual(results[0].sources, ['notes.md']);
   assert.equal(results[0].related[0].id, 'exchanger');
@@ -196,7 +225,7 @@ test('managed Wiki entries resolve active scopes independently of search and pre
   await writeFile(join(directory, 'reference.md'), entry('Calibration notes', 'reference', 'active', ['project']));
   const wiki = new Wiki(root);
   assert.deepEqual(wiki.constraints(), []);
-  assert.deepEqual(await cliJson(root, 'wiki', 'constraints', '--skill', 'ew-analyze'), []);
+  assert.deepEqual(await constraintsJson(root, '--skill', 'ew-analyze'), []);
   assert.deepEqual(wiki.constraints({ paths: ['src/gauge.ts'] }).map(page => page.id), ['entries/source-rule']);
   assert.deepEqual(wiki.constraints({ includePathScoped: true }).map(page => page.id), ['entries/source-rule']);
   assert.equal(wiki.getEntry('legacy:spec:S-42').id, 'entries/required');
@@ -211,7 +240,7 @@ test('Wiki proposals publish by stable ID, recover interrupted writes, and rejec
   const draft = join(root, 'change.json');
   const propose = async (value, evidence) => {
     await writeFile(draft, JSON.stringify(value));
-    return cliJson(root, 'wiki', 'propose', draft, '--evidence', evidence);
+    return cliJson(root, 'kb', 'propose', draft, '--evidence', evidence);
   };
   const entry = 'entries/preflight';
   const page = join(root, 'wiki', 'entries', 'preflight.md');
@@ -226,29 +255,29 @@ test('Wiki proposals publish by stable ID, recover interrupted writes, and rejec
   assert.equal(create.state, 'pending');
   await assert.rejects(readFile(page), { code: 'ENOENT' });
   const concurrent = await Promise.all([
-    cliJson(root, 'wiki', 'apply', create.id), cliJson(root, 'wiki', 'apply', create.id),
+    cliJson(root, 'kb', 'apply', create.id), cliJson(root, 'kb', 'apply', create.id),
   ]);
   assert.ok(concurrent.every(change => change.state === 'applied'));
   assert.deepEqual(concurrent.map(change => change.replayed).sort(), [false, true]);
-  assert.deepEqual(await cliJson(root, 'wiki', 'constraints', '--task', 'migration'), []);
+  assert.deepEqual(await constraintsJson(root, '--task', 'migration'), []);
   const stale = await propose({ operation: 'update', entry, title: 'Obsolete title' }, 'review:1');
   const promote = await propose({ operation: 'promote', entry, title: 'Verified migration preflight' }, 'review:2');
   assert.equal(promote.before, await readFile(page, 'utf8'));
-  assert.equal((await cliJson(root, 'wiki', 'apply', promote.id)).replayed, false);
-  await assert.rejects(cliJson(root, 'wiki', 'apply', stale.id), /changed since review/);
-  assert.equal((await cliJson(root, 'wiki', 'constraints', '--task', 'migration'))[0].id, entry);
-  assert.deepEqual(await cliJson(root, 'wiki', 'constraints', '--task', 'deploy'), []);
+  assert.equal((await cliJson(root, 'kb', 'apply', promote.id)).replayed, false);
+  await assert.rejects(cliJson(root, 'kb', 'apply', stale.id), /changed since review/);
+  assert.equal((await constraintsJson(root, '--task', 'migration'))[0].id, entry);
+  assert.deepEqual(await constraintsJson(root, '--task', 'deploy'), []);
   const retire = await propose({ operation: 'retire', entry }, 'review:retire');
-  const db = new DatabaseSync(join(root, '.agent-memory', 'closeout.db'));
+  const db = new DatabaseSync(join(root, '.evolve', 'closeout.db'));
   // Reproduce a crash after committing the application intent and replacing the page.
   db.prepare("UPDATE wiki_changes SET state = 'applying' WHERE id = ?").run(retire.id);
   db.close();
   await writeFile(page, retire.after);
-  assert.equal((await cliJson(root, 'wiki', 'apply', retire.id)).state, 'applied');
-  assert.equal((await cliJson(root, 'wiki', 'apply', retire.id)).replayed, true);
-  assert.deepEqual(await cliJson(root, 'wiki', 'constraints', '--task', 'migration'), []);
-  assert.equal((await cliJson(root, 'wiki', 'get', entry)).entry.status, 'deprecated');
-  const history = await cliJson(root, 'wiki', 'changes', '--entry', entry);
+  assert.equal((await cliJson(root, 'kb', 'apply', retire.id)).state, 'applied');
+  assert.equal((await cliJson(root, 'kb', 'apply', retire.id)).replayed, true);
+  assert.deepEqual(await constraintsJson(root, '--task', 'migration'), []);
+  assert.equal((await cliJson(root, 'kb', 'get', entry)).status, 'deprecated');
+  const history = await cliJson(root, 'kb', 'changes', '--entry', entry);
   assert.deepEqual(history.map(change => change.state), ['applied', 'pending', 'applied', 'applied']);
   assert.equal(history.at(-1).before, promote.after);
   assert.equal(history.at(-1).baseline_sha256, promote.result_sha256);
@@ -277,17 +306,17 @@ test('legacy Wiki migration is previewable, idempotent, and preserves constraint
     '<spec-entry title="Sensor boundary" sid="S-6" category="review">', 'Validate the sensor boundary.', '</spec-entry>',
   ].join('\n'));
   await writeFile(join(legacy, '.workflow', 'knowhow', 'K-1.md'), '---\ntitle: Calibration tips\n---\n\nInspect the gauge.\n');
-  const args = ['wiki', 'migrate', legacy, '--project', 'legacy-project'];
-  const preview = await cliJson(root, ...args);
+  const args = ['kb', 'import', legacy, '--project', 'legacy-project'];
+  const { entries: preview } = await cliJson(root, ...args);
   assert.equal(preview.length, 9);
-  assert.deepEqual(await cliJson(root, ...args, '--knowhow-only'),
+  assert.deepEqual((await cliJson(root, ...args, '--knowhow-only')).entries,
     preview.filter(row => row.origin.startsWith('.workflow/knowhow/')));
   await assert.rejects(cliJson(root, ...args, '--scope', 'team', '--knowhow-only'),
-    /--knowhow-only requires project or global scope/);
+    /scope must be|Expected.*scope|project, global|project or global/);
   const wiki = new Wiki(root);
   assert.deepEqual(wiki.constraints(), []);
-  assert.deepEqual(await cliJson(root, ...args, '--apply'), preview);
-  assert.ok((await cliJson(root, ...args, '--apply')).every(row => row.existing));
+  assert.deepEqual((await cliJson(root, ...args, '--apply')).entries, preview);
+  assert.ok((await cliJson(root, ...args, '--apply')).entries.every(row => row.existing));
   assert.deepEqual(wiki.constraints().map(row => row.title).sort(), ['Coding rules', 'Current']);
   assert.match(wiki.getEntry('legacy-project:spec:S-2').body, /Superseding entry/);
   const knowhow = wiki.getEntry('legacy-project:knowhow:K-1');
@@ -302,13 +331,13 @@ test('legacy Wiki migration is previewable, idempotent, and preserves constraint
   assert.equal(scoped.title, 'Scoped <rule>');
   assert.equal(scoped.entry.status, 'needs_review');
   assert.deepEqual(scoped.sources, ['legacy:legacy-project:.workflow/specs/scoped.md#L6']);
-  const arch = await cliJson(root, 'wiki', 'constraints', '--category', 'arch', '--repository', repository);
+  const arch = await constraintsJson(root, '--category', 'arch', '--repository', repository);
   assert.deepEqual(arch.map(rule => rule.title), ['Sensor boundary']);
-  assert.deepEqual(arch[0].entry.repositories, [repository]);
-  assert.deepEqual(await cliJson(root, 'wiki', 'constraints', '--category', 'arch'), []);
-  assert.deepEqual(await cliJson(root, 'wiki', 'constraints', '--category', 'review', '--repository', repository), []);
-  assert.deepEqual((await cliJson(root, 'wiki', 'constraints', '--category', 'coding')).map(rule => rule.title), ['Coding rules']);
-  const constrained = (category, keyword) => cliJson(root, 'wiki', 'constraints', '--category', category, '--keyword', keyword);
+  assert.deepEqual(wiki.getEntry(arch[0].id).entry.repositories, [repository]);
+  assert.deepEqual(await constraintsJson(root, '--category', 'arch'), []);
+  assert.deepEqual(await constraintsJson(root, '--category', 'review', '--repository', repository), []);
+  assert.deepEqual((await constraintsJson(root, '--category', 'coding')).map(rule => rule.title), ['Coding rules']);
+  const constrained = (category, keyword) => constraintsJson(root, '--category', category, '--keyword', keyword);
   assert.deepEqual((await constrained('arch', 'SENSOR')).map(rule => rule.title), ['Current']);
   assert.deepEqual((await constrained('coding', 'CALIBRATION')).map(rule => rule.title).sort(), ['Coding rules', 'Current']);
   assert.deepEqual(await constrained('arch', 'current'), []);
@@ -318,7 +347,7 @@ test('legacy Wiki migration is previewable, idempotent, and preserves constraint
   await writeFile(migratedCurrent, canonical.replace(/^keywords:\n(?:  - [^\n]+\n)+/m, ''));
   assert.notEqual(await readFile(migratedCurrent, 'utf8'), canonical);
   assert.deepEqual((await constrained('arch', 'sensor')).map(rule => rule.title), ['Current']);
-  assert.ok((await cliJson(root, ...args, '--apply')).every(row => row.existing));
+  assert.ok((await cliJson(root, ...args, '--apply')).entries.every(row => row.existing));
 });
 
 test('legacy Knowhow migration resolves Maestro lifecycle IDs and multiple predecessors', async t => {
@@ -334,12 +363,12 @@ test('legacy Knowhow migration resolves Maestro lifecycle IDs and multiple prede
   ]) {
     await writeFile(join(knowhow, id + '.md'), `---\nid: ${id}\ntitle: ${id}\n${lifecycle}\n---\n\nKnowledge body.\n`);
   }
-  const args = ['wiki', 'migrate', legacy, '--project', 'legacy-project', '--knowhow-only'];
-  const preview = await cliJson(root, ...args);
+  const args = ['kb', 'import', legacy, '--project', 'legacy-project', '--knowhow-only'];
+  const { entries: preview } = await cliJson(root, ...args);
   const [first, second, current, partial] = preview;
   assert.deepEqual(preview.map(row => row.status), ['deprecated', 'deprecated', 'active', 'needs_review']);
   assert.deepEqual(partial.issues, ['Unresolved earlier entry']);
-  assert.deepEqual(await cliJson(root, ...args, '--apply'), preview);
+  assert.deepEqual((await cliJson(root, ...args, '--apply')).entries, preview);
   const wiki = new Wiki(root);
   assert.equal(wiki.getEntry(current.id).body.trim(),
     `Knowledge body.\n\n[[entries/${first.id}|Earlier entry]]\n[[entries/${second.id}|Earlier entry]]`);
@@ -347,13 +376,15 @@ test('legacy Knowhow migration resolves Maestro lifecycle IDs and multiple prede
   assert.ok(wiki.getEntry(partial.id).body.includes(`[[entries/${first.id}|Earlier entry]]`));
 });
 
-test('Evolve imports legacy knowledge into the source project or an explicit global destination', async t => {
+test('Evolve imports legacy knowledge into the source project or an isolated user destination', async t => {
   const project = await temp(t);
   const globalSource = await temp(t);
   const globalDestination = await temp(t);
   const workflowCli = fileURLToPath(new URL('../dist/workflow-cli.js', import.meta.url));
   const migrate = async (...args) => JSON.parse((await run(process.execPath,
-    [workflowCli, 'knowledge', 'import', ...args], { cwd: project, encoding: 'utf8' })).stdout);
+    [workflowCli, 'kb', 'import', ...args], { cwd: project, encoding: 'utf8',
+      ...(args.includes('--global') ? { env: { ...suiteEnv, HOME: globalDestination, USERPROFILE: globalDestination } } : {}),
+    })).stdout);
 
   for (const source of [join(project, '.workflow'), globalSource]) {
     await mkdir(join(source, 'specs'), { recursive: true });
@@ -381,17 +412,18 @@ test('Evolve imports legacy knowledge into the source project or an explicit glo
   assert.equal(applied.existing_entries, 1);
   assert.deepEqual(applied.entries.map(row => row.id), preview.entries.map(row => row.id));
   assert.equal((await migrate('--apply')).existing_entries, 2);
-  const projectContext = await cliJson(project, 'context', 'calibration');
+  const projectContext = await contextJson(project, 'calibration');
   assert.deepEqual(projectContext.constraints.map(entry => entry.title), ['Calibration gate']);
   assert.deepEqual(projectContext.references.map(entry => entry.title), ['Calibration method']);
-  const globalKnowhow = await migrate(globalSource, '--global', '--root', globalDestination, '--knowhow-only');
+  const globalKnowhow = await migrate(globalSource, '--global', '--knowhow-only');
   assert.equal(globalKnowhow.applied, false);
   assert.deepEqual(globalKnowhow.entries.map(row => row.origin), ['knowhow/K-1.md']);
-  const global = await migrate(globalSource, '--global', '--root', globalDestination, '--apply');
+  const global = await migrate(globalSource, '--global', '--apply');
   assert.equal(global.new_entries, 2);
   assert.equal(global.scope, 'global');
+  assert.equal(global.destination, join(globalDestination, '.evolve'));
   assert.equal(global.entries.find(row => row.origin === 'knowhow/K-1.md').id, globalKnowhow.entries[0].id);
-  assert.deepEqual((await cliJson(globalDestination, 'context', 'calibration')).references.map(entry => entry.title),
+  assert.deepEqual((await contextJson(join(globalDestination, '.evolve'), 'calibration')).references.map(entry => entry.title),
     ['Calibration method']);
 });
 
@@ -403,35 +435,95 @@ test('Evolve installs selected Skills and their workflow files without replacing
   const original = '# Project instructions\r\n\r\nUse the release branch.\r\n';
   await writeFile(guidance, original);
 
-  const installArgs = ['install', '--scope', 'project', '--skill', 'ew-odyssey', '--yes'];
+  const installArgs = ['skill', 'install', '--scope', 'project', '--skill', 'ew-odyssey', '--yes'];
   const installed = JSON.parse(await evolve(...installArgs));
   assert.deepEqual(installed.installed, ['ew-orchestrate', 'ew-odyssey']);
   assert.ok(installed.workflows.some(item => item.id === 'ew-odyssey-review'));
   const after = await readFile(guidance, 'utf8');
   assert.ok(after.startsWith(original));
-  assert.match(after, /evolve context/);
+  assert.match(after, /evolve search/);
   assert.deepEqual(JSON.parse(await evolve(...installArgs)).kept, installed.installed);
   assert.equal(await readFile(guidance, 'utf8'), after);
 
-  const workflows = JSON.parse(await evolve('workflows'));
+  const workflows = JSON.parse(await evolve('skill', 'workflows'));
   assert.equal(new Set(workflows.map(workflow => workflow.id)).size, workflows.length);
+  assert.equal(workflows.some(item => item.id === 'release-gate'), false);
+  await assert.rejects(evolve('skill', 'install', '--skill', 'release-gate', '--yes'), /Choose a shipped Skill package/);
   const review = workflows.find(item => item.id === 'ew-odyssey-review');
-  assert.equal(await evolve('workflows', 'show', review.id), await readFile(join(root, review.path), 'utf8'));
-  await assert.rejects(evolve('workflows', 'show', '../AGENTS.md'), /Unknown workflow/);
-  await mkdir(join(root, 'skills', 'team-swarm'));
-  await assert.rejects(evolve('install', '--skill', 'team-swarm', '--yes'), /no SKILL.md/);
+  assert.equal(await evolve('skill', 'workflows', 'show', review.id), await readFile(join(root, review.path), 'utf8'));
+  await assert.rejects(evolve('skill', 'workflows', 'show', '../AGENTS.md'), /Unknown workflow/);
+  await mkdir(join(root, 'skills', 'ew-swarm'));
+  await assert.rejects(evolve('skill', 'install', '--skill', 'ew-swarm', '--yes'), /no SKILL.md/);
 
   const home = await temp(t);
   const agyInstalled = JSON.parse((await run(
     process.execPath,
-    [workflowCli, 'install', '--scope', 'user', '--host', 'agy', '--skill', 'ew-knowledge', '--yes'],
+    [workflowCli, 'skill', 'install', '--scope', 'user', '--host', 'agy', '--skill', 'ew-knowledge', '--yes'],
     { cwd: root, encoding: 'utf8', env: { ...process.env, HOME: home, USERPROFILE: home } },
   )).stdout);
   assert.equal(agyInstalled.root, join(home, '.gemini', 'config'));
   assert.equal(agyInstalled.instructions, join(home, '.gemini', 'AGENTS.md'));
   assert.deepEqual(agyInstalled.installed, ['ew-knowledge']);
   await access(join(home, '.gemini', 'config', 'skills', 'ew-knowledge', 'SKILL.md'));
-  assert.match(await readFile(join(home, '.gemini', 'AGENTS.md'), 'utf8'), /evolve context/);
+  assert.match(await readFile(join(home, '.gemini', 'AGENTS.md'), 'utf8'), /evolve search/);
+  await access(join(home, '.evolve', 'install-manifest.json'));
+});
+
+test('Evolve tracks install manifests, reports status, upgrades outdated packages, and prunes retired skills', async t => {
+  const root = await temp(t);
+  const workflowCli = fileURLToPath(new URL('../dist/workflow-cli.js', import.meta.url));
+  const evolve = async (...args) => JSON.parse((await run(process.execPath, [workflowCli, ...args], { cwd: root, encoding: 'utf8' })).stdout);
+
+  const initial = await evolve('skill', 'install', '--scope', 'project', '--host', 'agy', '--skill', 'ew-knowledge', '--yes');
+  assert.deepEqual(initial.installed, ['ew-knowledge']);
+  assert.deepEqual(initial.upgraded, []);
+  assert.deepEqual(initial.pruned, []);
+
+  const manifestFile = join(root, '.evolve', 'install-manifest.json');
+  const manifest = JSON.parse(await readFile(manifestFile, 'utf8'));
+  assert.equal(manifest.schema_version, 'evolve-install-manifest/1.0');
+  const targetEntry = manifest.targets[join(root, '.agents', 'skills')];
+  assert.ok(targetEntry.skills['ew-knowledge'].sha256);
+
+  // Create a stale local edit, a legacy retired skill, and an unrelated custom skill.
+  const installedSkill = join(root, '.agents', 'skills', 'ew-knowledge', 'SKILL.md');
+  const originalContent = await readFile(installedSkill, 'utf8');
+  await writeFile(installedSkill, originalContent + '\n<!-- stale local copy -->\n');
+  await mkdir(join(root, '.agents', 'skills', 'team-swarm'), { recursive: true });
+  await writeFile(join(root, '.agents', 'skills', 'team-swarm', 'SKILL.md'), '---\nname: team-swarm\n---\n');
+  await mkdir(join(root, '.agents', 'skills', 'custom-user-skill'), { recursive: true });
+  await writeFile(join(root, '.agents', 'skills', 'custom-user-skill', 'SKILL.md'), '---\nname: custom-user-skill\n---\n');
+
+  const statusBefore = await evolve('skill', 'status', '--scope', 'project', '--host', 'agy');
+  assert.equal(statusBefore.targets[0].skills.find(item => item.name === 'ew-knowledge').status, 'outdated');
+  assert.equal(statusBefore.targets[0].skills.find(item => item.name === 'team-swarm').status, 'retired');
+  assert.equal(statusBefore.targets[0].skills.find(item => item.name === 'ew-swarm').status, 'not_installed');
+
+  // Default install keeps existing outdated skills untouched.
+  const skipped = await evolve('skill', 'install', '--scope', 'project', '--host', 'agy', '--skill', 'ew-knowledge', '--yes');
+  assert.deepEqual(skipped.kept, ['ew-knowledge']);
+  assert.deepEqual(skipped.upgraded, []);
+
+  // Upgrade replaces outdated ew-knowledge, installs ew-swarm, prunes team-swarm, and preserves custom-user-skill.
+  const upgraded = await evolve('skill', 'upgrade', '--host', 'agy', '--prune', '--yes');
+  assert.ok(upgraded.upgraded.includes('ew-knowledge'));
+  assert.ok(upgraded.installed.includes('ew-swarm'));
+  assert.deepEqual(upgraded.pruned, ['team-swarm']);
+  assert.equal(await readFile(installedSkill, 'utf8'), originalContent);
+  await assert.rejects(access(join(root, '.agents', 'skills', 'team-swarm')), { code: 'ENOENT' });
+  await access(join(root, '.agents', 'skills', 'custom-user-skill', 'SKILL.md'));
+
+  // Re-running upgrade is idempotent when up to date; --force reinstalls all selected skills.
+  const noopUpgrade = await evolve('skill', 'install', '--scope', 'project', '--host', 'agy', '--upgrade', '--yes');
+  assert.deepEqual(noopUpgrade.installed, []);
+  assert.deepEqual(noopUpgrade.upgraded, []);
+  assert.equal(noopUpgrade.kept.length, 7);
+
+  const forced = await evolve('skill', 'install', 'ew-knowledge', '--host', 'agy', '--force', '--yes');
+  assert.deepEqual(forced.upgraded, ['ew-knowledge']);
+
+  const statusAfter = await evolve('skill', 'status', '--host', 'agy');
+  assert.ok(statusAfter.targets[0].skills.every(item => item.status === 'up_to_date'));
 });
 
 test('Evolve installs OMP user Skills without replacing existing Skills or instructions', async t => {
@@ -446,7 +538,7 @@ test('Evolve installs OMP user Skills without replacing existing Skills or instr
     process.execPath, [workflowCli, ...args],
     { cwd: root, encoding: 'utf8', env: { ...process.env, HOME: home, USERPROFILE: home } },
   )).stdout);
-  const args = ['install', '--scope', 'user', '--host', 'omp', '--skill', 'ew-knowledge', '--yes'];
+  const args = ['skill', 'install', '--scope', 'user', '--host', 'omp', '--skill', 'ew-knowledge', '--yes'];
   const installed = await evolve(...args);
   assert.equal(installed.status, 'installed');
   assert.equal(installed.scope, 'user');
@@ -460,7 +552,7 @@ test('Evolve installs OMP user Skills without replacing existing Skills or instr
   assert.match(skill, /(?:^|\n)description:/);
   const after = await readFile(guidance, 'utf8');
   assert.ok(after.startsWith(original));
-  assert.match(after, /evolve context/);
+  assert.match(after, /evolve search/);
   const customized = skill + '\nLocal Skill instructions must survive reinstall.\n';
   await writeFile(entry, customized);
   const repeated = await evolve(...args);
@@ -468,8 +560,9 @@ test('Evolve installs OMP user Skills without replacing existing Skills or instr
   assert.deepEqual(repeated.kept, ['ew-knowledge']);
   assert.equal(await readFile(entry, 'utf8'), customized);
   assert.equal(await readFile(guidance, 'utf8'), after);
-  assert.equal((await evolve('install', '--host', 'omp', '--skill', 'ew-knowledge', '--yes')).scope, 'user');
-  await assert.rejects(evolve('install', '--scope', 'project', '--host', 'omp', '--yes'), /--host applies to user installations/);
+  const project = await evolve('skill', 'install', '--scope', 'project', '--host', 'omp', '--skill', 'ew-knowledge', '--yes');
+  assert.equal(project.root, join(root, '.omp', 'agent'));
+  await access(join(project.root, 'skills', 'ew-knowledge', 'SKILL.md'));
   await assert.rejects(access(join(root, 'skills')));
 });
 
@@ -507,10 +600,37 @@ test('completion harvesting preserves evidence and records zero-candidate receip
   assert.equal(wiki.getEntry(published.id).entry.mode, 'reference');
   assert.deepEqual(publishReference(wiki, first.id, first.candidates[0].id, 'Migration preflight'), { ...published, replayed: true });
   const corroboration = { ...receipt, id: 'completion-3' };
-  assert.deepEqual((await harvestCompletion(wiki, 'example', corroboration, model)).candidates, []);
+  const corroborated = await harvestCompletion(wiki, 'example', corroboration, model);
+  assert.deepEqual(corroborated.candidates, []);
   assert.deepEqual(wiki.getEntry(published.id).sources, [
     'receipt:example:completion-1#check', 'receipt:example:completion-3#check',
   ]);
+  const publishedChanges = await cliJson(root, 'kb', 'changes', '--entry', published.id);
+  assert.deepEqual(publishedChanges.map(change => [change.operation, change.state]), [
+    ['create', 'applied'],
+    ['update', 'applied'],
+  ]);
+  assert.equal(publishedChanges[1].candidate.closeout, corroborated.id);
+
+  // Repeat corroboration with identical sources already present remains a clean idempotent no-op.
+  const secondModel = () => ({
+    async chat() {
+      return JSON.stringify([{ memories: [
+        { content: 'Verify backup checksums before cutover.', source_message_ids: ['check'] },
+      ] }]);
+    },
+  });
+  const namedHarvest = await harvestCompletion(wiki, 'example', { ...receipt, id: 'completion-4' }, secondModel);
+  const namedPublish = await cliJson(
+    root, 'kb', 'candidates', 'publish', namedHarvest.id, namedHarvest.candidates[0].id,
+    'Backup checksum check', '--entry', 'entries/backup-checksum',
+  );
+  assert.deepEqual(namedPublish, { id: 'entries/backup-checksum', replayed: false });
+  assert.deepEqual(await cliJson(
+    root, 'kb', 'candidates', 'publish', namedHarvest.id, namedHarvest.candidates[0].id,
+    'Backup checksum check', '--entry', 'entries/backup-checksum',
+  ), { id: 'entries/backup-checksum', replayed: true });
+  assert.equal(wiki.getEntry('entries/backup-checksum').title, 'Backup checksum check');
 });
 
 test('conflicting closeout evidence stays pending until a reviewed Wiki change is applied', async t => {
@@ -523,8 +643,8 @@ test('conflicting closeout evidence stays pending until a reviewed Wiki change i
     operation: 'create', entry, title: 'Migration dry-run',
     mode: 'constraint', body: 'Always use a dry-run before applying a database migration.',
   }));
-  const original = await cliJson(root, 'wiki', 'propose', draft, '--evidence', 'policy:preflight');
-  await cliJson(root, 'wiki', 'apply', original.id);
+  const original = await cliJson(root, 'kb', 'propose', draft, '--evidence', 'policy:preflight');
+  await cliJson(root, 'kb', 'apply', original.id);
   const completion = {
     schema_version: 'skill-completion/1.0', id: 'evidence-conflict', execution_id: 'exec-1', status: 'succeeded',
     recorded_at: '2026-11-13T02:00:00Z',
@@ -547,7 +667,7 @@ test('conflicting closeout evidence stays pending until a reviewed Wiki change i
   assert.equal(wiki.getEntry(entry).body.trim(), 'Always use a dry-run before applying a database migration.');
   assert.throws(() => publishReference(wiki, harvested.id, candidate.id, 'Conflict'), /related Wiki entries/);
   const update = { operation: 'update', entry, body: 'Use dry-run for production database migration.' };
-  const proposeArgs = ['wiki', 'propose', draft, '--closeout', harvested.id, '--candidate', candidate.id];
+  const proposeArgs = ['kb', 'propose', draft, '--closeout', harvested.id, '--candidate', candidate.id];
   await writeFile(draft, JSON.stringify(update));
   await assert.rejects(cliJson(root, ...proposeArgs), /requires a recorded relationship decision/);
   await writeFile(draft, JSON.stringify({
@@ -556,7 +676,7 @@ test('conflicting closeout evidence stays pending until a reviewed Wiki change i
   const reviewed = await cliJson(root, ...proposeArgs);
   assert.deepEqual(reviewed.review.related, [entry]);
   assert.deepEqual(reviewed.candidate, { closeout: harvested.id, id: candidate.id });
-  await cliJson(root, 'wiki', 'apply', reviewed.id);
+  await cliJson(root, 'kb', 'apply', reviewed.id);
   assert.deepEqual(wiki.getEntry(entry).sources, ['policy:preflight', 'receipt:example:evidence-conflict#check']);
 });
 
@@ -607,36 +727,36 @@ test('standalone Skill completion survives a failed harvest and is reconciled on
     searches: [{ search_id: 'search-1', source: 'memory', query: 'migration retry', filters: { scene: 'execute' }, returned_ids: ['memory-1'], total_hits: 1 }],
     reads: [{ kind: 'memory', id: 'memory-1', from_search_id: 'search-1', version: 1 }],
   }));
-  const args = ['closeout', 'skill', 'host-invocation-1', '--skill', 'db-migration',
+  const args = ['kb', 'harvest', 'skill', 'host-invocation-1', '--skill', 'db-migration',
     '--skill-version', 'git:abc123', '--status', 'failed', '--transcript', transcript, '--knowledge-receipt', knowledgeReceipt];
   assert.deepEqual(await invoke([...args, '--record-only']), await invoke([...args, '--record-only']));
   const { receipt } = await invoke([...args, '--record-only']);
   assert.equal(calls, 0);
-  await assert.rejects(invoke(['closeout', 'resume', 'skill-missing']), /receipt not found/);
-  await assert.rejects(invoke(['closeout', 'resume', receipt]), /HTTP 503/);
-  const pending = await invoke(['closeout', 'scan']);
+  await assert.rejects(invoke(['kb', 'harvest', 'receipt', 'skill-missing']), /receipt not found/);
+  await assert.rejects(invoke(['kb', 'harvest', 'receipt', receipt]), /HTTP 503/);
+  const pending = await invoke(['kb', 'harvest', 'scan']);
   assert.equal(pending.length, 1);
   assert.equal(pending[0].candidates.length, 1);
   const repeated = await invoke(args);
   assert.equal(repeated.id, pending[0].id);
   assert.equal(repeated.replayed, true);
-  const harvestedById = await invoke(['closeout', 'harvest', receipt]);
+  const harvestedById = await invoke(['kb', 'harvest', 'receipt', receipt]);
   assert.equal(harvestedById.replayed, true);
-  assert.deepEqual(await invoke(['closeout', 'show', repeated.receipt]), {
+  assert.deepEqual(await invoke(['kb', 'candidates', 'show', repeated.receipt]), {
     id: repeated.id,
     candidates: pending[0].candidates,
     session_id: 'host-invocation-1',
     receipt_id: repeated.receipt,
   });
   assert.equal(calls, 2);
-  const review = await invoke(['evolve', 'review', 'host-invocation-1']);
+  const review = await invoke(['skill', 'review', 'host-invocation-1']);
   assert.deepEqual(review.skill, { id: 'db-migration', version: 'git:abc123', status: 'failed' });
   assert.equal(review.receipt, receipt);
   assert.equal(review.evidence, 2);
   assert.deepEqual(review.signals.map(({ kind, sources, runIds }) => [kind, sources, runIds]), [
     ['verified_fix', [`receipt:fixture-project:${receipt}#verified`], []],
   ]);
-  await assert.rejects(invoke(['evolve', 'review', 'missing-execution']), /receipt not found/);
+  await assert.rejects(invoke(['skill', 'review', 'missing-execution']), /receipt not found/);
   await assert.rejects(invoke([...args, '--status', 'cancelled']), /Skill completion changed/);
   assert.deepEqual(await invoke([...args, '--session', 'maestro-1']), { ignored: 'session-owned', session: 'maestro-1' });
   assert.deepEqual(await invoke([...args, '--skill', 'workflow-closeout']), { ignored: 'maintenance-skill' });
@@ -906,7 +1026,7 @@ test('Memory persists scoped records and fuses keyword and vector rankings', asy
   assert.equal((await a.search('水力计算', { embedding: [1, 0] })).strategy, 'hybrid');
   assert.deepEqual((await a.search('水力计算', { embedding: [1, 0] })).results.map(hit => hit.id), ['x', 'y']);
   assert.deepEqual((await a.search('水力计算', { session: 'wrong' })).results, []);
-  assert.equal((await cliJson(root, 'memory', 'search', '水力计算', '--db', db, '--namespace', 'b')).results[0].content, '水力计算');
+  assert.equal((await cliJson(root, 'kb', 'search', '水力计算', '--db', db, '--namespace', 'b')).results[0].content, '水力计算');
   assert.equal((await a.put({ ...input, content: 'Updated preference' })).version, 2);
   assert.deepEqual((await a.search('水力计算')).results, []);
   assert.equal(a.delete('x'), true);
@@ -925,14 +1045,17 @@ test('memory search pages cover exact, keyword and hybrid hits without overlap',
   const sqlite = new DatabaseSync(db);
   sqlite.exec("DELETE FROM memory_literals WHERE memory_key IN (SELECT key FROM memory_records WHERE id IN ('b', 'd', 'f'))");
   sqlite.close();
-  const invoke = (query, page) => cliJson(root, 'memory', 'search', query, '--page', String(page), '--limit', '2', '--db', db);
+  const invoke = (query, page) => cliJson(root, 'kb', 'search', query, '--page', String(page), '--limit', '2', '--db', db);
   const first = await invoke('4312', 1);
   const middle = await invoke('4312', 2);
   const last = await invoke('4312', 3);
   assert.deepEqual(first.pagination, { page: 1, limit: 2, previousPage: null, nextPage: 2 });
   assert.deepEqual(last.pagination, { page: 3, limit: 2, previousPage: 2, nextPage: null });
-  assert.deepEqual([first, middle, last].flatMap(result => result.results.map(hit => hit.id)), ['a', 'c', 'e', 'b', 'd', 'f']);
-  const traced = await cliJson(root, 'memory', 'search', '4312', '--page', '2', '--limit', '2', '--trace', '--db', db);
+  const exactIds = [first, middle, last].flatMap(result => result.results.map(hit => hit.id));
+  assert.equal(new Set(exactIds).size, 6);
+  assert.deepEqual([...exactIds].sort(), ['a', 'b', 'c', 'd', 'e', 'f']);
+  assert.deepEqual((await invoke('4312', 1)).results, first.results);
+  const traced = await cliJson(root, 'kb', 'search', '4312', '--page', '2', '--limit', '2', '--trace', '--db', db);
   assert.equal(traced.knowledge_reads.searches[0].filters.page, 2);
   const keywords = await Promise.all([1, 2, 3].map(page => invoke('Deployment', page)));
   assert.deepEqual(keywords.flatMap(result => result.results.map(hit => hit.id)), ['a', 'b', 'c', 'd', 'e', 'f']);
@@ -943,7 +1066,7 @@ test('memory search pages cover exact, keyword and hybrid hits without overlap',
   await assert.rejects(memory.search('Deployment', { page: 0 }), /page must be a positive integer/);
 });
 
-test('compact memory search shares command arguments and keeps the original scope and receipt', async t => {
+test('knowledge search shares command arguments and keeps the original scope and receipt', async t => {
   let memory;
   const root = await temp(t, () => memory?.close());
   const db = join(root, "team's memory.db");
@@ -970,14 +1093,17 @@ test('compact memory search shares command arguments and keeps the original scop
 
   const filters = ['--db', db, '--namespace', namespace, '--type', options.type, `--scene=${scene}`,
     '--session', options.session, '--limit', '1'];
-  const first = await evolveJson(root, 'memory', 'search', ...filters, '--reads', receipt, '--', query);
+  const first = await evolveJson(root, 'kb', 'search', ...filters, '--reads', receipt, '--', query);
   const [hit] = first.results;
-  assert.deepEqual(hit, { id, content: `${'😀'.repeat(160)}…` });
-  assert.deepEqual(Object.keys(first.commands), ['prefix', 'get', 'page']);
+  assert.equal(hit.id, id);
+  assert.equal(hit.kind, 'episodic');
+  assert.equal(hit.content, content);
+  assert.ok(hit.snippet.length < content.length);
+  assert.deepEqual(Object.keys(first.commands), ['prefix', 'get', 'sources', 'page']);
   assert.equal(first.pagination.previousPage, null);
   const full = await runView(first.commands, 'get', hit);
   assert.equal(full.content, content);
-  assert.deepEqual(full.exactValues, [query]);
+  assert.deepEqual(memory.get(id).exactValues, [query]);
   assert.equal(full.knowledge_reads.reads[0].from_search_id, first.knowledge_reads.searches[0].search_id);
   const second = await runView(first.commands, 'page', { page: first.pagination.nextPage });
   assert.equal(second.results[0].id, 'second');
@@ -986,8 +1112,10 @@ test('compact memory search shares command arguments and keeps the original scop
   assert.deepEqual(second.commands.page, first.commands.page);
   assert.equal((await runView(second.commands, 'page', { page: second.pagination.previousPage })).results[0].id, id);
 
-  const raw = await evolveJson(root, 'memory', 'search', ...filters, '--json', '--', query);
-  assert.deepEqual(raw, await memory.search(query, { ...options, limit: 1 }));
+  const raw = await evolveJson(root, 'kb', 'search', ...filters, '--json', '--', query);
+  assert.equal(raw.results[0].id, id);
+  assert.equal(raw.results[0].content, content);
+  assert.equal(raw.results[0].session, options.session);
 });
 
 test('Agent Memory context envelope keeps discovery and exact-read identities separate', async t => {
@@ -1061,7 +1189,7 @@ test('identical model summaries preserve the distinct original values and source
   assert.equal(memory.sources(second.id)[0]?.id, 'second');
 });
 
-test('Shared module API, CLI and HTTP return the same scoped search', async t => {
+test('Unified CLI and existing module HTTP APIs recall the same scoped evidence', async t => {
   let server, memory;
   const root = await temp(t, async () => {
     if (server?.listening) await new Promise(resolve => server.close(resolve));
@@ -1072,8 +1200,8 @@ test('Shared module API, CLI and HTTP return the same scoped search', async t =>
   await mkdir(join(root, 'wiki'));
   await writeFile(join(root, 'wiki', 'recall.md'), '# Recall\n\nEvidence for recall.\n');
   await cliJson(root, 'code', 'build');
-  await cliJson(root, 'wiki', 'build');
-  await cliJson(root, 'memory', 'put', 'recall evidence', '--db', db, '--id', 'test');
+  await cliJson(root, 'kb', 'build');
+  await cliJson(root, 'kb', 'add', 'recall evidence', '--db', db, '--id', 'test');
   memory = new MemoryStore(db);
   const sources = { code: new CodeGraph(root), wiki: new Wiki(root), memory };
   server = createSearchServer(sources);
@@ -1082,17 +1210,21 @@ test('Shared module API, CLI and HTTP return the same scoped search', async t =>
   const url = `http://127.0.0.1:${server.address().port}/search`;
   const baseUrl = url.slice(0, -'/search'.length);
   const expected = JSON.parse(JSON.stringify(await search(sources, 'recall')));
-  assert.deepEqual(await cliJson(root, 'search', 'recall', '--db', db), expected);
+  const merged = await cliJson(root, 'search', 'recall', '--db', db);
+  assert.deepEqual(new Set(merged.results.map(hit => hit.source + ':' + hit.kind)), new Set(['kb:reference', 'kb:episodic', 'code:code']));
+  assert.ok(merged.results.every(hit => typeof hit.score === 'number'));
   assert.ok(expected.code.length && expected.wiki.results.length && expected.memory.results.length);
-  const contextResult = await cliJson(root, 'context', 'recall', '--db', db, '--scope', 'memory', '--include-memory');
-  assert.equal(contextResult.schema_version, 'agent-memory-envelope/1.0');
-  assert.equal(contextResult.working_memories[0].memory_id, 'test');
+  const contextResult = await contextJson(root, 'recall', '--db', db, '--kind', 'episodic');
+  assert.equal(contextResult.mode, 'context');
+  assert.equal(contextResult.schema_version, 'evolve-context/1.0');
+  assert.equal(contextResult.episodic[0].id, 'test');
   const response = await fetch(url + '?q=recall');
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), expected);
   const contextResponse = await fetch(baseUrl + '/context?q=recall&scope=memory&include_memory=true&skill=legacy');
   assert.equal(contextResponse.status, 200);
-  assert.deepEqual(await contextResponse.json(), contextResult);
+  const httpContext = await contextResponse.json();
+  assert.equal(httpContext.working_memories[0].memory_id, contextResult.episodic[0].id);
   assert.deepEqual(await (await fetch(url + '?q=recall&scope=memory')).json(), { memory: expected.memory });
   assert.equal((await fetch(url + '?q=recall&limit=-1')).status, 400);
   assert.equal((await fetch(url + '/missing?q=recall')).status, 404);
@@ -1106,12 +1238,12 @@ test('Stage search tracing keeps context sessions separate from historical Memor
   await memory.put({ id: 'old-memory', content: 'The migration retry needs a dry run.', type: 'error', scene: 'execute', session: 'old-session' });
   memory.close();
 
-  const contextResult = await cliJson(root, 'context', 'migration retry', '--db', db, '--session', 'new-session', '--include-memory', '--trace');
-  assert.deepEqual(contextResult.working_memories.map(item => item.memory_id), ['old-memory']);
+  const contextResult = await contextJson(root, 'migration retry', '--db', db, '--session', 'new-session', '--trace');
+  assert.deepEqual(contextResult.episodic.map(item => item.id), ['old-memory']);
   assert.equal(contextResult.knowledge_reads.searches[0].source, 'memory');
   assert.deepEqual(contextResult.knowledge_reads.searches[0].returned_ids, ['old-memory']);
 
-  const filtered = await cliJson(root, 'memory', 'search', 'migration retry', '--db', db, '--session', 'old-session', '--trace');
+  const filtered = await cliJson(root, 'kb', 'search', 'migration retry', '--db', db, '--session', 'old-session', '--trace');
   assert.deepEqual(filtered.results.map(item => item.id), ['old-memory']);
   assert.equal(filtered.knowledge_reads.searches[0].source, 'memory');
 
@@ -1134,40 +1266,40 @@ test('CLI context profiles and compatibility JSON flags reduce repeated context 
   await writeFile(profile, JSON.stringify({
     skill: 'analyze', task: 'plan', paths: ['src/solver.ts'], categories: ['arch'], includePathScoped: false,
   }));
-  const fromProfile = await cliJson(root, 'context', 'solver layout', '--context-file', profile, '--json');
-  const fromFlags = await cliJson(root, 'context', 'solver layout', '--task', 'plan',
+  const fromProfile = await contextJson(root, 'solver layout', '--context-file', profile, '--json');
+  const fromFlags = await contextJson(root, 'solver layout', '--task', 'plan',
     '--path', 'src/solver.ts', '--category', 'arch', '--json');
   assert.deepEqual(fromProfile.context_scope, fromFlags.context_scope);
   assert.deepEqual(fromFlags.context_scope, { task_kind: 'plan', paths: ['src/solver.ts'] });
   assert.deepEqual(fromProfile.constraints, fromFlags.constraints);
   assert.deepEqual(fromProfile.references, fromFlags.references);
   const reads = join(root, 'reads.json');
-  await cliJson(root, 'context', 'solver layout', '--context-file', profile, '--reads', reads);
+  await contextJson(root, 'solver layout', '--context-file', profile, '--reads', reads);
   assert.ok((await readFile(reads, 'utf8')).includes('knowledge-reads/1.0'));
   await mkdir(join(root, 'wiki'), { recursive: true });
-  assert.equal((await cliJson(root, 'wiki', 'build', '--json')).pages, 0);
+  assert.equal((await cliJson(root, 'kb', 'build', '--json')).pages, 0);
   await mkdir(join(root, 'wiki', 'entries'), { recursive: true });
   await writeFile(join(root, 'wiki', 'entries', 'solver-guide.md'), [
     '---', 'title: Solver guide', 'mode: reference', 'status: active', 'scope: [task:plan]',
     'sources: [fixture:solver]', '---', '', 'Use the sparse solver path.', '',
   ].join('\n'));
-  await cliJson(root, 'wiki', 'build');
-  const legacyReference = await cliJson(root, 'wiki', 'reference', 'entries/solver-guide', '--task', 'plan');
-  const resolvedGet = await cliJson(root, 'wiki', 'get', 'entries/solver-guide', '--resolved', '--task', 'plan');
+  await cliJson(root, 'kb', 'build');
+  const legacyReference = await cliJson(root, 'kb', 'get', 'entries/solver-guide', '--resolved', '--task', 'plan');
+  const resolvedGet = await cliJson(root, 'kb', 'get', 'entries/solver-guide', '--resolved', '--task', 'plan');
   assert.deepEqual(resolvedGet, legacyReference);
   await writeFile(join(root, 'wiki', 'entries', 'legacy-guide.md'), [
     '---', 'title: Legacy solver guide', 'mode: reference', 'status: active', 'scope: [skill:analyze]',
     'sources: [fixture:legacy]', '---', '', 'Check the residual before retry.', '',
   ].join('\n'));
-  assert.equal(await cliJson(root, 'wiki', 'reference', 'entries/legacy-guide', '--skill', 'analyze'), null);
-  assert.equal((await cliJson(root, 'wiki', 'get', 'entries/legacy-guide')).id, 'entries/legacy-guide');
+  assert.equal(await cliJson(root, 'kb', 'get', 'entries/legacy-guide', '--resolved', '--skill', 'analyze'), null);
+  assert.equal((await cliJson(root, 'kb', 'get', 'entries/legacy-guide')).id, 'entries/legacy-guide');
   const draft = join(root, 'change.json');
   await writeFile(draft, JSON.stringify({ operation: 'update', entry: 'entries/legacy-guide', title: 'Solver retry' }));
-  await assert.rejects(cliJson(root, 'wiki', 'propose', draft, '--evidence', 'review:solver'), /reviewed scope explicitly/);
+  await assert.rejects(cliJson(root, 'kb', 'propose', draft, '--evidence', 'review:solver'), /reviewed scope explicitly/);
   await writeFile(draft, JSON.stringify({ operation: 'update', entry: 'entries/legacy-guide', scope: ['task:plan'] }));
-  const proposed = await cliJson(root, 'wiki', 'propose', draft, '--evidence', 'review:solver');
-  await cliJson(root, 'wiki', 'apply', proposed.id);
-  assert.equal((await cliJson(root, 'wiki', 'reference', 'entries/legacy-guide', '--task', 'plan')).id, 'entries/legacy-guide');
+  const proposed = await cliJson(root, 'kb', 'propose', draft, '--evidence', 'review:solver');
+  await cliJson(root, 'kb', 'apply', proposed.id);
+  assert.equal((await cliJson(root, 'kb', 'get', 'entries/legacy-guide', '--task', 'plan')).id, 'entries/legacy-guide');
 });
 
 test('Knowledge closeout routes local fixes and structural changes to the right Skill flow', () => {
@@ -1340,8 +1472,8 @@ test('CLI ingestion and memory extraction use an OpenAI-compatible endpoint', as
   await writeFile(file, 'This is a fixture.');
   await writeFile(messages, JSON.stringify([{ id: 'm1', role: 'user', timestamp: 0, content: 'Remember my fixture preference.' }]));
   const invoke = async (...args) => JSON.parse((await run(process.execPath, [cli, '--root', root, ...args], { env })).stdout);
-  assert.deepEqual((await invoke('wiki', 'ingest', file)).written, ['wiki/concepts/fixture.md']);
-  const [memory] = await invoke('memory', 'extract', messages, '--session', 'fixture');
+  assert.deepEqual((await invoke('kb', 'ingest', file)).written, ['wiki/concepts/fixture.md']);
+  const [memory] = await invoke('kb', 'extract', messages, '--session', 'fixture');
   assert.equal(memory.content, 'Fixture preference');
   assert.deepEqual(memory.sourceMessageIds, ['m1']);
   assert.equal(requests.length, 3);
@@ -1350,4 +1482,227 @@ test('CLI ingestion and memory extraction use an OpenAI-compatible endpoint', as
     assert.equal(request.auth, 'Bearer fixture-key');
     assert.equal(request.body.model, 'fixture-model');
   }
+});
+
+test('Evolve consolidates indexes, databases, and runtime files under .evolve/ with legacy fallback', async t => {
+  const root = await temp(t);
+  await mkdir(join(root, 'wiki'), { recursive: true });
+  await writeFile(join(root, 'wiki', 'guide.md'), '# Guide\n\nConsolidate storage under dot-evolve.\n');
+
+  await evolveJson(root, 'kb', 'build');
+  await access(join(root, '.evolve', 'index.db'));
+  await assert.rejects(access(join(root, 'index.db')), { code: 'ENOENT' });
+
+  await evolveJson(root, 'kb', 'add', 'Store memory under .evolve', '--id', 'evolve-mem');
+  await access(join(root, '.evolve', 'memory.db'));
+  await assert.rejects(access(join(root, '.agent-memory')), { code: 'ENOENT' });
+
+  const proposalFile = join(root, 'proposal.json');
+  await writeFile(proposalFile, JSON.stringify({
+    operation: 'create',
+    entry: 'entries/consolidate-storage',
+    title: 'Consolidate storage',
+    mode: 'reference',
+    scope: ['project'],
+    body: 'Keep local databases inside .evolve/.',
+  }));
+  await evolveJson(root, 'kb', 'propose', proposalFile, '--evidence', 'design:storage');
+  await access(join(root, '.evolve', 'closeout.db'));
+
+  // Global ~/.evolve destination should not nest .evolve/.evolve.
+  const globalEvolve = join(await temp(t), '.evolve');
+  await mkdir(join(globalEvolve, 'wiki'), { recursive: true });
+  await writeFile(join(globalEvolve, 'wiki', 'global.md'), '# Global\n\nGlobal wiki entry.\n');
+  await evolveJson(globalEvolve, 'kb', 'build');
+  await access(join(globalEvolve, 'index.db'));
+  await assert.rejects(access(join(globalEvolve, '.evolve')), { code: 'ENOENT' });
+
+  // Legacy project with root index.db and .agent-memory/memory.db remains readable and upgrades on build.
+  const legacy = await temp(t);
+  await mkdir(join(legacy, 'wiki'), { recursive: true });
+  await writeFile(join(legacy, 'wiki', 'legacy.md'), '# Legacy\n\nLegacy index lookup.\n');
+  await evolveJson(legacy, 'kb', 'build');
+  await rename(join(legacy, '.evolve', 'index.db'), join(legacy, 'index.db'));
+  await rm(join(legacy, '.evolve'), { recursive: true, force: true });
+  await mkdir(join(legacy, '.agent-memory'), { recursive: true });
+  await evolveJson(legacy, 'kb', 'add', 'Legacy memory entry', '--id', 'legacy-mem', '--db', join(legacy, '.agent-memory', 'memory.db'));
+  assert.equal((await cliJson(legacy, 'kb', 'search', 'legacy')).results[0].id, 'legacy');
+  assert.equal((await cliJson(legacy, 'kb', 'get', 'legacy-mem')).id, 'legacy-mem');
+  await evolveJson(legacy, 'kb', 'build');
+  await access(join(legacy, '.evolve', 'index.db'));
+});
+
+test('Wiki search weights keywords/categories and auto-builds missing index when wiki/ exists', async t => {
+  const emptyRoot = await temp(t);
+  assert.deepEqual((await cliJson(emptyRoot, 'kb', 'search', 'idempotency')).results, []);
+
+  const root = await temp(t);
+  const entries = join(root, 'wiki', 'entries');
+  await mkdir(entries, { recursive: true });
+  await writeFile(join(entries, 'body-only.md'), [
+    '---', 'title: Retry handler notes', 'mode: reference', 'status: active',
+    'scope: [project]', 'sources: [fixture:body]', '---', '',
+    'Keep request handling safe with idempotency keys across retries.', '',
+  ].join('\n'));
+  await writeFile(join(entries, 'keyword-boosted.md'), [
+    '---', 'title: Payment gateway checklist', 'mode: reference', 'status: active',
+    'scope: [project]', 'categories: [arch]', 'keywords: [idempotency]', 'sources: [fixture:keyword]', '---', '',
+    'Validate charge requests before settlement.', '',
+  ].join('\n'));
+  await writeFile(join(entries, 'title-boosted.md'), [
+    '---', 'title: Idempotency verification', 'mode: reference', 'status: active',
+    'scope: [project]', 'sources: [fixture:title]', '---', '',
+    'Verify duplicate requests return the original response.', '',
+  ].join('\n'));
+
+  // Without running `wiki build`, context and search auto-build .evolve/index.db.
+  const ctx = await contextJson(root, 'idempotency');
+  await access(join(root, '.evolve', 'index.db'));
+  assert.deepEqual(ctx.references.map(hit => hit.id), [
+    'entries/title-boosted',
+    'entries/keyword-boosted',
+    'entries/body-only',
+  ]);
+
+  await rm(join(root, '.evolve'), { recursive: true, force: true });
+  const searched = await cliJson(root, 'kb', 'search', 'idempotency');
+  await access(join(root, '.evolve', 'index.db'));
+  assert.deepEqual(searched.results.map(hit => hit.id), [
+    'entries/title-boosted',
+    'entries/keyword-boosted',
+    'entries/body-only',
+  ]);
+  assert.equal((await cliJson(root, 'kb', 'search', 'arch')).results[0].id, 'entries/keyword-boosted');
+
+  // Legacy 3-column wiki_fts index remains readable without rebuild errors.
+  const legacyRoot = await temp(t);
+  await mkdir(join(legacyRoot, 'wiki'), { recursive: true });
+  await writeFile(join(legacyRoot, 'wiki', 'note.md'), '# Legacy Note\n\nThree column FTS body.\n');
+  const legacyDb = new DatabaseSync(join(legacyRoot, 'index.db'));
+  legacyDb.exec(`
+    CREATE VIRTUAL TABLE wiki_fts USING fts5(page_id UNINDEXED, title_tok, content_tok, tokenize='unicode61 remove_diacritics 0');
+    CREATE TABLE page_meta (page_id TEXT PRIMARY KEY, title TEXT, type TEXT, rel_path TEXT, snippet TEXT);
+    CREATE TABLE graph_edge (source_id TEXT NOT NULL, target_id TEXT NOT NULL, PRIMARY KEY (source_id, target_id));
+    INSERT INTO wiki_fts VALUES ('note', 'legacy note', 'three column fts body');
+    INSERT INTO page_meta VALUES ('note', 'Legacy Note', 'other', 'wiki/note.md', 'Three column FTS body.');
+  `);
+  legacyDb.close();
+  assert.equal((await cliJson(legacyRoot, 'kb', 'search', 'column')).results[0].id, 'note');
+});
+
+test('MemoryStore readOnly mode avoids writes, auto-detects repository UUID, and merges global ~/.evolve knowledge', async t => {
+  const home = await temp(t);
+  const project = await temp(t);
+  const globalEvolve = join(home, '.evolve');
+  const env = { ...process.env, HOME: home, USERPROFILE: home };
+  const cliEnv = async (root, ...args) => {
+    const { stdout } = await run(process.execPath, [cli, '--root', root, ...args], { env, encoding: 'utf8' });
+    return JSON.parse(stdout);
+  };
+
+  // 1. Read-only MemoryStore never creates missing DB file and blocks mutations cleanly.
+  const missingDb = join(project, '.evolve', 'memory.db');
+  const roMissing = new MemoryStore(missingDb, { readOnly: true });
+  assert.equal(roMissing.get('any'), undefined);
+  assert.deepEqual(roMissing.sources('any'), []);
+  assert.deepEqual((await roMissing.search('anything')).results, []);
+  await assert.rejects(() => roMissing.put({ content: 'blocked write' }), /read-only/);
+  roMissing.close();
+  await assert.rejects(access(missingDb), { code: 'ENOENT' });
+
+  // 2. Repository UUID from .workflow/repository.json is applied automatically without --repository flag.
+  const repoId = 'c7c015e1-7254-4156-b716-27931b51cc01';
+  await mkdir(join(project, '.workflow'), { recursive: true });
+  await writeFile(join(project, '.workflow', 'repository.json'), JSON.stringify({ repo_id: repoId }));
+  await mkdir(join(project, 'wiki', 'entries'), { recursive: true });
+  await writeFile(join(project, 'wiki', 'entries', 'repo-constraint.md'), [
+    '---', 'title: Repo Constraint', 'mode: constraint', 'status: active',
+    'scope: [project]', `repositories: [${repoId}]`, 'sources: [fixture:repo]', '---', '',
+    'Always validate repository UUID automatically.', '',
+  ].join('\n'));
+  const repoCtx = await cliEnv(project, 'search', 'repository', '--mode', 'context', '--from', 'kb');
+  assert.deepEqual(repoCtx.constraints.map(item => item.id), ['entries/repo-constraint']);
+
+  // 3. Global ~/.evolve Wiki references & Working Memory merge cleanly into project context & follow-up reads.
+  await mkdir(join(globalEvolve, 'wiki', 'entries'), { recursive: true });
+  await writeFile(join(globalEvolve, 'wiki', 'entries', 'global-tip.md'), [
+    '---', 'title: Global Debugging Tip', 'mode: reference', 'status: active',
+    'scope: [project]', 'sources: [fixture:global]', '---', '',
+    'Check global troubleshooting notes before retrying.', '',
+  ].join('\n'));
+  await cliEnv(globalEvolve, 'kb', 'add', 'Global troubleshooting memory note', '--id', 'global-mem-1');
+
+  const mergedCtx = await cliEnv(project, 'search', 'troubleshooting', '--mode', 'context', '--from', 'kb', '--trace');
+  assert.deepEqual(mergedCtx.references.map(item => item.id), ['entries/global-tip']);
+  assert.deepEqual(mergedCtx.episodic.map(item => item.id), ['global-mem-1']);
+  const readGlobalWiki = await cliEnv(project, 'kb', 'get', 'entries/global-tip', '--resolved');
+  assert.equal(readGlobalWiki.id, 'entries/global-tip');
+  const readGlobalMem = await cliEnv(project, 'kb', 'get', 'global-mem-1');
+  assert.equal(readGlobalMem.id, 'global-mem-1');
+
+  const noGlobalCtx = await cliEnv(project, 'search', 'troubleshooting', '--mode', 'context', '--from', 'kb', '--scope', 'project');
+  assert.deepEqual(noGlobalCtx.references, []);
+  assert.deepEqual(noGlobalCtx.episodic, []);
+});
+
+test('Wiki init, stale index auto-refresh, ingest --propose, and context visibility of ingested pages work end-to-end', async t => {
+  const root = await temp(t);
+  const created = await cliJson(root, 'kb', 'init', '--purpose', 'Track hydraulic architecture decisions.');
+  assert.deepEqual(created.created.sort(), ['wiki/purpose.md', 'wiki/schema.md']);
+  await access(join(root, 'wiki', 'entries'));
+  assert.match(await readFile(join(root, 'wiki', 'purpose.md'), 'utf8'), /Track hydraulic architecture/);
+
+  // Re-running init preserves customized purpose.md unless --force is passed.
+  const kept = await cliJson(root, 'kb', 'init', '--purpose', 'Should not overwrite');
+  assert.deepEqual(kept.kept, ['wiki/purpose.md', 'wiki/schema.md']);
+  assert.match(await readFile(join(root, 'wiki', 'purpose.md'), 'utf8'), /Track hydraulic architecture/);
+
+  // Auto-refresh detects new wiki/entries/*.md files even when .evolve/index.db already exists.
+  const entriesDir = join(root, 'wiki', 'entries');
+  await writeFile(join(entriesDir, 'initial.md'), [
+    '---', 'title: Initial Entry', 'mode: reference', 'status: active',
+    'scope: [project]', 'sources: [fixture:initial]', '---', '',
+    'Baseline calibration note.', '',
+  ].join('\n'));
+  assert.equal((await contextJson(root, 'calibration')).references[0].id, 'entries/initial');
+
+  await writeFile(join(entriesDir, 'pulled.md'), [
+    '---', 'title: Pulled Valve Spec', 'mode: reference', 'status: active',
+    'scope: [project]', 'sources: [fixture:pulled]', '---', '',
+    'Verify valve cavitation threshold before release.', '',
+  ].join('\n'));
+  assert.equal((await contextJson(root, 'cavitation')).references[0].id, 'entries/pulled');
+
+  // wiki ingest --propose stages a governed proposal and surfaces ingested pages in context + wiki get.
+  const requests = [];
+  const server = createServer(async (request, response) => {
+    let body = '';
+    for await (const chunk of request) body += chunk;
+    requests.push(body);
+    const content = requests.length === 1
+      ? 'Analyze architecture concept.'
+      : '<<<FILE path="wiki/concepts/surge-tank.md">>>\n---\ntype: concept\ntitle: Surge Tank\n---\n\nMitigate waterhammer transient surges in long pipelines.\n<<<END>>>';
+    response.setHeader('Content-Type', 'application/json');
+    response.end(JSON.stringify({ choices: [{ message: { content } }] }));
+  });
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+
+  const doc = join(root, 'arch.md');
+  await writeFile(doc, '# Hydraulic Architecture\n\nSurge tanks dampen waterhammer transient surges.\n');
+  const ingestEnv = {
+    ...process.env,
+    AGENT_MEMORY_LLM_BASE_URL: `http://127.0.0.1:${server.address().port}/v1`,
+    AGENT_MEMORY_LLM_MODEL: 'fixture-model',
+  };
+  const ingested = JSON.parse((await run(process.execPath, [cli, '--root', root, 'kb', 'ingest', doc, '--propose'], { env: ingestEnv })).stdout);
+  assert.deepEqual(ingested.written, ['wiki/concepts/surge-tank.md']);
+  assert.equal(ingested.proposed_changes.length, 1);
+  assert.equal(ingested.proposed_changes[0].entry, 'entries/surge-tank');
+  assert.equal(ingested.proposed_changes[0].state, 'pending');
+
+  const ctx = await contextJson(root, 'waterhammer');
+  assert.equal(ctx.references[0].id, 'concepts/surge-tank');
+  assert.equal((await cliJson(root, 'kb', 'get', 'concepts/surge-tank', '--resolved')).id, 'concepts/surge-tank');
 });

@@ -13,7 +13,7 @@ const entry = folder + '/SKILL.md';
 const reference = folder + '/references/check.md';
 const baseline = '---\nname: replay-fixture\nrequired_links: [references/check.md]\n---\n[Checks](references/check.md)\n[Outside](../../outside.md)\n';
 const guidance = 'Follow the fixture checks.\n';
-const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
+const cli = fileURLToPath(new URL('../dist/workflow-cli.js', import.meta.url));
 const runner = fileURLToPath(new URL('../skills/workflow-evolve/scripts/codex-replay.mjs', import.meta.url));
 const fakeCodex = join(fixture, 'fake-codex.mjs');
 const sha256 = data => createHash('sha256').update(data).digest('hex');
@@ -40,30 +40,44 @@ try {
   writeFileSync(fakeCodex, [
     "import assert from 'node:assert/strict';",
     "import { execFileSync } from 'node:child_process';",
-    "const setting = name => JSON.parse(process.argv.find(arg => arg.startsWith('mcp_servers.evolve_replay.' + name + '=')).split('=').slice(1).join('='));",
-    "const request = (id, name, args = {}) => ({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } });",
+    "assert.ok(process.argv.every(arg => !arg.startsWith('mcp_servers.')));",
+    "const replayCli = process.env.EVOLVE_REPLAY_CLI;",
+    "const configPath = process.env.EVOLVE_REPLAY_CONFIG;",
+    "const call = (...args) => JSON.parse(execFileSync(process.execPath, [replayCli, '--config', configPath, ...args], { encoding: 'utf8' }));",
     "const { FIXTURE_ENTRY, FIXTURE_OMIT_LINK } = process.env;",
-    "const calls = [request(1, 'memory_search', { query: 'staging' }), request(2, 'memory_search', { query: 'migration' }), request(3, 'memory_get', { id: 'migration-check' }), request(4, 'read_skill'), request(5, 'read_skill', { from: FIXTURE_ENTRY, destination: '../../outside.md' })];",
-    "if (!FIXTURE_OMIT_LINK) calls.push(request(6, 'read_skill', { from: FIXTURE_ENTRY, destination: 'references/check.md' }));",
-    "process.stdin.resume();",
+    "let prompt = '';",
+    "process.stdin.setEncoding('utf8');",
+    "process.stdin.on('data', chunk => { prompt += chunk; });",
     "process.stdin.on('end', () => {",
-    "  const output = execFileSync(setting('command'), setting('args'), { input: calls.map(call => JSON.stringify(call)).join('\\n') + '\\n', encoding: 'utf8' });",
-    "  const results = output.trim().split(/\\r?\\n/).map(line => JSON.parse(line).result);",
-    "  assert.ok(results[4].isError);",
-    "  assert.ok(results.filter((_, index) => index !== 4).every(result => !result.isError));",
-    "  assert.match(JSON.parse(results[3].content[0].text).markdown, /\\[Checks\\]/);",
+    "  if (prompt.startsWith('You are a strict evaluator')) {",
+    "    assert.match(prompt, /RUBRIC:\\n- Mentions the fixture result/);",
+    "    const verdict = process.env.FIXTURE_JUDGE === 'fail' ? { passed: false, feedback: 'missed the rollback step' } : { passed: true, feedback: 'all criteria met' };",
+    "    process.stdout.write(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: JSON.stringify(verdict) } }) + '\\n');",
+    "    process.stdout.write(JSON.stringify({ type: 'turn.completed' }) + '\\n');",
+    "    return;",
+    "  }",
+    "  assert.ok(replayCli && configPath);",
+    "  assert.match(prompt, /memory-search/);",
+    "  assert.match(prompt, /skill-read/);",
+    "  call('memory-search', 'staging');",
+    "  call('memory-search', 'migration');",
+    "  call('memory-get', 'migration-check');",
+    "  const skill = call('skill-read');",
+    "  assert.match(skill.markdown, /\\[Checks\\]/);",
+    "  assert.throws(() => call('skill-read', '--from', FIXTURE_ENTRY, '../../outside.md'));",
+    "  if (!FIXTURE_OMIT_LINK) call('skill-read', '--from', FIXTURE_ENTRY, 'references/check.md');",
     "  process.stdout.write(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'fixture result' } }) + '\\n');",
     "  process.stdout.write(JSON.stringify({ type: 'turn.completed' }) + '\\n');",
     "});",
   ].join('\n'));
   const db = join(fixture, 'memory.db');
-  run(process.execPath, [cli, 'memory', 'put', 'Staging migration checks', '--db', db, '--id', 'migration-check']);
+  run(process.execPath, [cli, 'kb', 'add', 'Staging migration checks', '--db', db, '--id', 'migration-check']);
   const env = { ...process.env, CODEX_REPLAY_EXECUTABLE: fakeCodex, AGENT_MEMORY_DB: db, FIXTURE_ENTRY: entry,
     MAESTRO_REPLAY_CLI: join(fixture, 'unused-host.js'), AGENT_MEMORY_REPLAY_CLI: join(fixture, 'unused-alias.js') };
   const replay = (options = {}) => run(process.execPath, [runner], {
     env: { ...env, ...options.env },
     input: JSON.stringify({
-      id: 'native-replay-contract', input: { task: 'Prepare staging migration.', expected: 'fixture result' },
+      id: 'native-replay-contract', input: options.input ?? { task: 'Prepare staging migration.', expected: 'fixture result' },
       entry, commit: options.commit ?? commit,
     }),
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -71,6 +85,15 @@ try {
 
   const result = JSON.parse(replay());
   assert.equal(result.passed, true);
+  const wrong = JSON.parse(replay({ input: { task: 'Prepare staging migration.', expected: 'other result' } }));
+  assert.equal(wrong.passed, false);
+  assert.match(wrong.feedback, /expected "other result" but answered "fixture result"/);
+  const rubric = { task: 'Prepare staging migration.', rubric: ['Mentions the fixture result'] };
+  assert.equal(JSON.parse(replay({ input: rubric })).passed, true);
+  const judged = JSON.parse(replay({ input: rubric, env: { FIXTURE_JUDGE: 'fail' } }));
+  assert.equal(judged.passed, false);
+  assert.equal(judged.feedback, 'missed the rollback step');
+  assert.throws(() => replay({ input: { task: 'Prepare staging migration.' } }), /expected output or rubric/);
   assert.deepEqual(result.loaded, [
     { path: entry, sha256: sha256(baseline) }, { path: reference, sha256: sha256(guidance) },
   ]);

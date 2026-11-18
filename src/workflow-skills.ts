@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
 import { parse } from 'yaml';
 import { InputError, requireText } from './common.js';
+import { isWikiCategory, type WikiCategory } from './wiki-entry.js';
 import { historicalWorkflowName, odysseyModes, orchestrationSteps, workflowName } from './workflow-names.js';
 
 export interface ArtifactType {
@@ -29,12 +30,14 @@ export interface WorkflowSkill {
   consumes: InputSlot[];
   produces: OutputSlot[];
   gates: { entry: string[]; exit: string[] };
+  wiki_categories?: WikiCategory[];
+  search_profile?: { wiki?: string[]; memory?: string[] };
 }
 
 const internal = new Set(orchestrationSteps.map(workflowName));
 const odyssey = new Map(odysseyModes.map(mode => ['ew-odyssey-' + mode, mode]));
 export const commandNames = [
-  ...internal, ...odyssey.keys(), 'team-swarm', 'ew-impeccable',
+  ...internal, ...odyssey.keys(), 'ew-swarm', 'ew-impeccable',
 ];
 
 export function workflowHash(bytes: Buffer | string) {
@@ -126,6 +129,37 @@ export function readWorkflowLink(root: string, skill: WorkflowSkill, from: strin
   return readWorkflowMarkdown(root, skill, linkPath(from, destination));
 }
 
+export const projectSkillRoots = ['skills', '.agents/skills', '.codex/skills', '.claude/skills'] as const;
+
+export function findWorkflowPackageTree(
+  root: string,
+  commit: string,
+  packageName: string,
+  isStep: boolean,
+  legacy = false,
+) {
+  const suffix = isStep
+    ? (legacy ? 'maestro/steps/' : 'ew-orchestrate/steps/') + packageName
+    : packageName;
+  for (const skillRoot of projectSkillRoots) {
+    const packagePath = `${skillRoot}/${suffix}`;
+    const tree = findTreeMember(root, commit, packagePath);
+    if (tree?.type === 'tree') return { packagePath, tree };
+  }
+  return undefined;
+}
+
+function parseProfileTags(value: unknown): string[] | undefined {
+  if (Array.isArray(value)) {
+    const items = [...new Set(value.filter((item): item is string => typeof item === 'string' && item.trim().length > 0).map(item => item.trim()))];
+    return items.length ? items : undefined;
+  }
+  if (typeof value === 'string' && value.trim() && value.trim() !== 'optional') {
+    return [value.trim()];
+  }
+  return undefined;
+}
+
 export function bindWorkflowSkill(root: string, command: string, commit = workflowHead(root)): WorkflowSkill {
   if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(command) || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit)) {
     throw new InputError('Invalid Skill command or Git commit');
@@ -134,14 +168,16 @@ export function bindWorkflowSkill(root: string, command: string, commit = workfl
   const mode = odyssey.get(name);
   const expectedId = mode ? 'ew-odyssey' : name;
   const isStep = internal.has(name);
-  let packagePath = isStep ? 'skills/ew-orchestrate/steps/' + name : 'skills/' + expectedId;
-  let tree = findTreeMember(root, commit, packagePath);
+  let matched = findWorkflowPackageTree(root, commit, isStep ? name : expectedId, isStep);
   const oldName = historicalWorkflowName(expectedId);
-  if (!tree && oldName) {
-    packagePath = isStep ? 'skills/maestro/steps/' + oldName : 'skills/' + oldName;
-    tree = findTreeMember(root, commit, packagePath);
+  if (!matched && oldName) {
+    matched = findWorkflowPackageTree(root, commit, oldName, isStep, true);
   }
-  if (tree?.type !== 'tree') throw new InputError('Workflow package is unavailable: ' + packagePath);
+  if (!matched) {
+    const fallbackPath = isStep ? 'skills/ew-orchestrate/steps/' + name : 'skills/' + expectedId;
+    throw new InputError('Workflow package is unavailable: ' + fallbackPath);
+  }
+  const { packagePath, tree } = matched;
   const entry = 'SKILL.md';
   const header = workflowHeader(workflowBlob(root, commit, packagePath + '/' + entry).toString('utf8'));
   const skillId = requireText(header.name, 'Skill name');
@@ -159,10 +195,22 @@ export function bindWorkflowSkill(root: string, command: string, commit = workfl
     ...workflowMeta(value), path: workflowPath(requireText(value.path, 'output path')), required: value.required === true,
   })) : [];
   if (produces.some(item => !item.path.startsWith('outputs/'))) throw new InputError('Skill output slots belong under outputs/');
-  const skill = {
+  const rawCategories = parseProfileTags(modeHeader?.wiki_categories ?? header.wiki_categories)?.filter(isWikiCategory);
+  const rawProfile = modeHeader?.search_profile ?? header.search_profile;
+  const profileObj = rawProfile && typeof rawProfile === 'object' && !Array.isArray(rawProfile)
+    ? rawProfile as Record<string, unknown>
+    : undefined;
+  const wikiProfile = parseProfileTags(profileObj?.wiki);
+  const memoryProfile = parseProfileTags(profileObj?.memory);
+  const searchProfile = wikiProfile?.length || memoryProfile?.length
+    ? { ...(wikiProfile?.length ? { wiki: wikiProfile } : {}), ...(memoryProfile?.length ? { memory: memoryProfile } : {}) }
+    : undefined;
+  const skill: WorkflowSkill = {
     skill_id: skillId, commit, tree: tree.object, package_path: packagePath, entry,
     required_links: [entry, ...links.map(link => linkPath(entry, link))],
     consumes, produces, gates: { entry: workflowStrings(gates.entry ?? [], 'entry gates'), exit: workflowStrings(gates.exit ?? [], 'exit gates') },
+    ...(rawCategories?.length ? { wiki_categories: rawCategories } : {}),
+    ...(searchProfile ? { search_profile: searchProfile } : {}),
   };
   for (const link of links) readWorkflowLink(root, skill, entry, link);
   return skill;

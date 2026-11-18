@@ -1,16 +1,15 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { lstatSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
-import { stringify } from 'yaml';
 import { buildCloseoutHarvestPrompt, buildWikiRelationPrompt } from './agent-memory-prompts.js';
 import { InputError, NotFoundError, openDb, requireText, transaction } from './common.js';
 import { extractMemoryInputs, validateConversationMessages, type ConversationMessage } from './memory.js';
-import type { LlmClient } from './upstream/llm.js';
+import { chatWithFormatRetry, extractJsonArray, type LlmClient } from './upstream/llm.js';
 import type { Wiki } from './wiki.js';
 import { parseFrontmatter, readSources } from './upstream/frontmatter.js';
 import { unionSources } from './upstream/merge.js';
 import { readCompletionTranscriptRefs, readTranscriptSnapshots } from './transcript-evidence.js';
-import { applyWikiChange, proposeWikiChange } from './wiki-change.js';
+import { applyWikiChange, closeoutDbPath, proposeWikiChange } from './wiki-change.js';
 import { formatKnowledgeReadsMessage, validateKnowledgeReads, type KnowledgeReadsReceipt } from './knowledge-reads.js';
 
 export interface Completion {
@@ -35,25 +34,33 @@ interface Candidate {
 }
 
 async function compareReferences(wiki: Wiki, content: string, model: () => LlmClient): Promise<Candidate['related_entries']> {
-  if (!lstatSync(wiki.indexPath, { throwIfNoEntry: false })?.isFile()) return undefined;
+  if (!wiki.readableIndexPath() && !wiki.hasWiki()) return undefined;
   const matches = wiki.search(content, { limit: 5 }).results
     .map(hit => wiki.getEntry(hit.id))
     .filter((entry): entry is NonNullable<typeof entry> => entry?.entry?.status === 'active');
   if (!matches.length) return undefined;
   const promptSpec = buildWikiRelationPrompt();
-  const response = await model().chat({
-    system: promptSpec.system,
-    prompt: JSON.stringify({ content, entries: matches.map(entry => ({
-      id: entry.id, body: entry.body, scope: entry.entry?.scope,
-    })) }),
-    label: promptSpec.label,
-  });
-  const json = response.replace(/<think>[\s\S]*?<\/think>\s*/g, '').match(/\[[\s\S]*\]/)?.[0];
-  if (!json) throw new InputError('Wiki comparison did not return a JSON array');
+  const parsed = await chatWithFormatRetry(
+    model(),
+    {
+      system: promptSpec.system,
+      prompt: JSON.stringify({ content, entries: matches.map(entry => ({
+        id: entry.id, body: entry.body, scope: entry.entry?.scope,
+      })) }),
+      label: promptSpec.label,
+    },
+    raw => {
+      const array = extractJsonArray(raw, ['relations', 'items', 'results', 'data']);
+      if (!array) throw new InputError('Wiki comparison did not return a JSON array');
+      return array;
+    },
+    'Return ONLY a JSON array of {"id":"supplied entry ID","relation":"conflict|overlap"} or [].',
+  );
   const known = new Map(matches.map(entry => [entry.id, entry]));
   const related: NonNullable<Candidate['related_entries']> = [];
-  for (const value of JSON.parse(json) as unknown[]) {
-    const { id, relation } = object(value);
+  for (const value of parsed) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const { id, relation } = value as Record<string, unknown>;
     if (typeof id !== 'string' || (relation !== 'conflict' && relation !== 'overlap')) continue;
     const entry = known.get(id);
     if (entry && !related.some(item => item.id === id)) related.push({ id, relation, sources: entry.sources });
@@ -61,11 +68,11 @@ async function compareReferences(wiki: Wiki, content: string, model: () => LlmCl
   return related.length ? related : undefined;
 }
 
-function appendReferenceSources(wiki: Wiki, candidate: Candidate): boolean {
+function appendReferenceSources(wiki: Wiki, closeout: string, candidate: Candidate): boolean {
   if (!candidate.matched_entry || candidate.related_entries?.length) return false;
   const entry = wiki.getEntry(candidate.matched_entry);
   if (!entry || entry.entry?.mode !== 'reference' || entry.entry.status !== 'active' ||
-      !entry.entry.scope.includes('project') ||
+      !entry.entry.scope.includes('project') || entry.entry.scope.some(item => item.startsWith('skill:')) ||
       entry.body.trim() !== candidate.content.trim()) return false;
 
   const file = join(wiki.root, entry.path);
@@ -78,15 +85,11 @@ function appendReferenceSources(wiki: Wiki, candidate: Candidate): boolean {
   const sources = readSources(original);
   const merged = unionSources(sources, candidate.sources);
   if (merged.every((source, index) => source === sources[index]) && merged.length === sources.length) return true;
-  const temporary = join(dirname(file), `.${randomUUID()}.tmp`);
-  try {
-    writeFileSync(temporary, `---\n${stringify({ ...frontmatter, sources: merged })}---\n${body}`, { flag: 'wx' });
-    if (readFileSync(file, 'utf8') !== original) throw new InputError(`Wiki entry changed: ${entry.id}`);
-    renameSync(temporary, file);
-    return true;
-  } finally {
-    rmSync(temporary, { force: true });
-  }
+  const proposal = proposeWikiChange(wiki, { operation: 'update', entry: entry.id }, [], {
+    closeout, id: candidate.id, sources: candidate.sources, related: [],
+  });
+  applyWikiChange(wiki, proposal.id);
+  return true;
 }
 
 function object(value: unknown): Record<string, unknown> {
@@ -240,7 +243,7 @@ function skillCompletionId(project: string, execution: string) {
 }
 
 function ledgerPath(wiki: Wiki): string {
-  return join(wiki.root, '.agent-memory', 'closeout.db');
+  return closeoutDbPath(wiki.root);
 }
 
 function closeoutColumns(db: ReturnType<typeof openDb>): Set<string> {
@@ -366,6 +369,27 @@ export function readSkillExecution(wiki: Wiki, project: string, execution: strin
   return { ...completion, skill: completion.skill };
 }
 
+export async function harvestConversation(
+  wiki: Wiki,
+  project: string,
+  conversation: { host: string; session: string; messages: ConversationMessage[] },
+  model: () => LlmClient,
+) {
+  if (!conversation.messages.length) throw new InputError('Conversation has no extractable messages');
+  validateConversationMessages(conversation.messages);
+  const hash = createHash('sha256').update(JSON.stringify(conversation.messages)).digest('hex').slice(0, 12);
+  const rawTimestamp = conversation.messages.at(-1)!.timestamp;
+  const parsedTime = new Date(rawTimestamp);
+  const timestamp = Number.isFinite(parsedTime.getTime()) ? parsedTime.toISOString() : new Date().toISOString();
+  const completion: Completion = {
+    id: `conv-${conversation.host}-${conversation.session}-${hash}`,
+    session: conversation.session,
+    timestamp,
+    messages: conversation.messages,
+  };
+  return harvestResolvedCompletion(wiki, project, completion, model);
+}
+
 export async function harvestCompletion(wiki: Wiki, project: string, value: unknown, model: () => LlmClient,
   sessionDirectory?: string) {
   const completion = parseReceipt(value);
@@ -419,24 +443,26 @@ async function harvestResolvedCompletion(wiki: Wiki, project: string, completion
         related: wiki.getEntriesByExactBody(item.content).length === 0 ? await compareReferences(wiki, item.content, model) : undefined,
       });
     }
+    const replay = previous();
+    if (replay) return { id: identity, replayed: true, candidates: replay, ...metadata };
+    const candidates: Candidate[] = proposals.map(({ related, ...proposal }) => {
+      const exact = wiki.getEntriesByExactBody(proposal.content);
+      return {
+        ...proposal,
+        matched_entry: exact.length === 1 ? exact[0].id : null,
+        ...(exact.length > 1 || related ? {
+          related_entries: [
+            ...(exact.length > 1 ? exact.map(({ id, sources }) => ({ id, sources, relation: 'same_content' as const })) : []),
+            ...(related ?? []).filter(entry => !exact.some(hit => hit.id === entry.id)),
+          ],
+        } : {}),
+      };
+    });
+    const pending = candidates.filter(candidate => !appendReferenceSources(wiki, identity, candidate));
+    if (pending.length !== candidates.length && !wiki.readableIndexPath()) wiki.build();
     const result = transaction(db, () => {
-      const replay = previous();
-      if (replay) return { id: identity, replayed: true, candidates: replay };
-      const candidates: Candidate[] = proposals.map(({ related, ...proposal }) => {
-        const exact = wiki.getEntriesByExactBody(proposal.content);
-        return {
-          ...proposal,
-          matched_entry: exact.length === 1 ? exact[0].id : null,
-          ...(exact.length > 1 || related ? {
-            related_entries: [
-              ...(exact.length > 1 ? exact.map(({ id, sources }) => ({ id, sources, relation: 'same_content' as const })) : []),
-              ...(related ?? []).filter(entry => !exact.some(hit => hit.id === entry.id)),
-            ],
-          } : {}),
-        };
-      });
-      const pending = candidates.filter(candidate => !appendReferenceSources(wiki, candidate));
-      if (pending.length !== candidates.length) wiki.build();
+      const savedReplay = previous();
+      if (savedReplay) return { id: identity, replayed: true, candidates: savedReplay, ...metadata };
       db.prepare('INSERT INTO closeouts (id, payload_hash, candidates, session_id, receipt_id) VALUES (?, ?, ?, ?, ?)')
         .run(identity, payloadHash, JSON.stringify(pending), metadata.session_id, metadata.receipt_id);
       return { id: identity, replayed: false, candidates: pending, ...metadata };
@@ -464,10 +490,10 @@ export function readCloseoutCandidate(wiki: Wiki, closeoutId: string, candidateI
   return candidate;
 }
 
-export function publishReference(wiki: Wiki, closeoutId: string, candidateId: string, title: string) {
+export function publishReference(wiki: Wiki, closeoutId: string, candidateId: string, title: string, entry?: string) {
   title = requireText(title, 'reference title');
   const candidate = readCloseoutCandidate(wiki, closeoutId, candidateId);
-  const id = `entries/${candidateId}`;
+  const id = entry === undefined ? `entries/${candidateId}` : requireText(entry, 'Wiki entry ID');
   if (candidate.matched_entry || candidate.related_entries?.length) {
     throw new InputError('Candidate has related Wiki entries; review the relationship and stage a Wiki change');
   }

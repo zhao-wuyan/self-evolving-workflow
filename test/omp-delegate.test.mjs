@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync, watch, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
-import { delegate } from '../dist/workflow-delegate.js';
+import { delegateOmp } from '../dist/workflow-delegate.js';
 import { executeOmpWorker } from '../dist/omp-worker.js';
 import { fixture } from './evolve-workflow-support.mjs';
 
@@ -26,13 +26,16 @@ test('OMP delegate requires an authenticated final result and rejects worker err
     const result=JSON.stringify({type:'evolve_worker_result',request_id:request.request_id,output:'Reviewed the permission boundary.'});
     process.stdout.write(result.slice(0,20)); setTimeout(()=>process.stdout.write(result.slice(20)+'\\n'),10);
   `);
-  assert.deepEqual(await delegate(root, { to: 'omp' }, ['Review']), { executor: 'omp', output: 'Reviewed the permission boundary.' });
+  assert.deepEqual(await delegateOmp(root, root, 'Review', 'analysis', {}), { executor: 'omp', output: 'Reviewed the permission boundary.' });
+  assert.deepEqual(JSON.parse(execFileSync(process.execPath, [cli, 'agent', 'exec', 'Review', '--to', 'omp'], {
+    cwd: root, encoding: 'utf8',
+  })), { executor: 'omp', output: 'Reviewed the permission boundary.' });
   writeFileSync(executable, readRequest + "console.log(JSON.stringify({type:'session'}));");
-  await assert.rejects(delegate(root, { to: 'omp' }, ['Review']), /did not return a result/);
+  await assert.rejects(delegateOmp(root, root, 'Review', 'analysis', {}), /did not return a result/);
   writeFileSync(executable, readRequest + "console.log(JSON.stringify({type:'evolve_worker_result',request_id:request.request_id,error:'Provider denied the request'}));");
-  await assert.rejects(delegate(root, { to: 'omp' }, ['Review']), /Provider denied/);
+  await assert.rejects(delegateOmp(root, root, 'Review', 'analysis', {}), /Provider denied/);
   writeFileSync(executable, readRequest + "console.log(JSON.stringify({type:'evolve_worker_result',request_id:request.request_id,output:'premature success'})); process.exitCode=7;");
-  await assert.rejects(delegate(root, { to: 'omp' }, ['Review']), /status 7/);
+  await assert.rejects(delegateOmp(root, root, 'Review', 'analysis', {}), /status 7/);
 });
 
 test('OMP delegate timeout terminates the owned process tree', async t => {
@@ -48,7 +51,7 @@ test('OMP delegate timeout terminates the owned process tree', async t => {
   const previous = process.env.OMP_EXECUTABLE;
   process.env.OMP_EXECUTABLE = executable;
   t.after(() => { if (previous === undefined) delete process.env.OMP_EXECUTABLE; else process.env.OMP_EXECUTABLE = previous; });
-  await assert.rejects(delegate(root, { to: 'omp', timeout: '1' }, ['Review']), /timed out/);
+  await assert.rejects(delegateOmp(root, root, 'Review', 'analysis', { timeout: '1000' }), /timed out/);
   assert.ok(existsSync(heartbeat), 'descendant ran before cancellation');
   const stopped = readFileSync(heartbeat, 'utf8');
   await delay(120);
@@ -67,9 +70,9 @@ test('OMP cancellation returns failure and terminates its owned worker', { timeo
   `);
   const runner = join(root, 'cancel.mjs');
   // IPC 在 Windows/POSIX 都可用，触发与终端 SIGINT 相同的取消监听器。
-  writeFileSync(runner, `import {delegate} from ${JSON.stringify(new URL('../dist/workflow-delegate.js', import.meta.url).href)};
+  writeFileSync(runner, `import {delegateOmp} from ${JSON.stringify(new URL('../dist/workflow-delegate.js', import.meta.url).href)};
     process.on('message',()=>process.emit('SIGINT'));
-    try{await delegate(process.cwd(),{to:'omp'},['Review']);process.exitCode=9}
+    try{await delegateOmp(process.cwd(),process.cwd(),'Review','analysis',{});process.exitCode=9}
     catch(e){console.error(e.message);process.exitCode=1}
     finally{process.disconnect()}`);
   const ready = Promise.withResolvers();
@@ -137,7 +140,7 @@ test('OMP worker knowledge tools record the selected Run, not an unrelated Run',
     } };
   });
   const response = await executeOmpWorker({request_id:'bound',cwd:f.root,prompt:'Inspect',mode:'analysis',model:'@plan',
-    binding:{node:process.execPath,cli,root:f.root,session:'selected',run:selected.run_id}}, {cwd:f.root}, sdk);
+    binding:{root:f.root,session:'selected',run:selected.run_id}}, {cwd:f.root}, sdk);
   assert.equal(response.error, undefined);
   assert.equal(seen, true);
   const bound = f.evolve('run','brief',selected.run_id,'--session','selected');

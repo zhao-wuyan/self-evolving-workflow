@@ -36,7 +36,12 @@ export function createSearchServer(sources: SearchSources) {
       const repository = params.get('repository') ?? undefined;
       if (repository !== undefined && !isRepositoryId(repository)) throw new InputError('Expected a persisted repository UUID');
       if (url.pathname === '/context') {
-        return send(200, withTrace(await buildContext(sources, params.get('q') ?? '', {
+        const scopedSources: SearchSources = scope === 'all' ? sources : {
+          ...(scope === 'code' ? { code: sources.code } : {}),
+          ...(scope === 'wiki' ? { wiki: sources.wiki } : {}),
+          ...(scope === 'memory' ? { memory: sources.memory } : {}),
+        };
+        return send(200, withTrace(await buildContext(scopedSources, params.get('q') ?? '', {
           limit,
           context: {
             task: params.get('task') ?? undefined,

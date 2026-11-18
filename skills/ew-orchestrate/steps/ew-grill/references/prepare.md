@@ -15,7 +15,7 @@ Confirm mode, depth, upstream seed, and read-only invariants before executing [w
 
 ## Knowledge & Context Pre-load
 
-1. Reuse bound `session-priors` when `arch`/`review` scope matches; otherwise query Run MCP `wiki_context` + `wiki_reference` (or CLI `evolve context "<topic keywords>" --task grill --session <session> --include-memory --reads "<run_dir>/knowledge-reads.json"` + `--from-search <search-id>`).
+1. Complete the Run Knowledge Gate (`evolve skill workflows show session-run`, CLI `--task grill` when using `--reads`) for `arch`/`review` scope.
 2. Run `evolve code search "<topic>"` only after the Knowledge Gate when mapping overlapping symbols.
 
 ## Boundaries & Invariants

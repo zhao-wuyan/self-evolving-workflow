@@ -1,117 +1,130 @@
-import { existsSync, lstatSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { CodeGraph } from './code.js';
-import { configureMemory, installCodexMemoryHook, memoryHosts, parseMemoryHosts } from './memory-config.js';
-import { handleMemoryHook, readMemoryConversation, syncMemoryHost } from './memory-history.js';
-import { InputError, requireText } from './common.js';
-import { createSearchServer } from './http.js';
-import { MemoryStore, type ConversationMessage } from './memory.js';
-import { context as buildContext, parseScope, search, type SearchScope, type SearchSources } from './search.js';
-import { Wiki } from './wiki.js';
+
 import {
-  harvestCompletion, publishReference, readCloseoutCandidate, readCompletionReceipts,
+  configureMemory, installCodexMemoryHook,
+  parseMemoryHosts,
+} from './memory-config.js';
+import {
+  handleMemoryHook, handleSessionStartHook, memoryHookTarget, readHostConversationMessages,
+  readMemoryConversation, syncMemoryHost,
+} from './memory-history.js';
+import { acknowledgeReminders, readReminders } from './memory-reminders.js';
+import {
+  drainMemoryHookJobs, enqueueMemoryHook, hasPendingMemoryHookJobs, readMemoryHookInput,
+  readMemoryHookJobs, retryMemoryHookJobs, startMemoryHookWorker,
+} from './memory-hook-jobs.js';
+import { InputError, evolveDir, evolvePath, requireText } from './common.js';
+import { defaultMemoryDbPath, MemoryStore, type ConversationMessage } from './memory.js';
+import { unifiedSearch } from './search.js';
+import { KnowledgeStore, type KnowledgeFilters, type KnowledgeInput, type KnowledgeLayer, type KnowledgeMutationOptions } from './kb.js';
+import { initWiki, Wiki } from './wiki.js';
+import {
+  harvestCompletion, harvestConversation, publishReference, readCloseoutCandidate, readCompletionReceipts,
   readHarvest, readSkillCompletions, recordSkillCompletion,
 } from './closeout.js';
 import { reviewSession, reviewSkillExecution } from './retrospective.js';
-import { draftSkillAddition } from './skill-addition.js';
+import { draftSkillAddition, draftSkillRetirement } from './skill-addition.js';
 import { changeSkillVersion, replaySkillAddition } from './skill-replay.js';
-import { migrateLegacyWiki, validateWikiMemberUid } from './wiki-migration.js';
-import { isRepositoryId, isWikiCategory, type WikiContext } from './wiki-entry.js';
+import { migrateLegacyWiki } from './wiki-migration.js';
+import { isRepositoryId, isWikiCategory } from './wiki-entry.js';
 import { applyWikiChange, listWikiChanges, proposeWikiChange } from './wiki-change.js';
 import { KnowledgeReads, validateKnowledgeReads } from './knowledge-reads.js';
 import { decideSkillRoute } from './skill-route.js';
+import { learningBloat, readSkillLearnings, skillLearningUsage } from './skill-learnings.js';
 import { evolveSessionReceipt, readEvolveSessions, workflowDbPath } from './workflow-runtime.js';
 import {
   applySkillDesign, createSkillDesignTask, readSkillDesignTask, replaySkillDesign,
-  reviewSkillDesign, runSkillDesign,
+  resolveSkillEntry, reviewSkillDesign, runSkillDesign,
 } from './skill-design.js';
 import { createModelClient } from './model-client.js';
 import { openKnowledgeSources, type KnowledgeSources } from './knowledge-sources.js';
 import { appendRemoteReads } from './openviking/evidence.js';
 import { readProject } from './openviking/config.js';
+import { FrozenMemoryReader } from './openviking/frozen.js';
 import { parseRemoteMemoryId } from './openviking/memory.js';
 
-export function knowledgeHelp(invocation: 'agent-memory' | 'evolve') {
-  const skills = invocation === 'evolve' ? 'skills' : 'evolve';
+export function knowledgeHelp(invocation: 'evolve' = 'evolve') {
   return `Usage: ${invocation} <command> [options]
 
-  code build|sync                          Build or update the project's code graph
+  search <query>                           Aggregate knowledge and code (--from kb,code|all)
+                                           --mode merged|context --scope project|global|local
+  kb add <text>                            Add a record (--kind episodic|reference|constraint)
+  kb get <id>                              Read a complete record and its provenance
+  kb list                                  List records with filters and stable pagination
+  kb search <query>                        Search knowledge records only
+  kb update <id> [text]                     Update a record without replacing omitted fields
+  kb delete <id>                           Delete episodic data or propose retiring formal knowledge
+  kb init|build|ingest <file>               Initialize, index or ingest knowledge documents
+  kb import [source]                       Preview legacy knowledge migration (--project, --apply)
+  kb propose <change.json>                  Stage a governed knowledge change (--evidence)
+  kb changes [change-id]                    Inspect staged changes and application receipts
+  kb apply <change-id>                      Apply an approved change
+  kb config                                Configure extraction and host hooks (--scope project|global)
+  kb sync                                  Extract saved host conversations (--host codex|claude|agy|all)
+  kb extract <messages.json>               Extract episodic records (--session, --mode chat|code)
+  kb reminders [ack [id]]                   List or acknowledge knowledge/evolution reminders
+  kb hook-jobs [retry [id]]                 Inspect background extraction jobs or retry failures
+  kb hook-worker                          Drain queued hook events without host stdin
+  kb sources <id>                          Read original messages and transcript locations
+  kb history <id>                          Read archived versions of an episodic record
+  kb conversation <id>                     Read a conversation page (--host, --page, --limit)
+  kb harvest session|conversation|skill|receipt|scan <id>
+                                           Extract review candidates (--project)
+  kb candidates show|route|publish <id>     Inspect, route or publish reviewed candidates
+  code sync                                Build or update the project code graph
   code search <query>                      Find code symbols
-  code callers|callees <symbol-id>         Follow call edges (--depth 1)
-  code trace <from-id> <to-id>             Find a path between code symbols
-  wiki build                               Index Markdown pages under wiki/
-  wiki ingest <file.md|file.txt>            Generate and merge wiki pages
-  wiki search <query>                      Search wiki pages (--hop 0)
-  wiki get <id>                            Read a Wiki entry, including history (--resolved for scoped reference)
-  wiki references <query>                  Search active applicable references (--repository, --task, --path)
-  wiki reference <id>                      Compatibility alias for wiki get <id> --resolved
-  wiki constraints                         Resolve active constraints (--task, --path, --category, --repository, --keyword)
-  wiki migrate <legacy-root>               Preview legacy Wiki migration (--project, --scope project|global|team|personal, --uid, --knowhow-only, --apply)
-  wiki propose <change.json>               Stage create, update, promote, or retire (--evidence or --closeout and --candidate)
-  wiki changes [change-id]                 Read change previews and application receipts (--entry)
-  wiki apply <change-id>                   Apply an approved Wiki change
-  closeout harvest <receipt.json|id>       Extract Wiki candidates from a receipt or recorded Skill completion (--project)
-  closeout session <id>                    Harvest a committed Session receipt (--project, --receipt)
-  closeout skill <execution-id>            Record and harvest a standalone Skill completion
-                                          (--skill, --skill-version, --status, --transcript, --knowledge-receipt, --project, --record-only)
-  closeout resume <receipt-id>             Compatibility alias for closeout harvest <receipt-id>
-  closeout scan [source-project-root]      Reconcile committed Session and standalone Skill receipts (--project)
-  closeout show <receipt-id>                Show harvested candidates (--project)
-  closeout route <closeout-id> <candidate-id> Decide Wiki, Skill addition, or meta Skill design
-  closeout publish <closeout-id> <candidate-id> <title>
-                                          Publish a reviewed reference
-  session review <id>                      Review Session signals (--transcript <messages.json>)
-  ${skills} review <execution-id>             Review a standalone Skill receipt (--project <id>)
-  ${skills} draft <SKILL.md> <instruction>    Draft a Skill addition (--priority high|normal|low, --evidence <ref>, --when)
-  ${skills} replay <draft.json>               Compare baseline and candidate (--runner <script>, --scenarios <json>)
-  ${skills} apply|rollback <receipt-id>       Apply a validated version or revert it
-  skill-design task <task-id>              Read a generated meta Skill design task
-  skill-design run <task-id>                Run the explicit meta Skill design runner (--runner)
-  skill-design review <design-id>           Review the generated design against its baseline
-  skill-design replay <design-id>           Replay the reviewed design (--runner, --scenarios)
-  skill-design apply|rollback <design-id>  Apply or roll back the replayed design
-  memory put <text>                        Save a memory (--id, --type, --scene, --session, --priority)
-  memory extract <messages.json>           Extract L1 memories (--session required, --mode chat|code)
-  memory config                            Configure project extraction in the terminal (Codex, Claude Code, Antigravity CLI)
-                                          (--host codex|claude|agy|all|off, --base-url, --model, --yes)
-  memory sync                              Extract saved project chats (--host codex|claude|agy|all, --session)
-  memory codex-install                     Install the project's Codex Stop hook (review it in Codex to enable)
-  memory codex-sync                        Extract saved Codex chats for this project (--session to select one)
-  memory get|delete <id>                   Read or delete a memory
-  memory sources <id>                      Read a memory's original messages and transcript locations
-  memory search <query>                    Search memory (--type, --scene, --session, --page, --limit)
-                                          Returns short previews and shared command arguments for agents
-  memory conversation <session-or-memory-id>  View a conversation page (--host, --page, --limit)
-                                              A memory ID opens the source page
-  search <query>                           Search available indexes (--scope all|code|wiki|memory)
-  context <query>                          Build Agent Memory context envelope (--scope all|code|wiki|memory, --include-memory)
-  serve                                    Serve GET /search on 127.0.0.1 (--port 4310)
+  code graph <id> [to-id]                   Follow callers/callees or trace a path (--direction, --depth)
+  session review <id>                      Review Session execution signals
+  skill review|draft|replay|apply|rollback   Review and evolve a Skill from evidence
+                                           draft --supersedes <learning-id> replaces an existing learning
+  skill retire <entry> <learning-id>...     Draft removal of learnings (--evidence, --reason)
+  skill learnings <entry>                   Report learning usage and consolidation pressure
+  skill design task|run|review|replay|apply|rollback <id>
+                                           Execute the governed Skill design chain
 
 Options:
-  --root <dir>         Code project root and parent of wiki/ (default current directory)
-  --wiki-root <dir>    Override the parent of wiki/
-  --db <path>          Memory DB (default <root>/.agent-memory/memory.db)
+  --root <dir>          Project root (default current directory)
+  --wiki-root <dir>     Override the project Wiki root (OpenViking pins the release Wiki)
+  --scope <scope>       project: project only; global: user knowledge only; local: both (default)
+  --kind <kind>         episodic, reference or constraint
+  --status <status>     active, deprecated, needs_review or all
+  --task <kind>         Filter applicability; maps to episodic scene
+  --path <path>         Filter applicable file/dir paths (repeatable)
+  --category <cat>      Filter formal knowledge categories (repeatable)
+  --session <id>        Filter records; context mode binds the Run context identifier
+  --memory-session <id> Filter episodic records independently in context mode
+  --workflow-session <id> Pin OpenViking reads to an Evolve Session release
   --memory-backend <local|openviking> Select the Memory reader (writes remain local)
-  --workflow-session <id> Pin Memory reads to an Evolve Session; --session remains the Memory filter
-  --namespace <name>   Memory namespace (default default)
-  --memory-session <id> Memory session filter (context uses this instead of its context session)
   --context-file <path> Load shared task, path and Wiki filters from JSON
-  --trace               Include knowledge_reads search/read evidence in the result
-  --reads <path>        Load and persist a knowledge_reads receipt across CLI calls
+  --limit <n>           Maximum results (default 10); context keeps all applicable constraints
+  --page <n>            Page number for merged search, kb list/search or conversation
+  --hop <n>             Knowledge graph expansion depth
+  --title <text>        Formal knowledge title
+  --content <text>      Record content (or supply positional text)
+  --entry-scope <scope> Formal applicability: project, task:<kind> or path:<glob> (repeatable)
+  --evidence <ref>      Evidence for formal knowledge writes (repeatable)
+  --apply               Apply a formal change; otherwise writes return a proposal
+  --db <path>           Override the project episodic database
+  --namespace <name>    Episodic namespace (default default)
+  --reads <path>        Persist a knowledge_reads receipt across calls
   --trace-file <path>   Compatibility alias for --reads
-  --from-search <id>    Associate an exact read with an earlier search ID
+  --from-search <id>    Associate an exact read with a recorded search
+  --trace               Include knowledge_reads in the result
   --resolved            Read Wiki references using the active scope context
-  --json                Return raw memory search results or conversation pages. Output is always JSON
-  --limit <n>          Maximum results per source (default 10)
-  --help               Show this message
+  --help                Show this message
 
-Set an OpenAI-compatible chat endpoint with memory config or AGENT_MEMORY_LLM_BASE_URL and AGENT_MEMORY_LLM_MODEL.
-Use AGENT_MEMORY_LLM_API_KEY for endpoint authentication if required. Message files contain
-an array of {id, role, timestamp, content}. Commands return JSON on stdout.
-For a follow-up, append commands.get, sources, conversation or page to commands.prefix.
-Replace each {"arg":"id"} or {"arg":"host"} with the selected result's field and
-{"arg":"page"} with the previous or next page number.
+Writes default to project; --scope global selects user knowledge. Formal writes use governed proposals.
+Context defaults to episodic + formal knowledge + code. --from kb excludes code.
+Task/category/session filters apply to knowledge; --path also filters code file paths.
+Set an OpenAI-compatible extraction endpoint with kb config or AGENT_MEMORY_LLM_BASE_URL,
+AGENT_MEMORY_LLM_MODEL and, when required, AGENT_MEMORY_LLM_API_KEY.
+Message files contain an array of {id, role, timestamp, content}. Commands return JSON on stdout.
 `;
 }
 
@@ -121,6 +134,13 @@ export const knowledgeOptions = {
   db: { type: 'string' },
   namespace: { type: 'string' },
   scope: { type: 'string' },
+  from: { type: 'string' },
+  kind: { type: 'string' },
+  title: { type: 'string' },
+  content: { type: 'string' },
+  'entry-scope': { type: 'string', multiple: true },
+  direction: { type: 'string' },
+  global: { type: 'boolean' },
   limit: { type: 'string' },
   page: { type: 'string' },
   depth: { type: 'string' },
@@ -134,13 +154,12 @@ export const knowledgeOptions = {
   'context-file': { type: 'string' },
   id: { type: 'string' },
   priority: { type: 'string' },
-  port: { type: 'string' },
   mode: { type: 'string' },
   host: { type: 'string' },
   'base-url': { type: 'string' },
   model: { type: 'string' },
   yes: { type: 'boolean' },
-  skill: { type: 'string' }, // 收尾路由和执行回执的 Skill 标识，旧查询也可携带。
+  skill: { type: 'string' }, // 收尾路由和执行回执的 Skill 标识。
   task: { type: 'string' },
   category: { type: 'string', multiple: true },
   keyword: { type: 'string' },
@@ -177,11 +196,22 @@ export const knowledgeOptions = {
   closeout: { type: 'string' },
   candidate: { type: 'string' },
   when: { type: 'string' },
+  supersedes: { type: 'string', multiple: true },
+  reason: { type: 'string' },
   runner: { type: 'string' },
   scenarios: { type: 'string' },
   help: { type: 'boolean', short: 'h' },
   json: { type: 'boolean' },
+  'root-b64': { type: 'string' },
+  'timeout-ms': { type: 'string' },
+  'no-global': { type: 'boolean' },
+  background: { type: 'boolean' },
+  purpose: { type: 'string' },
+  schema: { type: 'string' },
+  force: { type: 'boolean' },
+  propose: { type: 'boolean' },
 } as const;
+
 
 
 interface CliWikiContext {
@@ -220,18 +250,53 @@ function readContextFile(path: string): CliWikiContext {
   };
 }
 
-function cliWikiContext(values: Record<string, unknown>): CliWikiContext {
+function detectRepositoryId(root: string): string | undefined {
+  for (const candidate of [evolvePath(root, 'repository.json'), join(resolve(root), '.workflow', 'repository.json')]) {
+    if (!existsSync(candidate)) continue;
+    try {
+      const parsed = JSON.parse(readFileSync(candidate, 'utf8').replace(/^\uFEFF/, '')) as { repo_id?: unknown };
+      if (isRepositoryId(parsed?.repo_id)) return parsed.repo_id;
+    } catch {
+      // 忽略无法解析的仓储元数据，保留显式参数控制。
+    }
+  }
+  return undefined;
+}
+
+function cliWikiContext(values: Record<string, unknown>, root: string): CliWikiContext {
   const file = typeof values['context-file'] === 'string' ? readContextFile(values['context-file']) : {};
   const paths = Array.isArray(values.path) ? values.path as string[] : file.paths;
   const categories = Array.isArray(values.category) ? values.category as string[] : file.categories;
+  const repository = typeof values.repository === 'string' ? values.repository : file.repository ?? detectRepositoryId(root);
   return {
     task: typeof values.task === 'string' ? values.task : file.task,
     paths, categories,
-    repository: typeof values.repository === 'string' ? values.repository : file.repository,
+    repository,
     keyword: typeof values.keyword === 'string' ? values.keyword : file.keyword,
     includePathScoped: typeof values['include-path-scoped'] === 'boolean'
       ? values['include-path-scoped'] : file.includePathScoped,
   };
+}
+
+function decodeWorkspaceCandidate(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  if (value.startsWith('file:')) {
+    try {
+      return fileURLToPath(value);
+    } catch {
+      return undefined;
+    }
+  }
+  return value;
+}
+
+function resolveHookRoot(rawRoot: string, input: unknown): string | undefined {
+  if (rawRoot !== 'auto') return resolve(rawRoot);
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
+  const event = input as Record<string, unknown>;
+  const candidate = decodeWorkspaceCandidate(event.cwd)
+    ?? (Array.isArray(event.workspacePaths) ? decodeWorkspaceCandidate(event.workspacePaths[0]) : undefined);
+  return candidate && existsSync(candidate) ? resolve(candidate) : undefined;
 }
 
 function commandFlags(flags: Record<string, string | number | boolean | undefined>) {
@@ -247,58 +312,75 @@ function hasOtherPage(pagination: { previousPage: number | null; nextPage: numbe
   return pagination.previousPage !== null || pagination.nextPage !== null;
 }
 
-export async function runKnowledgeCli(argv: string[], invocation: 'agent-memory' | 'evolve' = 'agent-memory') {
+function numberOption(value: string | undefined, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new InputError(label + ' must be a non-negative integer');
+  return Number(value);
+}
+
+export async function runKnowledgeCli(argv: string[], invocation: 'evolve' = 'evolve') {
   const { values, positionals } = parseArgs({ args: argv, options: knowledgeOptions, allowPositionals: true });
-  if (values.help || !positionals.length) {
+  const [command, action, ...args] = positionals;
+  if (command && !['kb', 'search', 'code', 'session', 'skill'].includes(command)) {
+    throw new InputError('Unknown command: ' + command);
+  }
+  if (values.help || !command) {
     process.stdout.write(knowledgeHelp(invocation));
     return;
   }
-  const [command, action, ...args] = positionals;
-  const root = resolve(values.root ?? '.');
-  if (process.env.EVOLVE_KNOWLEDGE_SNAPSHOT && (command === 'memory' && !['get', 'search', 'sources', 'conversation'].includes(action) ||
-      command === 'wiki' && !['get', 'search', 'constraints', 'references', 'reference'].includes(action))) {
-    throw new InputError('Frozen knowledge is read-only');
-  }
+  const print = (result: unknown, compact = false) => process.stdout.write(JSON.stringify(result, null, compact ? 0 : 2) + '\n');
+  const isHookCommand = command === 'kb' && ['codex-hook', 'host-hook', 'session-start-hook'].includes(action ?? '');
+  const hookInput: unknown = isHookCommand ? await readMemoryHookInput() : undefined;
+  const rawRoot = values['root-b64'] !== undefined
+    ? Buffer.from(values['root-b64'], 'base64url').toString('utf8') : values.root ?? '.';
+  const root = isHookCommand ? resolveHookRoot(rawRoot, hookInput) : resolve(rawRoot);
+  if (!root) return print(action === 'host-hook' && values.host === 'agy' ? { decision: 'stop' } : {});
+  const globalRoot = evolveDir(homedir());
+  const explicitIsolation = values.db !== undefined || values['wiki-root'] !== undefined;
+  const scope = values.scope ?? (values.global ? 'global' : (values['no-global'] || explicitIsolation) ? 'project' : 'local');
+  if (scope !== 'project' && scope !== 'global' && scope !== 'local') throw new InputError('scope must be project, global or local');
+  if (values.global && values.scope && values.scope !== 'global') throw new InputError('--global requires --scope global');
+  const writeScope = scope === 'global' ? 'global' : 'project';
+  const writeRoot = writeScope === 'global' ? globalRoot : root;
+  const wiki = new Wiki(process.env.EVOLVE_KNOWLEDGE_SNAPSHOT ?? values['wiki-root'] ?? writeRoot);
   const modelClient = () => createModelClient(root);
-  const contextValues = cliWikiContext(values as Record<string, unknown>);
-  let wiki = new Wiki(values['wiki-root'] ?? root);
-  const autoRefresh = invocation === 'evolve';
-  const openCode = () => new CodeGraph(root, { autoRefresh });
-  const db = values.db ?? join(root, '.agent-memory', 'memory.db');
-  const openMemory = () => new MemoryStore(process.env.EVOLVE_KNOWLEDGE_SNAPSHOT
-    ? process.env.AGENT_MEMORY_DB ?? join(process.env.EVOLVE_KNOWLEDGE_SNAPSHOT, 'memory.db') : db,
-    { namespace: values.namespace, readOnly: Boolean(process.env.EVOLVE_KNOWLEDGE_SNAPSHOT) });
-  const limit = values.limit === undefined ? undefined : Number(values.limit);
-  const wikiOptions = { limit, hop: values.hop === undefined ? undefined : Number(values.hop), includeHistory: values.history };
-  const memorySession = values['memory-session'] ?? (command === 'memory' || command === 'search' ? values.session : undefined);
-  const memoryOptions = { limit, type: values.type, scene: values.scene, session: memorySession };
-  if (values.reads !== undefined && values['trace-file'] !== undefined && values.reads !== values['trace-file']) {
-    throw new InputError('Use either --reads or --trace-file, not both');
+  const contextValues = cliWikiContext(values as Record<string, unknown>, root);
+  if (contextValues.categories && !contextValues.categories.every(isWikiCategory)) throw new InputError('Unknown knowledge category');
+  if (contextValues.repository && !isRepositoryId(contextValues.repository)) throw new InputError('Expected a persisted repository UUID');
+  const limit = numberOption(values.limit, 'limit');
+  const page = numberOption(values.page, 'page');
+  const hop = numberOption(values.hop, 'hop');
+  const kind = values.kind;
+  if (kind !== undefined && kind !== 'episodic' && kind !== 'reference' && kind !== 'constraint') {
+    throw new InputError('kind must be episodic, reference or constraint');
   }
+  const status = values.status;
+  const filteringRecords = command === 'search' || (command === 'kb' && ['get', 'list', 'search'].includes(action));
+  if (filteringRecords && status !== undefined && !['active', 'deprecated', 'needs_review', 'all'].includes(status)) throw new InputError('Invalid knowledge status');
+  if (values.reads && values['trace-file'] && values.reads !== values['trace-file']) throw new InputError('Use either --reads or --trace-file, not both');
   const traceFile = values.reads ?? values['trace-file'];
   const initialTrace = traceFile && existsSync(traceFile)
-    ? validateKnowledgeReads(JSON.parse(readFileSync(traceFile, 'utf8').replace(/^\uFEFF/, '')))
-    : undefined;
-  const knowledgeReads = values.trace || traceFile
-    ? new KnowledgeReads(initialTrace)
-    : undefined;
+    ? validateKnowledgeReads(JSON.parse(readFileSync(traceFile, 'utf8').replace(/^\uFEFF/, ''))) : undefined;
+  const knowledgeReads = values.trace || traceFile ? new KnowledgeReads(initialTrace) : undefined;
   const backend = values['memory-backend'];
   if (backend !== undefined && backend !== 'local' && backend !== 'openviking') throw new InputError('memory-backend must be local or openviking');
-  let activeKnowledge: KnowledgeSources | undefined;
-  const knowledgeFor = async (includeMemory: boolean) => {
-    if (!process.env.EVOLVE_KNOWLEDGE_SNAPSHOT && command === 'memory' && action === 'get' && args[0]?.startsWith('ov:') && traceFile && !values['workflow-session'] && !existsSync(traceFile + '.openviking.json')) {
-      const profile = readProject(root);
-      if (profile?.enabled !== false && profile) appendRemoteReads(traceFile + '.openviking.json', profile.project_id, parseRemoteMemoryId(args[0]).release);
-    }
-    activeKnowledge = await openKnowledgeSources(root, {
-      session: command === 'context' || command === 'wiki' ? values.session : values['workflow-session'],
-      db: values.db, namespace: values.namespace, wikiRoot: values['wiki-root'], traceFile,
-      memoryBackend: backend, includeMemory,
-    });
-    contextValues.repository ??= activeKnowledge.repositoryId;
-    return activeKnowledge;
+  const workflowSession = values['workflow-session'] ??
+    (command === 'search' && values.mode === 'context' ? values.session : undefined);
+  const frozen = process.env.EVOLVE_KNOWLEDGE_SNAPSHOT;
+  const frozenWrites: Record<string, true> = {
+    add: true, update: true, delete: true, init: true, build: true, import: true, propose: true, apply: true, ingest: true,
+    config: true, sync: true, extract: true, 'codex-hook': true, 'host-hook': true, 'codex-sync': true, 'hook-jobs': true,
+    'hook-worker': true, 'session-start-hook': true, 'codex-install': true, harvest: true, candidates: true,
   };
-  const print = (result: unknown, compact = false) => process.stdout.write(JSON.stringify(result, null, compact ? 0 : 2) + '\n');
+  if (frozen && command === 'kb' && (action !== undefined && frozenWrites[action] || (action === 'reminders' && args[0] === 'ack'))) {
+    throw new InputError('Frozen knowledge is read-only');
+  }
+  let activeKnowledge: KnowledgeSources | undefined;
+  let readSourcesPending: Promise<KnowledgeSources> | undefined;
+  const readSources = () => readSourcesPending ??= openKnowledgeSources(root, {
+    session: workflowSession, db: values.db, namespace: values.namespace,
+    wikiRoot: values['wiki-root'], traceFile, memoryBackend: backend, includeMemory: true,
+  });
   const withTrace = (result: unknown) => {
     const remoteReads = activeKnowledge?.memory?.drainRemoteReads?.() ?? [];
     if (traceFile && activeKnowledge?.releaseId && activeKnowledge.repositoryId && remoteReads.length) {
@@ -313,463 +395,476 @@ export async function runKnowledgeCli(argv: string[], invocation: 'agent-memory'
       writeFileSync(traceFile, JSON.stringify(knowledgeReads.toJSON(), null, 2) + '\n');
     }
     return result && typeof result === 'object' && !Array.isArray(result)
-      ? { ...(result as Record<string, unknown>), knowledge_reads: knowledgeReads.toJSON() }
-      : { result, knowledge_reads: knowledgeReads.toJSON() };
+      ? { ...result, knowledge_reads: knowledgeReads.toJSON() } : { result, knowledge_reads: knowledgeReads.toJSON() };
   };
-
-  async function sourcesFor(scope: SearchScope): Promise<SearchSources> {
-    const useCode = command !== 'context' &&
-      (scope === 'code' || (scope === 'all' && (autoRefresh || CodeGraph.hasIndex(root))));
-    const project = readProject(root);
-    const hasRemote = Boolean(project && project.enabled !== false);
-    const includeMemory = scope === 'memory' || scope === 'all' && (command !== 'context' || Boolean(values['include-memory'])) &&
-      (hasRemote || db === ':memory:' || existsSync(db) || Boolean(process.env.EVOLVE_KNOWLEDGE_SNAPSHOT));
-    const knowledge = await knowledgeFor(includeMemory);
-    return { code: useCode ? openCode() : undefined,
-      wiki: scope === 'wiki' || scope === 'all' && (hasRemote || existsSync(knowledge.wiki.indexPath)) ? knowledge.wiki : undefined,
-      memory: knowledge.memory, repositoryId: knowledge.repositoryId };
-  }
-
-  if (command === 'serve') {
-    const port = Number(values.port ?? '4310');
-    if (action !== undefined || !Number.isInteger(port) || port < 0 || port > 65535) {
-      throw new InputError(`Usage: ${invocation} serve [--port 0..65535]`);
+  const filters: KnowledgeFilters = {
+    scope, kind, status: filteringRecords ? status as KnowledgeFilters['status'] : undefined,
+    task: contextValues.task, paths: contextValues.paths, categories: contextValues.categories,
+    repository: contextValues.repository, keyword: contextValues.keyword,
+    includePathScoped: contextValues.includePathScoped, includeHistory: values.history, resolved: values.resolved,
+    type: values.type, scene: values.scene, session: values['memory-session'] ?? values.session,
+    limit, page, hop, knowledgeReads, fromSearchId: values['from-search'],
+  };
+  const stores: MemoryStore[] = [];
+  const openMemory = (layerRoot: string, readOnly: boolean, projectLayer: boolean) => {
+    const db = frozen
+      ? process.env.AGENT_MEMORY_DB ?? join(frozen, 'memory.db')
+      : projectLayer && values.db !== undefined ? values.db : defaultMemoryDbPath(layerRoot);
+    const memory = new MemoryStore(db, { namespace: values.namespace, readOnly: readOnly || Boolean(frozen) });
+    stores.push(memory);
+    return memory;
+  };
+  const openKnowledge = async (writable = false) => {
+    const layers: KnowledgeLayer[] = [];
+    if (frozen) {
+      const db = process.env.AGENT_MEMORY_DB ?? join(frozen, 'memory.db');
+      const memory = new MemoryStore(db, { namespace: values.namespace, readOnly: true });
+      stores.push(memory);
+      layers.push({
+        scope: 'project', wiki: new Wiki(frozen), memory,
+        memoryReader: new FrozenMemoryReader(frozen, db, values.namespace),
+      });
+      return new KnowledgeStore(layers);
     }
-    const sources = await sourcesFor(parseScope(values.scope ?? 'all'));
-    const server = createSearchServer(sources);
-    server.on('searchError', (error: unknown) => console.error(error));
-    server.on('close', () => sources.memory?.close?.());
-    server.on('error', error => {
-      console.error(error.message);
-      process.exitCode = 1;
-      server.close();
-    });
-    for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => server.close());
-    server.listen(port, '127.0.0.1', () => {
-      const address = server.address();
-      if (address && typeof address === 'object') print({ url: `http://127.0.0.1:${address.port}/search` });
-    });
-    return;
-  }
-  if (command === 'search') {
-    const query = requireText([action, ...args].join(' '), 'query');
-    const scope = parseScope(values.scope ?? 'all');
-    const sources = await sourcesFor(scope);
-    try {
-      print(withTrace(await search(sources, query, {
-        scope, limit, wiki: wikiOptions, memory: memoryOptions, knowledgeReads,
-      })));
-    } finally {
-      sources.memory?.close?.();
+    const sources = !writable && scope !== 'global' ? await readSources() : undefined;
+    if (sources) {
+      activeKnowledge = sources;
+      if (sources.repositoryId && contextValues.repository === undefined) {
+        contextValues.repository = sources.repositoryId;
+        if (command === 'search' && values.mode === 'context') filters.repository = sources.repositoryId;
+      }
     }
-    return;
-  }
-  if (command === 'context') {
-    const query = requireText([action, ...args].join(' '), 'query');
-    const scope = parseScope(values.scope ?? 'all');
-    if (contextValues.categories && !contextValues.categories.every(isWikiCategory)) {
-      throw new InputError('Unknown Wiki context category');
-    }
-    if (contextValues.repository !== undefined && !isRepositoryId(contextValues.repository)) {
-      throw new InputError('Expected a persisted repository UUID');
-    }
-    const sources = await sourcesFor(scope);
-    try {
-      print(withTrace(await buildContext(sources, query, {
-        limit,
-        context: {
-          task: contextValues.task,
-          paths: contextValues.paths,
-          categories: contextValues.categories as WikiContext['categories'],
-          repository: contextValues.repository,
-          keyword: contextValues.keyword,
-          includePathScoped: contextValues.includePathScoped,
-        },
-        wiki: wikiOptions,
-        memory: memoryOptions,
-        includeWorkingMemory: values['include-memory'],
-        knowledgeReads,
+    const addLayer = (layerScope: 'project' | 'global', layerRoot: string, layerSources?: KnowledgeSources) => {
+      const layerWiki = layerSources?.wiki ?? new Wiki(layerScope === 'project' ? values['wiki-root'] ?? layerRoot : layerRoot);
+      layers.push({
+        scope: layerScope,
+        wiki: writable || layerWiki.hasWiki() || layerWiki.readableIndexPath() ? layerWiki : undefined,
+        memory: openMemory(layerRoot, !writable || layerScope !== writeScope, layerScope === 'project'),
+        ...(layerSources?.memory && !(layerSources.memory instanceof MemoryStore) ? { memoryReader: layerSources.memory } : {}),
+      });
+    };
+    if (scope !== 'global') addLayer('project', root, sources);
+    if (scope !== 'project' && (resolve(root) !== resolve(globalRoot) || scope === 'global')) addLayer('global', globalRoot);
+    return new KnowledgeStore(layers);
+  };
+  const prefix = () => [invocation, 'kb', ...commandFlags({
+    root, scope, db: values.db, namespace: values.namespace,
+  })];
+  try {
+    if (command === 'search') {
+      const from = values.from ?? 'all';
+      const selected = from.split(',').map(item => item.trim());
+      if (!selected.length || selected.some(item => !['kb', 'code', 'all'].includes(item))) throw new InputError('from must select kb, code or all');
+      const mode = values.mode ?? 'merged';
+      if (mode !== 'merged' && mode !== 'context') throw new InputError('mode must be merged or context');
+      const hasCode = scope !== 'global' && selected.some(item => item === 'code' || item === 'all');
+      let preferredMemoryTypes: string[] | undefined;
+      if (mode === 'context' && values.session && existsSync(workflowDbPath(root))) {
+        const activeSession = readEvolveSessions(root, values.session)[0];
+        preferredMemoryTypes = activeSession?.runs.findLast(item => item.status === 'running')?.skill.search_profile?.memory;
+      }
+      return print(withTrace(await unifiedSearch({
+        kb: selected.some(item => item === 'kb' || item === 'all') ? await openKnowledge() : undefined,
+        code: hasCode ? new CodeGraph(root, { autoRefresh: true }) : undefined,
+      }, requireText([action, ...args].join(' '), 'query'), {
+        ...filters, from, mode, preferredMemoryTypes,
+        session: mode === 'context' ? undefined : filters.session,
+        memorySession: values['memory-session'],
         contextScope: {
           ...(values.session ? { session_id: values.session } : {}),
           ...(contextValues.task ? { task_kind: contextValues.task } : {}),
           ...(contextValues.paths?.length ? { paths: contextValues.paths } : {}),
         },
       })));
-    } finally {
-      sources.memory?.close?.();
     }
-    return;
-  }
-  if (command === 'code') {
-    const code = openCode();
-    switch (action) {
-      case 'build': return print(await code.build());
-      case 'sync': return print(await code.sync());
-      case 'search': {
-        const query = args.join(' ');
-        const result = await code.search(query, limit);
-        if (knowledgeReads) knowledgeReads.recordSearch({
-          source: 'code', query,
-          returnedIds: result.flatMap(item => typeof item.node?.id === 'string' ? [item.node.id] : []),
-        });
-        return print(withTrace(result));
-      }
-      case 'callers':
-      case 'callees': return print(await code.neighbors(requireText(args[0], 'symbol id'), action, Number(values.depth ?? '1')));
-      case 'trace': return print(await code.trace(requireText(args[0], 'from id'), requireText(args[1], 'to id')));
-    }
-  }
-  if (command === 'wiki') {
-    if (['search', 'get', 'constraints', 'references', 'reference'].includes(action)) wiki = (await knowledgeFor(false)).wiki;
-    switch (action) {
-      case 'build': return print(wiki.build());
-      case 'search': {
-        const query = args.join(' ');
-        const result = wiki.search(query, wikiOptions);
-        if (knowledgeReads) knowledgeReads.recordSearch({
-          source: 'wiki', query, filters: wikiOptions, returnedIds: result.results.map(hit => hit.id),
-        });
-        return print(withTrace(result));
-      }
-      case 'get':
-        if (!values.resolved) return print(withTrace(wiki.getEntry(requireText(args[0], 'wiki entry ID'), {
-          knowledgeReads, fromSearchId: values['from-search'],
-        })));
-      case 'constraints':
-      case 'references':
-      case 'reference': {
-        const categories = contextValues.categories;
-        const repository = contextValues.repository;
-        if (categories && !categories.every(isWikiCategory)) {
-          throw new InputError(action === 'constraints' ? 'Unknown Wiki constraint category' : 'Unknown Wiki reference category');
+    if (command === 'kb' && ['add', 'get', 'list', 'search', 'update', 'delete'].includes(action)) {
+      if (action === 'get') {
+        const id = requireText(args[0], 'record ID');
+        if (!frozen && id.startsWith('ov:')) {
+          if (traceFile && !workflowSession && !existsSync(traceFile + '.openviking.json')) {
+            const profile = readProject(root);
+            if (profile?.enabled !== false && profile) {
+              appendRemoteReads(traceFile + '.openviking.json', profile.project_id, parseRemoteMemoryId(id).release);
+            }
+          }
+          const sources = await readSources();
+          activeKnowledge = sources;
+          if (!sources.memory) throw new InputError('Memory reader is not configured');
+          if (!sources.releaseId && readProject(root)) throw new InputError('OPENVIKING_REMOTE_ID_UNAVAILABLE');
+          const record = await sources.memory.get(id, { knowledgeReads, fromSearchId: values['from-search'] });
+          return print(withTrace(record ?? null));
         }
-        if (repository !== undefined && !isRepositoryId(repository)) throw new InputError('Expected a persisted repository UUID');
-        const context: WikiContext = { task: contextValues.task, paths: contextValues.paths,
-          categories: categories as WikiContext['categories'], repository, keyword: contextValues.keyword };
-        if (action === 'references') {
+      }
+      const kb = await openKnowledge(['add', 'update', 'delete'].includes(action));
+      const mutationOptions: KnowledgeMutationOptions = { scope: writeScope, kind, evidence: values.evidence, apply: values.apply,
+        knowledgeReads, fromSearchId: values['from-search'] };
+      const input = (content: string | undefined): KnowledgeInput => ({
+        kind, id: values.id, title: values.title, content,
+        type: values.type, scene: values.scene ?? values.task, session: values.session,
+        priority: numberOption(values.priority, 'priority'), scope: values['entry-scope'], categories: values.category,
+        sources: values.evidence,
+      });
+      if (action === 'add') return print(withTrace(await kb.add(input(values.content ?? args.join(' ')), mutationOptions)));
+      if (action === 'get') return print(withTrace(kb.get(requireText(args[0], 'record ID'), filters) ?? null));
+      if (action === 'update') return print(withTrace(await kb.update(requireText(args[0], 'record ID'), input(values.content ?? (args.length > 1 ? args.slice(1).join(' ') : undefined)), mutationOptions)));
+      if (action === 'delete') return print(withTrace(await kb.delete(requireText(args[0], 'record ID'), mutationOptions)));
+      const result = action === 'list' ? await kb.list(filters) : await kb.search(requireText(args.join(' '), 'query'), filters);
+      const results = result.results.map(record => {
+        const searchId = knowledgeReads?.toJSON().searches.findLast(search =>
+          search.source === record.storageKind && search.returned_ids.includes(record.rawId))?.search_id;
+        return { ...record, ...(searchId ? { search_id: searchId } : {}) };
+      });
+      const commands = {
+        prefix: prefix(),
+        get: ['get', '--kind', { arg: 'kind' }, ...commandFlags({ reads: traceFile, trace: values.trace }),
+          ...(traceFile && action === 'search' ? ['--from-search', { arg: 'search_id' }] : []), '--', { arg: 'id' }],
+        sources: ['sources', '--', { arg: 'id' }],
+        ...(hasOtherPage(result.pagination) ? { page: [action, ...commandFlags({
+          kind, status: values.status, task: values.task, session: values.session, type: values.type, scene: values.scene,
+          limit: result.pagination.limit, reads: traceFile, trace: values.trace,
+        }), ...((values.path ?? []).flatMap(value => ['--path', value])),
+          ...((values.category ?? []).flatMap(value => ['--category', value])),
+          '--page', { arg: 'page' }, ...(action === 'search' ? ['--', args.join(' ')] : [])] } : {}),
+      };
+      return print(withTrace({ ...result, results, commands }));
+    }
+    if (command === 'kb' && action === 'config') {
+      return print(await configureMemory(root, {
+        scope: writeScope === 'global' ? 'user' : 'project', host: values.host,
+        baseUrl: values['base-url'], model: values.model,
+        timeoutMs: numberOption(values['timeout-ms'], 'timeout-ms'), yes: values.yes,
+      }));
+    }
+    if (command === 'kb' && action === 'reminders') {
+      if (args[0] === 'ack') return print(acknowledgeReminders(writeRoot, args[1]));
+      const hookJobs = readMemoryHookJobs(root).map(({ event, ...job }) => job);
+      return print({ reminders: readReminders(writeRoot, values.history), hook_jobs: hookJobs });
+    }
+    if (command === 'kb' && action === 'hook-jobs') {
+      if (args.length > 2 || (args.length && args[0] !== 'retry')) throw new InputError('Usage: evolve kb hook-jobs [retry [id]]');
+      const retried = args[0] === 'retry' ? await retryMemoryHookJobs(root, args[1]) : undefined;
+      if (retried) await startMemoryHookWorker(root);
+      return print({ jobs: readMemoryHookJobs(root).map(({ event, ...job }) => job), ...(retried === undefined ? {} : { retried }) });
+    }
+    if (command === 'kb' && action === 'hook-worker') {
+      const result = await drainMemoryHookJobs(root, async job => {
+        const memory = new MemoryStore(job.db ?? defaultMemoryDbPath(root), { namespace: job.namespace });
+        try {
+          return await handleMemoryHook(job.host, job.event, { root, memory, model: modelClient });
+        } finally {
+          memory.close();
+        }
+      });
+      if (result.failed) process.exitCode = 1;
+      return print(result);
+    }
+    if (command === 'kb' && action === 'session-start-hook') {
+      const hosts = parseMemoryHosts(requireText(values.host, 'host'));
+      if (hosts.length !== 1) throw new InputError('Choose one host for the hook');
+      const result = handleSessionStartHook(hosts[0], hookInput, { root });
+      if (Object.keys(result).length && hasPendingMemoryHookJobs(root)) await startMemoryHookWorker(root);
+      return print(result);
+    }
+    if (command === 'kb' && action === 'codex-install') return print(installCodexMemoryHook(root));
+    if (command === 'kb' && values.background && (action === 'codex-hook' || action === 'host-hook')) {
+      const hosts = parseMemoryHosts(action === 'codex-hook' ? 'codex' : requireText(values.host, 'host'));
+      if (hosts.length !== 1) throw new InputError('Choose one host for the hook');
+      const host = hosts[0];
+      const target = memoryHookTarget(host, hookInput, root);
+      if (target) {
+        await enqueueMemoryHook(root, host, hookInput, target, {
+          db: resolve(values.db ?? defaultMemoryDbPath(writeRoot)), namespace: values.namespace,
+        });
+        await startMemoryHookWorker(root);
+      }
+      return print(host === 'agy' ? { decision: 'stop' } : {});
+    }
+    if (command === 'kb' && ['sources', 'history', 'conversation', 'extract', 'codex-hook', 'host-hook', 'codex-sync', 'sync'].includes(action)) {
+      const readOnly = action === 'sources' || action === 'history' || action === 'conversation';
+      const memory = openMemory(writeRoot, readOnly, writeScope === 'project');
+      if (action === 'history') {
+        // 已删除的记录不再出现在当前视图中，回退到写入层直接查询历史。
+        const id = requireText(args[0], 'record ID');
+        const selected = (await openKnowledge()).get(id, { ...filters, kind: 'episodic' });
+        const store = selected ? openMemory(selected.scope === 'global' ? globalRoot : root, true, selected.scope === 'project') : memory;
+        return print({ id, current: selected ?? null, history: store.history(selected?.rawId ?? id) });
+      }
+      if (action === 'sources') {
+        const id = requireText(args[0], 'record ID');
+        const selected = (await openKnowledge()).get(id, { ...filters, kind: 'episodic' });
+        if (!selected) return print([]);
+        const selectedRoot = selected.scope === 'global' ? globalRoot : root;
+        return print(openMemory(selectedRoot, true, selected.scope === 'project').sources(selected.rawId));
+      }
+      if (action === 'conversation') {
+        const hosts = values.host === undefined ? [] : parseMemoryHosts(values.host);
+        if (hosts.length > 1) throw new InputError('Choose one host for the conversation');
+        const target = requireText(args[0], 'session or record ID');
+        const selected = (await openKnowledge()).get(target, { ...filters, kind: 'episodic' });
+        const selectedMemory = selected?.scope === 'global' ? openMemory(globalRoot, true, false) : memory;
+        const result = await readMemoryConversation(selected?.rawId ?? target, { root, memory: selectedMemory, host: hosts[0], page, limit });
+        const commands = hasOtherPage(result.pagination) ? {
+          prefix: prefix(), page: ['conversation', '--host', result.host, '--limit', String(result.pagination.limit), '--page', { arg: 'page' }, '--', target],
+        } : undefined;
+        return print({ ...result, ...(commands ? { commands } : {}) });
+      }
+      if (action === 'extract') {
+        const messages: unknown = JSON.parse(readFileSync(requireText(args[0], 'messages file'), 'utf8').replace(/^\uFEFF/, ''));
+        if (!Array.isArray(messages)) throw new InputError('Messages file must contain a JSON array');
+        const mode = values.mode ?? 'chat';
+        if (mode !== 'chat' && mode !== 'code') throw new InputError('mode must be chat or code');
+        return print(await memory.extract(messages as ConversationMessage[], { session: requireText(values.session, 'session'), mode, llm: modelClient() }));
+      }
+      if (action === 'codex-hook' || action === 'host-hook') {
+        const hosts = parseMemoryHosts(action === 'codex-hook' ? 'codex' : requireText(values.host, 'host'));
+        if (hosts.length !== 1) throw new InputError('Choose one host for the hook');
+        return print(await handleMemoryHook(hosts[0], hookInput, { root, memory, model: modelClient, allowUnconfiguredModel: true }));
+      }
+      const hosts = parseMemoryHosts(action === 'codex-sync' ? 'codex' : values.host ?? 'all');
+      const results = [];
+      for (const host of hosts) {
+        const result = await syncMemoryHost(host, { root, memory, model: modelClient }, values.session);
+        if (result.failures.length) process.exitCode = 1;
+        results.push({ host, ...result });
+      }
+      return print(action === 'codex-sync' ? results[0] : { hosts: results });
+    }
+    if (command === 'kb') {
+      if (action === 'init') return print(initWiki(values['wiki-root'] ?? writeRoot, { purpose: values.purpose, schema: values.schema, force: values.force }));
+      if (action === 'build') return print(wiki.build());
+      if (action === 'import') {
+        if (args.length > 1) throw new InputError('Usage: evolve kb import [source] [--scope project|global] [--apply]');
+        const source = realpathSync(args[0] ?? (scope === 'global' ? join(homedir(), '.maestro') : root));
+        const project = values.project ?? (scope === 'global' && !args[0] ? 'maestro-global' : 'legacy-' + createHash('sha256').update(source).digest('hex').slice(0, 16));
+        const entries = migrateLegacyWiki(wiki, source, project, values.apply, { scope: writeScope, knowhowOnly: values['knowhow-only'] });
+        return print({ source, destination: wiki.root, project, scope: writeScope, applied: values.apply ?? false,
+          new_entries: entries.filter(entry => !entry.existing).length,
+          existing_entries: entries.filter(entry => entry.existing).length,
+          needs_review: entries.filter(entry => entry.status === 'needs_review').length, entries });
+      }
+      if (action === 'propose') {
+        const change: unknown = JSON.parse(readFileSync(requireText(args[0], 'change file'), 'utf8').replace(/^\uFEFF/, ''));
+        if (values.closeout !== undefined || values.candidate !== undefined) {
+          const closeout = requireText(values.closeout, 'candidate receipt ID');
+          const candidate = readCloseoutCandidate(wiki, closeout, requireText(values.candidate, 'candidate ID'));
+          return print(proposeWikiChange(wiki, change, values.evidence ?? [], {
+            closeout, id: candidate.id, sources: candidate.sources,
+            related: [...(candidate.matched_entry ? [candidate.matched_entry] : []), ...(candidate.related_entries ?? []).map(entry => entry.id)],
+          }));
+        }
+        return print(proposeWikiChange(wiki, change, values.evidence ?? []));
+      }
+      if (action === 'changes') return print(listWikiChanges(wiki, { id: args[0], entry: values.entry }));
+      if (action === 'apply') return print(applyWikiChange(wiki, requireText(args[0], 'change ID')));
+      if (action === 'ingest') return print(await wiki.ingest(requireText(args[0], 'source file'), { llm: modelClient(), propose: values.propose }));
+    }
+    if (command === 'code') {
+      const code = new CodeGraph(root, { autoRefresh: true });
+      switch (action) {
+        case 'build': return print(await code.build());
+        case 'sync': return print(await code.sync());
+        case 'search': {
           const query = args.join(' ');
-          const result = wiki.references(query, context, wikiOptions);
+          const result = await code.search(query, limit);
           if (knowledgeReads) knowledgeReads.recordSearch({
-            source: 'wiki_references', query, filters: { ...context, ...wikiOptions },
-            returnedIds: result.results.map(hit => hit.id),
+            source: 'code', query,
+            returnedIds: result.flatMap(item => typeof item.node?.id === 'string' ? [item.node.id] : []),
           });
           return print(withTrace(result));
         }
-        if (action === 'reference' || (action === 'get' && values.resolved)) {
-          return print(withTrace(wiki.getReference(requireText(args[0], 'Wiki entry ID'), context, {
-            knowledgeReads, fromSearchId: values['from-search'],
-          })));
+        case 'graph': {
+          if (args.length > 1) return print(await code.trace(requireText(args[0], 'from id'), requireText(args[1], 'to id')));
+          const direction = values.direction ?? 'callers';
+          if (direction !== 'callers' && direction !== 'callees') throw new InputError('direction must be callers or callees');
+          return print(await code.neighbors(requireText(args[0], 'symbol id'), direction, numberOption(values.depth, 'depth') ?? 1));
         }
-        const result = wiki.constraints({ ...context, includePathScoped: contextValues.includePathScoped });
-        if (knowledgeReads) for (const constraint of result) {
-          knowledgeReads.bindConstraint({
-            knowledgeId: constraint.id, scope: constraint.entry?.scope ?? [],
-            categories: constraint.entry?.categories, content: constraint.body,
-          });
-        }
-        return print(withTrace(result));
+        case 'callers':
+        case 'callees': return print(await code.neighbors(requireText(args[0], 'symbol id'), action, Number(values.depth ?? '1')));
+        case 'trace': return print(await code.trace(requireText(args[0], 'from id'), requireText(args[1], 'to id')));
       }
-      case 'migrate': {
-        const scope = values.scope ?? 'project';
-        if (scope !== 'project' && scope !== 'global' && scope !== 'team' && scope !== 'personal') {
-          throw new InputError('Expected Wiki migration scope project, global, team, or personal');
+    }
+    if (command === 'kb' && (action === 'harvest' || action === 'candidates')) {
+      const [operation, ...targets] = args;
+      const allowed = action === 'harvest' ? ['receipt', 'session', 'conversation', 'skill', 'scan'] : ['show', 'route', 'publish'];
+      if (!operation || !allowed.includes(operation)) throw new InputError('Unknown kb ' + action + ' operation');
+      if (operation === 'publish') return print(publishReference(
+        wiki, requireText(targets[0], 'closeout ID'), requireText(targets[1], 'candidate ID'), targets.slice(2).join(' '), values.entry,
+      ));
+      if (operation === 'route') {
+        const candidate = readCloseoutCandidate(wiki, requireText(targets[0], 'closeout ID'), requireText(targets[1], 'candidate ID'));
+        const closeoutId = requireText(targets[0], 'closeout ID');
+        const candidateId = requireText(targets[1], 'candidate ID');
+        const skillEntry = values.skill ? resolve(root, resolveSkillEntry(root, values.skill)) : undefined;
+        const decision = decideSkillRoute({
+          content: candidate.content,
+          sources: candidate.sources,
+          matchedEntry: candidate.matched_entry,
+          relatedEntries: candidate.related_entries?.map(entry => entry.id),
+          skillId: values.skill,
+          skillVersion: values['skill-version'],
+          signalKinds: values['signal-kind'],
+          repeatCount: values['repeat-count'] === undefined ? undefined : Number(values['repeat-count']),
+          stepCount: values['step-count'] === undefined ? undefined : Number(values['step-count']),
+          crossSkill: values['cross-skill'],
+          requiresNewContract: values['new-contract'],
+          requiresNewArtifacts: values['new-artifacts'],
+          requiresRouting: values['requires-routing'],
+          explicitSkillIntent: values['skill-intent'],
+          ...(skillEntry && existsSync(skillEntry) ? { learnings: learningBloat(readSkillLearnings(skillEntry)) } : {}),
+        });
+        if (decision.route !== 'skill-design') return print(decision);
+        if (!values.skill) throw new InputError('Skill-design route requires --skill <skill-id> for the replay/apply chain');
+        const task = createSkillDesignTask(root, {
+          closeoutId, candidateId, content: candidate.content, sources: candidate.sources,
+          decision, skillId: values.skill, skillVersion: values['skill-version'],
+        });
+        return print({ ...decision, design_task: task });
+      }
+      const project = requireText(values.project, 'source project ID');
+      if (operation === 'receipt') {
+        const source = requireText(targets[0], 'receipt path or ID');
+        if (existsSync(source)) {
+          return print(await harvestCompletion(
+            wiki, project, JSON.parse(readFileSync(source, 'utf8').replace(/^\uFEFF/, '')), modelClient,
+          ));
         }
-        const source = resolve(requireText(args[0], 'legacy source root'));
-        const uid = scope === 'personal' ? validateWikiMemberUid(values.uid) : undefined;
-        const collab = join(root, '.workflow', 'collab');
-        if (!values['wiki-root'] && (scope === 'team' || scope === 'personal')) {
-          const parents = [join(root, '.workflow'), collab];
-          if (uid) parents.push(join(collab, 'personal'), join(collab, 'personal', uid));
-          for (const parent of parents) {
-            const info = lstatSync(parent, { throwIfNoEntry: false });
-            if (info && !info.isDirectory()) throw new InputError(`Invalid Wiki migration directory: ${parent}`);
+        const saved = readSkillCompletions(wiki, project, source)[0];
+        if (!saved) throw new InputError(`Standalone Skill completion receipt not found: ${source}`);
+        return print(await harvestCompletion(wiki, project, saved.receipt, modelClient));
+      }
+      if (operation === 'show') return print(readHarvest(wiki, project, requireText(targets[0], 'completion receipt ID')));
+      if (operation === 'session') {
+        const session = requireText(targets[0], 'Session ID');
+        const [native] = readEvolveSessions(root, session);
+        if (native) {
+          const receipt = evolveSessionReceipt(native);
+          if (values.receipt && values.receipt !== receipt.id) throw new InputError('Evolve Session receipt ID mismatch');
+          return print(await harvestCompletion(wiki, project, receipt, modelClient));
+        }
+        const receipts = [...readCompletionReceipts(root, session, values.receipt)];
+        if (receipts.length !== 1) {
+          throw new InputError(`Expected one committed completion receipt for ${session}, found ${receipts.length}`);
+        }
+        const [{ receipt, directory }] = receipts;
+        return print(await harvestCompletion(wiki, project, receipt, modelClient, directory));
+      }
+      if (operation === 'conversation') {
+        const hosts = values.host === undefined ? undefined : parseMemoryHosts(values.host);
+        if (hosts && hosts.length > 1) throw new InputError('Choose one host for conversation closeout');
+        const conversation = await readHostConversationMessages(root, requireText(targets[0], 'conversation session ID'), hosts?.[0]);
+        return print(await harvestConversation(wiki, project, conversation, modelClient));
+      }
+      if (operation === 'skill') {
+        const transcript = values.transcript ? JSON.parse(readFileSync(values.transcript, 'utf8').replace(/^\uFEFF/, '')) : [];
+        if (!Array.isArray(transcript)) throw new InputError('Transcript must be a JSON message array');
+        const knowledgeReads = values['knowledge-receipt']
+          ? validateKnowledgeReads(JSON.parse(readFileSync(values['knowledge-receipt'], 'utf8').replace(/^\uFEFF/, '')))
+          : undefined;
+        const recorded = recordSkillCompletion(wiki, project, {
+          execution: requireText(targets[0], 'Skill execution ID'),
+          skill: requireText(values.skill, 'Skill ID'), version: requireText(values['skill-version'], 'Skill version'),
+          status: requireText(values.status, 'Skill status'), messages: transcript, session: values.session, knowledgeReads,
+        });
+        if (!('receipt' in recorded)) return print(recorded);
+        if (values['record-only']) return print({ receipt: recorded.receipt.id });
+        return print({ receipt: recorded.receipt.id, ...await harvestCompletion(wiki, project, recorded.receipt, modelClient) });
+      }
+      if (operation === 'scan') {
+        const results: Awaited<ReturnType<typeof harvestCompletion>>[] = [];
+        const errors: Array<{ receipt: string; error: string }> = [];
+        const sessionSource = targets[0] ?? root;
+        const hasHistoricalSessions = existsSync(join(sessionSource, '.workflow', 'sessions'));
+        if (targets[0] && !hasHistoricalSessions && !existsSync(workflowDbPath(sessionSource))) {
+          throw new InputError('Cannot locate Evolve or historical Sessions in the source project');
+        }
+        const sessionReceipts = hasHistoricalSessions
+          ? readCompletionReceipts(sessionSource) : [];
+        const consume = async (id: string, receipt: unknown, directory?: string) => {
+          try {
+            results.push(await harvestCompletion(wiki, project, receipt, modelClient, directory));
+          } catch (error) {
+            errors.push({ receipt: id, error: error instanceof Error ? error.message : String(error) });
           }
+        };
+        for (const { receipt, directory } of sessionReceipts) {
+          await consume(requireText(receipt.transition_id, 'transition ID'), receipt, directory);
         }
-        const layerRoot = scope === 'global' ? source : scope === 'team' ? collab
-          : uid ? join(collab, 'personal', uid) : root;
-        const destination = new Wiki(values['wiki-root'] ?? layerRoot);
-        return print(migrateLegacyWiki(destination, source, requireText(values.project, 'legacy project ID'), values.apply, {
-          scope, uid, knowhowOnly: values['knowhow-only'],
-        }));
-      }
-      case 'propose': {
-        const change = JSON.parse(readFileSync(requireText(args[0], 'change file'), 'utf8').replace(/^\uFEFF/, ''));
-        const evidence = values.evidence ?? [];
-        if (values.closeout !== undefined || values.candidate !== undefined) {
-          const closeout = requireText(values.closeout, 'closeout ID');
-          const candidate = readCloseoutCandidate(wiki, closeout, requireText(values.candidate, 'candidate ID'));
-          return print(proposeWikiChange(wiki, change, evidence, {
-            closeout, id: candidate.id, sources: candidate.sources,
-            related: [...(candidate.matched_entry ? [candidate.matched_entry] : []),
-              ...(candidate.related_entries ?? []).map(entry => entry.id)],
-          }));
+        for (const session of readEvolveSessions(sessionSource).filter(item => item.status === 'completed')) {
+          const receipt = evolveSessionReceipt(session);
+          await consume(receipt.id, receipt);
         }
-        return print(proposeWikiChange(wiki, change, evidence));
-      }
-      case 'changes': return print(listWikiChanges(wiki, { id: args[0], entry: values.entry }));
-      case 'apply': return print(applyWikiChange(wiki, requireText(args[0], 'Wiki change ID')));
-      case 'ingest': return print(await wiki.ingest(requireText(args[0], 'source file'), { llm: modelClient() }));
-    }
-  }
-
-  if (command === 'closeout') {
-    if (action === 'publish') return print(publishReference(
-      wiki, requireText(args[0], 'closeout ID'), requireText(args[1], 'candidate ID'), args.slice(2).join(' '),
-    ));
-    if (action === 'route') {
-      const candidate = readCloseoutCandidate(wiki, requireText(args[0], 'closeout ID'), requireText(args[1], 'candidate ID'));
-      const closeoutId = requireText(args[0], 'closeout ID');
-      const candidateId = requireText(args[1], 'candidate ID');
-      const decision = decideSkillRoute({
-        content: candidate.content,
-        sources: candidate.sources,
-        matchedEntry: candidate.matched_entry,
-        relatedEntries: candidate.related_entries?.map(entry => entry.id),
-        skillId: values.skill,
-        skillVersion: values['skill-version'],
-        signalKinds: values['signal-kind'],
-        repeatCount: values['repeat-count'] === undefined ? undefined : Number(values['repeat-count']),
-        stepCount: values['step-count'] === undefined ? undefined : Number(values['step-count']),
-        crossSkill: values['cross-skill'],
-        requiresNewContract: values['new-contract'],
-        requiresNewArtifacts: values['new-artifacts'],
-        requiresRouting: values['requires-routing'],
-        explicitSkillIntent: values['skill-intent'],
-      });
-      if (decision.route !== 'skill-design') return print(decision);
-      if (!values.skill) throw new InputError('Skill-design route requires --skill <skill-id> for the replay/apply chain');
-      const task = createSkillDesignTask(root, {
-        closeoutId, candidateId, content: candidate.content, sources: candidate.sources,
-        decision, skillId: values.skill, skillVersion: values['skill-version'],
-      });
-      return print({ ...decision, design_task: task });
-    }
-    const project = requireText(values.project, 'source project ID');
-    if (action === 'harvest' || action === 'resume') {
-      const source = requireText(args[0], action === 'harvest' ? 'receipt path or ID' : 'receipt ID');
-      if (action === 'harvest' && existsSync(source)) {
-        return print(await harvestCompletion(
-          wiki, project, JSON.parse(readFileSync(source, 'utf8').replace(/^\uFEFF/, '')), modelClient,
-        ));
-      }
-      const saved = readSkillCompletions(wiki, project, source)[0];
-      if (!saved) throw new InputError(`Standalone Skill completion receipt not found: ${source}`);
-      return print(await harvestCompletion(wiki, project, saved.receipt, modelClient));
-    }
-    if (action === 'show') return print(readHarvest(wiki, project, requireText(args[0], 'completion receipt ID')));
-    if (action === 'session') {
-      const session = requireText(args[0], 'Session ID');
-      const [native] = readEvolveSessions(root, session);
-      if (native) {
-        const receipt = evolveSessionReceipt(native);
-        if (values.receipt && values.receipt !== receipt.id) throw new InputError('Evolve Session receipt ID mismatch');
-        return print(await harvestCompletion(wiki, project, receipt, modelClient));
-      }
-      const receipts = [...readCompletionReceipts(root, session, values.receipt)];
-      if (receipts.length !== 1) {
-        throw new InputError(`Expected one committed completion receipt for ${session}, found ${receipts.length}`);
-      }
-      const [{ receipt, directory }] = receipts;
-      return print(await harvestCompletion(wiki, project, receipt, modelClient, directory));
-    }
-    if (action === 'skill') {
-      const transcript = values.transcript ? JSON.parse(readFileSync(values.transcript, 'utf8').replace(/^\uFEFF/, '')) : [];
-      if (!Array.isArray(transcript)) throw new InputError('Transcript must be a JSON message array');
-      const knowledgeReads = values['knowledge-receipt']
-        ? validateKnowledgeReads(JSON.parse(readFileSync(values['knowledge-receipt'], 'utf8').replace(/^\uFEFF/, '')))
-        : undefined;
-      const recorded = recordSkillCompletion(wiki, project, {
-        execution: requireText(args[0], 'Skill execution ID'),
-        skill: requireText(values.skill, 'Skill ID'), version: requireText(values['skill-version'], 'Skill version'),
-        status: requireText(values.status, 'Skill status'), messages: transcript, session: values.session, knowledgeReads,
-      });
-      if (!('receipt' in recorded)) return print(recorded);
-      if (values['record-only']) return print({ receipt: recorded.receipt.id });
-      return print({ receipt: recorded.receipt.id, ...await harvestCompletion(wiki, project, recorded.receipt, modelClient) });
-    }
-    if (action === 'scan') {
-      const results: Awaited<ReturnType<typeof harvestCompletion>>[] = [];
-      const errors: Array<{ receipt: string; error: string }> = [];
-      const sessionSource = args[0] ?? root;
-      const hasHistoricalSessions = existsSync(join(sessionSource, '.workflow', 'sessions'));
-      if (args[0] && !hasHistoricalSessions && !existsSync(workflowDbPath(sessionSource))) {
-        throw new InputError('Cannot locate Evolve or historical Sessions in the source project');
-      }
-      const sessionReceipts = hasHistoricalSessions
-        ? readCompletionReceipts(sessionSource) : [];
-      const consume = async (id: string, receipt: unknown, directory?: string) => {
-        try {
-          results.push(await harvestCompletion(wiki, project, receipt, modelClient, directory));
-        } catch (error) {
-          errors.push({ receipt: id, error: error instanceof Error ? error.message : String(error) });
+        for (const { id, receipt } of readSkillCompletions(wiki, project)) {
+          await consume(id, receipt);
         }
-      };
-      for (const { receipt, directory } of sessionReceipts) {
-        await consume(requireText(receipt.transition_id, 'transition ID'), receipt, directory);
+        if (errors.length > 0) {
+          process.exitCode = 1;
+          return print({ results, errors });
+        }
+        return print(results);
       }
-      for (const session of readEvolveSessions(sessionSource).filter(item => item.status === 'completed')) {
-        const receipt = evolveSessionReceipt(session);
-        await consume(receipt.id, receipt);
-      }
-      for (const { id, receipt } of readSkillCompletions(wiki, project)) {
-        await consume(id, receipt);
-      }
-      if (errors.length > 0) {
-        process.exitCode = 1;
-        return print({ results, errors });
-      }
-      return print(results);
     }
-  }
 
-  if (command === 'session' && action === 'review') {
-    const transcript = values.transcript ? JSON.parse(readFileSync(values.transcript, 'utf8')) : undefined;
-    if (transcript !== undefined && !Array.isArray(transcript)) throw new InputError('Transcript must be a JSON message array');
-    return print(await reviewSession(root, requireText(args[0], 'Session ID'), { model: modelClient, transcript }));
-  }
+    if (command === 'session' && action === 'review') {
+      const transcript = values.transcript ? JSON.parse(readFileSync(values.transcript, 'utf8')) : undefined;
+      if (transcript !== undefined && !Array.isArray(transcript)) throw new InputError('Transcript must be a JSON message array');
+      return print(await reviewSession(root, requireText(args[0], 'Session ID'), { model: modelClient, transcript }));
+    }
 
-  if (command === 'evolve' && action === 'review') {
-    return print(await reviewSkillExecution(
-      wiki, requireText(values.project, 'source project ID'), requireText(args[0], 'Skill execution ID'), modelClient,
-    ));
-  }
+    if (command === 'skill' && action === 'review') {
+      return print(await reviewSkillExecution(
+        wiki, requireText(values.project, 'source project ID'), requireText(args[0], 'Skill execution ID'), modelClient,
+      ));
+    }
 
-  if (command === 'evolve' && action === 'draft') {
-    const priority = values.priority;
-    if (priority !== 'high' && priority !== 'normal' && priority !== 'low') throw new InputError('Unknown Skill priority');
-    return print(draftSkillAddition({
-      entry: requireText(args[0], 'Skill entry path'),
-      priority,
-      instruction: args.slice(1).join(' '),
-      sources: values.evidence ?? [],
-      when: values.when,
-    }));
-  }
-  if (command === 'evolve' && action === 'replay') {
-    const draft: unknown = JSON.parse(readFileSync(requireText(args[0], 'draft file'), 'utf8').replace(/^\uFEFF/, ''));
-    const scenarios: unknown = JSON.parse(readFileSync(requireText(values.scenarios, 'scenarios file'), 'utf8').replace(/^\uFEFF/, ''));
-    return print(replaySkillAddition(root, draft, { runner: requireText(values.runner, 'replay runner'), scenarios }));
-  }
-  if (command === 'evolve' && (action === 'apply' || action === 'rollback')) {
-    return print(changeSkillVersion(root, requireText(args[0], 'replay receipt ID'), action === 'rollback'));
-  }
-  if (command === 'skill-design') {
-    if (action === 'task') return print(readSkillDesignTask(root, requireText(args[0], 'Skill design task ID')));
-    if (action === 'run') return print(runSkillDesign(root, requireText(args[0], 'Skill design task ID'), requireText(values.runner, 'design runner')));
-    if (action === 'review') return print(reviewSkillDesign(root, requireText(args[0], 'Skill design receipt ID')));
-    if (action === 'replay') {
-      const scenarios: unknown = JSON.parse(readFileSync(requireText(values.scenarios, 'scenarios file'), 'utf8').replace(/^\uFEFF/, ''));
-      return print(replaySkillDesign(root, requireText(args[0], 'Skill design receipt ID'), {
-        runner: requireText(values.runner, 'replay runner'), scenarios,
+    if (command === 'skill' && action === 'draft') {
+      const priority = values.priority;
+      if (priority !== 'high' && priority !== 'normal' && priority !== 'low') throw new InputError('Unknown Skill priority');
+      return print(draftSkillAddition({
+        entry: requireText(args[0], 'Skill entry path'),
+        priority,
+        instruction: args.slice(1).join(' '),
+        sources: values.evidence ?? [],
+        when: values.when,
+        supersedes: values.supersedes,
       }));
     }
-    if (action === 'apply' || action === 'rollback') {
-      return print(applySkillDesign(root, requireText(args[0], 'Skill design receipt ID'), action === 'rollback'));
+    if (command === 'skill' && action === 'retire') {
+      return print(draftSkillRetirement({
+        entry: requireText(args[0], 'Skill entry path'),
+        retire: args.slice(1),
+        sources: values.evidence ?? [],
+        reason: values.reason,
+      }));
     }
-  }
-  if (command === 'memory' && (action === 'get' || action === 'search')) {
-    const knowledge = await knowledgeFor(true);
-    const memory = knowledge.memory;
-    if (!memory) throw new InputError('Memory reader is not configured');
-    try {
-      if (!process.env.EVOLVE_KNOWLEDGE_SNAPSHOT && action === 'get' && args[0]?.startsWith('ov:') && readProject(root) && !knowledge.releaseId) throw new InputError('OPENVIKING_REMOTE_ID_UNAVAILABLE');
-      if (action === 'get') return print(withTrace(await memory.get(requireText(args[0], 'id'), {
-        knowledgeReads, fromSearchId: values['from-search'],
-      }) ?? null));
-      const query = requireText(args.join(' '), 'query');
-      const page = values.page === undefined ? undefined : Number(values.page);
-      const filters = { ...memoryOptions, page: values.json ? page : page ?? 1 };
-      const result = await memory.search(query, filters);
-      const searchId = knowledgeReads?.recordSearch({ source: 'memory', query, filters, returnedIds: result.results.map(hit => hit.id) });
-      if (values.json || !result.pagination) return print(withTrace(result));
-      const { pagination } = result;
-      const results = result.results.map(hit => {
-        const host = memory instanceof MemoryStore && hit.session && (memoryHosts.find(host => hit.sourceMessageIds.some(id => id.startsWith(`${host}:${hit.session}:`)))
-          ?? memoryHosts.find(host => memory.extractionOffset(host, hit.session) > 0));
-        return { id: hit.id, content: hit.content.replace(/^(.{160}).+/su, '$1…'),
-          ...(memory instanceof MemoryStore && hit.sourceMessageScope ? { sources: true } : {}), ...(host ? { host } : {}) };
-      });
-      const reads = traceFile ? resolve(traceFile) : undefined;
-      const commands = results.length || hasOtherPage(pagination) ? {
-        prefix: [invocation, 'memory', ...commandFlags({ root, db: values.db === undefined || db === ':memory:' ? values.db : resolve(db), namespace: values.namespace,
-          'memory-backend': knowledge.backend?.active === 'local' && knowledge.backend.configured === 'openviking' ? 'local' : backend,
-          'workflow-session': values['workflow-session'] })],
-        ...(results.length ? { get: ['get', ...commandFlags({ reads, 'from-search': reads ? searchId : undefined }), '--', { arg: 'id' }] } : {}),
-        ...(results.some(hit => hit.sources) ? { sources: ['sources', '--', { arg: 'id' }] } : {}),
-        ...(results.some(hit => hit.host) ? { conversation: ['conversation', '--host', { arg: 'host' }, '--', { arg: 'id' }] } : {}),
-        ...(hasOtherPage(pagination) ? { page: ['search', ...commandFlags({ type: filters.type, scene: filters.scene, 'memory-session': filters.session,
-          limit: pagination.limit, reads, trace: values.trace }), '--page', { arg: 'page' }, '--', query] } : {}),
-      } : undefined;
-      return print(withTrace({ strategy: result.strategy, results, pagination, commands }), true);
-    } finally { memory.close?.(); }
-  }
-  if (command === 'memory' && action === 'config') return print(await configureMemory(root, {
-    host: values.host, baseUrl: values['base-url'], model: values.model, yes: values.yes,
-  }));
-  if (command === 'memory' && action === 'codex-install') return print(installCodexMemoryHook(root));
-  if (command === 'memory' && ['put', 'sources', 'delete', 'conversation', 'extract', 'codex-hook', 'host-hook', 'codex-sync', 'sync'].includes(action)) {
-    const memory = openMemory();
-    const page = values.page === undefined ? undefined : Number(values.page);
-    const memoryPrefix = () => [invocation, 'memory', ...commandFlags({
-      root, db: values.db === undefined || db === ':memory:' ? values.db : resolve(db), namespace: values.namespace,
-    })];
-    try {
-      switch (action) {
-        case 'put': return print(await memory.put({
-          content: args.join(' '), id: values.id, type: values.type, scene: values.scene, session: values.session,
-          priority: values.priority === undefined ? undefined : Number(values.priority),
+    if (command === 'skill' && action === 'learnings') {
+      return print(skillLearningUsage(root, requireText(args[0], 'Skill entry path')));
+    }
+    if (command === 'skill' && action === 'replay') {
+      const draft: unknown = JSON.parse(readFileSync(requireText(args[0], 'draft file'), 'utf8').replace(/^\uFEFF/, ''));
+      const scenarios: unknown = JSON.parse(readFileSync(requireText(values.scenarios, 'scenarios file'), 'utf8').replace(/^\uFEFF/, ''));
+      return print(replaySkillAddition(root, draft, { runner: requireText(values.runner, 'replay runner'), scenarios }));
+    }
+    if (command === 'skill' && (action === 'apply' || action === 'rollback')) {
+      return print(changeSkillVersion(root, requireText(args[0], 'replay receipt ID'), action === 'rollback'));
+    }
+    if (command === 'skill' && action === 'design') {
+      const [designAction, ...designArgs] = args;
+      if (designAction === 'task') return print(readSkillDesignTask(root, requireText(designArgs[0], 'Skill design task ID')));
+      if (designAction === 'run') return print(runSkillDesign(root, requireText(designArgs[0], 'Skill design task ID'), requireText(values.runner, 'design runner')));
+      if (designAction === 'review') return print(reviewSkillDesign(root, requireText(designArgs[0], 'Skill design receipt ID')));
+      if (designAction === 'replay') {
+        const scenarios: unknown = JSON.parse(readFileSync(requireText(values.scenarios, 'scenarios file'), 'utf8').replace(/^\uFEFF/, ''));
+        return print(replaySkillDesign(root, requireText(designArgs[0], 'Skill design receipt ID'), {
+          runner: requireText(values.runner, 'replay runner'), scenarios,
         }));
-        case 'sources': return print(memory.sources(requireText(args[0], 'memory ID')));
-        case 'delete': return print({ deleted: memory.delete(requireText(args[0], 'id')) });
-        case 'conversation': {
-          const hosts = values.host === undefined ? [] : parseMemoryHosts(values.host);
-          if (hosts.length > 1) throw new InputError('Choose one host for the conversation');
-          const target = requireText(args[0], 'session or memory ID');
-          const result = await readMemoryConversation(target, {
-            root, memory, host: hosts[0], page, limit: memoryOptions.limit,
-          });
-          if (values.json) return print(result);
-          const commands = hasOtherPage(result.pagination) ? {
-            prefix: memoryPrefix(),
-            page: ['conversation', '--host', result.host, '--limit', String(result.pagination.limit), '--page', { arg: 'page' }, '--', target],
-          } : undefined;
-          return print({ ...result, commands }, true);
-        }
-        case 'extract': {
-          const messages: unknown = JSON.parse(readFileSync(requireText(args[0], 'messages file'), 'utf8').replace(/^\uFEFF/, ''));
-          if (!Array.isArray(messages)) throw new InputError('Messages file must contain a JSON array');
-          const mode = values.mode ?? 'chat';
-          if (mode !== 'chat' && mode !== 'code') throw new InputError('mode must be chat or code');
-          return print(await memory.extract(messages as ConversationMessage[], {
-            session: requireText(values.session, 'session'), mode, llm: modelClient(),
-          }));
-        }
-        case 'codex-hook':
-        case 'host-hook': {
-          const hosts = parseMemoryHosts(action === 'codex-hook' ? 'codex' : requireText(values.host, 'host'));
-          if (hosts.length !== 1) throw new InputError('Choose one host for the hook');
-          const input: unknown = JSON.parse(readFileSync(0, 'utf8').replace(/^\uFEFF/, ''));
-          return print(await handleMemoryHook(hosts[0], input, { root, memory, model: modelClient }));
-        }
-        case 'codex-sync': {
-          const result = await syncMemoryHost('codex', { root, memory, model: modelClient }, values.session);
-          if (result.failures.length) process.exitCode = 1;
-          return print(result);
-        }
-        case 'sync': {
-          const hosts = parseMemoryHosts(values.host ?? 'all');
-          const results = [];
-          for (const host of hosts) {
-            const result = await syncMemoryHost(host, { root, memory, model: modelClient }, values.session);
-            if (result.failures.length) process.exitCode = 1;
-            results.push({ host, ...result });
-          }
-          return print({ hosts: results });
-        }
       }
-    } finally {
-      memory.close();
+      if (designAction === 'apply' || designAction === 'rollback') {
+        return print(applySkillDesign(root, requireText(designArgs[0], 'Skill design receipt ID'), designAction === 'rollback'));
+      }
     }
+    throw new InputError(`Unknown command. Run ${invocation} --help`);
+  } finally {
+    activeKnowledge?.memory?.close?.();
+    for (const memory of stores) memory.close();
   }
-  throw new InputError(`Unknown command. Run ${invocation} --help`);
 }

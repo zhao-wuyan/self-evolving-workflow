@@ -1,6 +1,7 @@
 [
   { "id": "session-run", "path": "skills/ew-orchestrate/references/orchestrator-run-loop.md" },
   { "id": "ew-orchestrate", "path": "skills/ew-orchestrate/references/ew-orchestrate.md" },
+  { "id": "boundary-grill", "path": "skills/ew-orchestrate/references/boundary-grill.md" },
   { "id": "ew-companion", "path": "skills/ew-orchestrate/steps/ew-companion/SKILL.md" },
   { "id": "ew-init", "path": "skills/ew-orchestrate/steps/ew-init/references/workflow.md" },
   { "id": "ew-brainstorm", "path": "skills/ew-orchestrate/steps/ew-brainstorm/SKILL.md" },
@@ -25,9 +26,8 @@
   { "id": "ew-odyssey-defensive", "path": "skills/ew-odyssey/references/odyssey-defensive.md" },
   { "id": "ew-odyssey-ui", "path": "skills/ew-odyssey/references/odyssey-ui.md" },
   { "id": "ew-impeccable", "path": "skills/ew-impeccable/SKILL.md" },
-  { "id": "team-swarm", "path": "skills/team-swarm/specs/swarm-protocol.md" },
+  { "id": "ew-swarm", "path": "skills/ew-swarm/specs/swarm-protocol.md" },
   { "id": "ew-knowledge", "path": "skills/ew-knowledge/SKILL.md" },
   { "id": "ew-skill-design", "path": "skills/ew-skill-design/references/package-contract.md" },
-  { "id": "workflow-evolve", "path": "skills/workflow-evolve/references/auto-loop.md" },
-  { "id": "release-gate", "path": "skills/release-gate/SKILL.md" }
+  { "id": "workflow-evolve", "path": "skills/workflow-evolve/references/auto-loop.md" }
 ]

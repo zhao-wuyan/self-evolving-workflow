@@ -1,7 +1,7 @@
 ---
 name: ew-retrospective
 description: Post-execution retrospective across four independent lenses (technical, process, quality, decision) routing distilled insights
-argument-hint: '[session|range] [--lens technical|process|quality|decision] [--no-route] [--compare <run>] [-y]'
+argument-hint: '[session|run] [--lens technical|process|quality|decision] [--no-route] [--compare <run>] [-y]'
 wiki_categories: [learning, arch]
 search_profile:
   wiki: [constraints, references]

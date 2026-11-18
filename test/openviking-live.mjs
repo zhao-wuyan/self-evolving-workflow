@@ -54,8 +54,8 @@ function propose(root, id, extra = {}) {
   const path = join(temporary, id + '.json');
   writeFileSync(path, JSON.stringify({ operation: 'create', entry: 'entries/' + id, title: id, mode: 'constraint', scope: ['project'],
     repositories: [projectId], body: 'Deployment safety rule ' + id, ...extra }));
-  const preview = evolve(root, 'wiki', 'propose', path, '--evidence', 'live:explicit-test-approval');
-  evolve(root, 'wiki', 'apply', preview.id);
+  const preview = evolve(root, 'kb', 'propose', path, '--evidence', 'live:explicit-test-approval');
+  evolve(root, 'kb', 'apply', preview.id);
 }
 
 try {
@@ -126,7 +126,7 @@ loaded:[request.entry,script].map(path=>({path,sha256:createHash('sha256').updat
   assert.equal(git(a, 'rev-parse', 'HEAD:skills'), git(b, 'rev-parse', 'HEAD:skills'));
   assert.equal(existsSync(join(b, 'dist')), false); assert.equal(existsSync(join(b, 'node_modules')), false);
   const content = 'Deployment build 00123 must preserve Token-AbC_007. ' + 'Original shared body. '.repeat(50) + 'End of original record.';
-  evolve(b, 'memory', 'put', content, '--id', 'shared-live', '--memory-backend', 'local');
+  evolve(b, 'kb', 'add', content, '--id', 'shared-live', '--kind', 'episodic', '--memory-backend', 'local');
   evolve(b, 'openviking', 'memory', 'share', 'shared-live');
 
   const modelPath = join(temporary, 'model.mjs');
@@ -159,20 +159,17 @@ res.setHeader('Content-Type','application/json');res.end(JSON.stringify({choices
   const runB = evolve(b, 'run', 'next', ...fence(b, 'live-b'));
   assert.match(evolve(b, 'run', 'skill-read', runB.run_id, '--session', 'live-b').markdown, /migration_approval/);
   evidence.phase = 'memory-find-and-exact-read';
-  const query = evolve(b, 'memory', 'search', 'Deployment', '--workflow-session', 'live-b', '--json');
+  const query = evolve(b, 'kb', 'search', 'Deployment', '--kind', 'episodic', '--workflow-session', 'live-b');
   const id = query.results.find(item => item.id.endsWith(Buffer.from('shared-live').toString('base64url'))).id;
-  const body = evolve(b, 'memory', 'get', id, '--workflow-session', 'live-b'); assert.equal(body.content, content);
+  const body = evolve(b, 'kb', 'get', id, '--kind', 'episodic', '--workflow-session', 'live-b'); assert.equal(body.content, content);
   evidence.memory_sha256 = hash(content);
-  const context = evolve(b, 'context', 'Deployment', '--session', 'live-b', '--limit', '1'); assert.equal(context.constraints.length, 12);
-  const calls = [
-    { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'memory_search', arguments: { query: 'Deployment' } } },
-    { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'memory_get', arguments: { id } } },
-  ];
-  const output = cmdFile(bin, ['--root', b, 'mcp', '--session', 'live-b', '--run', runB.run_id], b, { env, input: calls.map(call => JSON.stringify(call)).join('\n') + '\n' });
-  const result = output.split(/\r?\n/).map(line => JSON.parse(line).result);
-  assert.ok(result.every(item => !item.isError)); assert.equal(JSON.parse(result[1].content[0].text).content, content);
-  const packet = evolve(b, 'run', 'brief', runB.run_id, '--session', 'live-b');
-  assert.ok(packet.openviking_reads.some(item => item.record_id === id && item.content_sha256 === hash(content)));
+  const context = evolve(b, 'search', 'Deployment', '--mode', 'context', '--session', 'live-b', '--limit', '1'); assert.equal(context.constraints.length, 12);
+  const reads = join(b, '.agent-memory', 'live-reads.json');
+  const found = evolve(b, 'kb', 'search', 'Deployment', '--kind', 'episodic', '--workflow-session', 'live-b', '--reads', reads);
+  const exact = evolve(b, 'kb', 'get', id, '--kind', 'episodic', '--workflow-session', 'live-b', '--reads', reads,
+    '--from-search', found.knowledge_reads.searches.at(-1).search_id);
+  assert.equal(exact.content, content);
+  assert.ok(exact.openviking_reads.some(item => item.record_id === id && item.content_sha256 === hash(content)));
 
   const project = JSON.parse(readFileSync(join(b, '.evolve/openviking.json')));
   const pointerUri = project.root_uri + '/current.json';

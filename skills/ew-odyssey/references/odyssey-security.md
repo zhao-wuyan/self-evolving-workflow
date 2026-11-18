@@ -31,13 +31,14 @@ Target resolution (input → audit scope) and tier coverage (which audits each t
 
 ```json
 { "target": "", "tier": "standard", "scan_phases": [],
+  "intake_hashes": {},
   "audit_result": {}, "findings_count": {},
   "generalization_stats": null }
 ```
 
 ### evidence.ndjson Phases
 
-`recon|scan|report|discovery|decision|self-iteration`
+`recon|scan|report|discovery|decision|issue|self-iteration`
 
 - `recon`: `category` (tech_stack|entry_point|auth_module|data_flow), `detail`
 - `scan`: `phase` (owasp|dependency|secrets|cicd|stride|git_history), `severity`, `cwe`
@@ -77,19 +78,17 @@ S_REPORT → S_GENERALIZE  : report produced, !skip_generalize
 S_REPORT → S_RECORD      : report produced, skip_generalize
 ```
 
-Discover routes: new security concern in sibling module → S_SCAN (re-scan with expanded scope, loops < max_loops).
+Discover routes: new security concern in sibling module → S_SCAN (re-scan with expanded scope, `cross_phase_loops < max_loops`; after S_REPORT, re-run S_GENERALIZE only on new findings per [shared base](odyssey-base.md) `A_DISCOVER`).
 
 ---
 
 ## Actions
 
-**A_INTAKE extra** — Tier resolution: parse `--tier` flag (default: standard). Record tier + applicable scan phases to `session.json.scan_phases`.
+**A_INTAKE extra** — Tier resolution: parse `--tier` flag (default: standard). Record tier + applicable scan phases + `intake_hashes` (byte digests of resolved target files per [read-only audit artifacts](audit-artifacts.md)) to `outputs/session.json`.
 
 **A_RECON** — (1) Detect tech stack from package.json / go.mod / requirements.txt / Cargo.toml. (2) Identify entry points: HTTP handlers, API routes, CLI parsers, WebSocket handlers. (3) List authentication/authorization modules. (4) Map data flow: user input → processing → storage → output. (5) Evidence phase=recon. Update §2. Mark G1.
 
 **GATE: recon-complete** — tech stack detected, entry points identified, auth/authz modules listed, data flow mapped. Evidence phase=recon logged. §2 updated. BLOCKED if no entry points found (E002).
-
-Commit: `"odyssey-security({slug}): RECON — reconnaissance complete"`
 
 **A_SCAN** — Tier-gated parallel scan phases:
 
@@ -128,13 +127,9 @@ Merge all findings → evidence phase=scan. Write `session.json.audit_result`. U
 
 **GATE: scan-complete** — all tier-required scan phases completed with structured findings, merged into severity matrix, evidence phase=scan logged per phase. Tier-required phase not attempted is BLOCKED (W001 tool unavailable / W002 git history failure are warnings, not blocks).
 
-Commit: `"odyssey-security({slug}): SCAN — {tier} tier scan complete"`
-
 **A_REPORT** — (1) Produce severity matrix: CRITICAL / HIGH / MEDIUM / LOW with file:line references and remediation for each finding. (2) Compute summary statistics. (3) Write understanding.md §5 (full report). (4) Write `session.json.findings_count`. (5) Evidence phase=report. Mark G3.
 
-**GATE: report-produced** — severity matrix with file:line references and remediation for every finding; summary statistics computed; §5 written; `audit_result` populated.
-
-Commit: `"odyssey-security({slug}): REPORT — severity matrix produced"`
+**GATE: report-produced** — severity matrix with file:line references and remediation for every finding; summary statistics computed; §5 written; `audit_result` populated; read-only invariant verified (audited files match `intake_hashes`, zero source modifications).
 
 ---
 
@@ -148,14 +143,14 @@ Security findings with severity >= medium + vulnerability patterns across scan p
 
 ## Knowledge Persistence (§7)
 
-Include verified reusable findings in the Run summary and harvest the completed Session through `evolve workflows show knowledge` (`evolve closeout session` → `evolve wiki propose`).
+Include verified reusable findings in the Run summary and harvest the completed Session through `evolve skill workflows show ew-knowledge` (`evolve kb harvest session` → `evolve kb propose`).
 
 | Category | Content | Follow-up |
 |----------|---------|-----------|
-| Vulnerability pattern | CWE + trigger + detection pattern + remediation | `evolve closeout session` → `evolve wiki propose` (`category: debug`) |
-| Security constraint | Trust boundary + validation rule + enforcement | `evolve closeout session` → `evolve wiki propose` (`category: arch`) |
-| Dependency risk | Package + CVE + safe version + migration path | `evolve closeout session` → `evolve wiki propose` (`category: coding`) |
-| CI/CD hardening | Misconfiguration + fix + prevention check | `evolve closeout session` → `evolve wiki propose` (`category: coding`) |
+| Vulnerability pattern | CWE + trigger + detection pattern + remediation | `evolve kb harvest session` → `evolve kb propose` (`category: debug`) |
+| Security constraint | Trust boundary + validation rule + enforcement | `evolve kb harvest session` → `evolve kb propose` (`category: arch`) |
+| Dependency risk | Package + CVE + safe version + migration path | `evolve kb harvest session` → `evolve kb propose` (`category: coding`) |
+| CI/CD hardening | Misconfiguration + fix + prevention check | `evolve kb harvest session` → `evolve kb propose` (`category: coding`) |
 
 ---
 
@@ -196,16 +191,16 @@ Goals:       {done}/{total} ({skipped} skipped)
 
 - **Recon gate** (S_RECON): tech stack + entry points + auth modules + data flow mapped. Evidence logged, understanding.md §2 updated.
 - **Scan gate** (S_SCAN): all tier-required phases completed. Per-phase evidence logged. Findings merged with severity classification. Tier-required phase missing is BLOCKED (W001/W002 partial allowed).
-- **Report gate** (S_REPORT): severity matrix produced with file:line + remediation. Summary statistics. §5 written. Read-only invariant verified (no source modifications in session).
+- **Report gate** (S_REPORT): severity matrix produced with file:line + remediation. Summary statistics. §5 written. Read-only invariant verified (audited files match `intake_hashes`; zero source modifications in session).
 
 ---
 
 ## Error Codes
 
+Shared `E000–E004` and `W008` errors are defined in [SKILL.md](../SKILL.md) (including `E001` missing target/scope and `E002` no source files or entry points found).
+
 | Code | Severity | Condition | Recovery |
 |------|----------|-----------|----------|
-| E001 | error | No target / scope provided | Provide target or -c |
-| E002 | error | No source files found in scope / no entry points | Verify target path exists |
 | W001 | warning | Dependency audit tool unavailable (npm audit etc.) | Skip dependency phase, note limitation |
 | W002 | warning | Git history scan failed | Skip git history phase, note limitation |
 | W003 | warning | Partial scan (some files inaccessible) | Report coverage gap in findings |
@@ -216,14 +211,14 @@ Goals:       {done}/{total} ({skipped} skipped)
 
 ## Success Criteria
 
-- [ ] Target resolved; tier determined; session + output files created
+- [ ] Target resolved; tier determined; session + mode-contracted output files (`prepare/odyssey-security.md`) created; `intake_hashes` recorded
 - [ ] Recon completed: tech stack, entry points, auth modules, data flow mapped
 - [ ] All tier-required scan phases completed (OWASP, dependencies, secrets, CI/CD, STRIDE, git history per tier)
 - [ ] understanding.md sections written progressively (§1–§7)
 - [ ] Severity matrix produced with file:line references and remediation for every finding
-- [ ] Read-only invariant maintained — zero source code modifications
+- [ ] Read-only invariant maintained — audited files match `intake_hashes`, zero source code modifications
 - [ ] Multi-layer generalization + discovery triage (unless --skip-generalize)
-- [ ] phase_goals derived, tracked, and hardened-audited; goal_mode injected via prepare goal:true
+- [ ] phase_goals derived, tracked, and audited in `outputs/session.json` (honor session `policy.goal_mode` when opened with `--goal-mode`)
 - [ ] Session resumable via -c; completion summary emitted
 
 ---

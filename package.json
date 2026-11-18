@@ -1,6 +1,6 @@
 {
   "name": "self-evolving-workflow",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "description": "Self-Evolving Workflow with a local code graph, a Markdown wiki, and agent memory search",
   "repository": {
     "type": "git",
@@ -12,7 +12,6 @@
     "node": ">=22.16.0"
   },
   "bin": {
-    "agent-memory": "dist/cli.js",
     "evolve": "dist/workflow-cli.js"
   },
   "exports": {
@@ -35,18 +34,23 @@
     "./http": {
       "types": "./dist/http.d.ts",
       "default": "./dist/http.js"
+    },
+    "./orchestrator": {
+      "types": "./dist/orchestrator.d.ts",
+      "default": "./dist/orchestrator.js"
     }
   },
   "files": [
     "dist",
     "skills",
+    "agents",
     "workflows",
     "docs/images",
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "setup": "npm run build && npm link && node dist/workflow-cli.js install",
+    "build": "tsc -p tsconfig.json && node --input-type=module -e \"import {rmSync} from 'node:fs'; for (const f of ['cli.js','cli.d.ts','workflow-mcp.js','workflow-mcp.d.ts']) rmSync('dist/'+f,{force:true})\"",
+    "setup": "npm run build && npm link && node dist/workflow-cli.js skill install",
     "test": "npm run build && node --test test/*.test.mjs",
     "test:codex-replay": "npm run build && node test/codex-replay.mjs",
     "test:codex-replay-contract": "npm run build && node test/codex-replay-contract.mjs",

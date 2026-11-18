@@ -3,8 +3,8 @@ import { InputError, requireText } from './common.js';
 
 export const KNOWLEDGE_READS_VERSION = 'knowledge-reads/1.0';
 
-export type KnowledgeSearchSource = 'code' | 'wiki' | 'wiki_references' | 'memory' | 'context';
-export type KnowledgeReadKind = 'code' | 'wiki' | 'memory';
+export type KnowledgeSearchSource = 'code' | 'wiki' | 'wiki_references' | 'memory' | 'context' | 'kb' | 'search';
+export type KnowledgeReadKind = 'code' | 'wiki' | 'memory' | 'kb';
 
 export interface KnowledgeSearchRecord {
   search_id: string;
@@ -28,6 +28,8 @@ export interface KnowledgeConstraintRecord {
   content_sha256?: string;
   scope: string[];
   categories?: string[];
+  storage_scope?: 'project' | 'global';
+  lookup_scope?: Record<string, unknown>;
 }
 
 export interface KnowledgePriorReuse {
@@ -66,6 +68,8 @@ export interface KnowledgeConstraintInput {
   categories?: string[];
   content?: string;
   contentSha256?: string;
+  storageScope?: 'project' | 'global';
+  lookupScope?: Record<string, unknown>;
 }
 
 export function contentSha256(content: string): string {
@@ -93,14 +97,17 @@ function record(value: unknown, field: string): Record<string, unknown> {
 }
 
 function source(value: unknown, field: string): KnowledgeSearchSource {
-  if (value !== 'code' && value !== 'wiki' && value !== 'wiki_references' && value !== 'memory' && value !== 'context') {
+  if (value !== 'code' && value !== 'wiki' && value !== 'wiki_references' && value !== 'memory' && value !== 'context' &&
+      value !== 'kb' && value !== 'search') {
     throw new InputError(`Invalid knowledge read ${field}`);
   }
   return value;
 }
 
 function kind(value: unknown, field: string): KnowledgeReadKind {
-  if (value !== 'code' && value !== 'wiki' && value !== 'memory') throw new InputError(`Invalid knowledge read ${field}`);
+  if (value !== 'code' && value !== 'wiki' && value !== 'memory' && value !== 'kb') {
+    throw new InputError(`Invalid knowledge read ${field}`);
+  }
   return value;
 }
 
@@ -135,11 +142,16 @@ function parseRead(value: unknown, index: number): KnowledgeReadRecord {
 
 function parseConstraint(value: unknown, index: number): KnowledgeConstraintRecord {
   const item = record(value, `constraint ${index}`);
+  if (item.storage_scope !== undefined && item.storage_scope !== 'project' && item.storage_scope !== 'global') {
+    throw new InputError(`Invalid knowledge constraint storage scope ${index}`);
+  }
   return {
     knowledge_id: requireText(item.knowledge_id, `constraint ID ${index}`),
     ...(item.content_sha256 === undefined ? {} : { content_sha256: optionalSha(item.content_sha256, `constraint hash ${index}`) }),
     scope: stringList(item.scope, `constraint scope ${index}`),
     ...(item.categories === undefined ? {} : { categories: stringList(item.categories, `constraint categories ${index}`) }),
+    ...(item.storage_scope === undefined ? {} : { storage_scope: item.storage_scope }),
+    ...(item.lookup_scope === undefined ? {} : { lookup_scope: record(item.lookup_scope, `constraint lookup scope ${index}`) }),
   };
 }
 
@@ -248,6 +260,8 @@ export class KnowledgeReads {
       ...(hash ? { content_sha256: hash } : {}),
       scope: stringList(input.scope, 'knowledge constraint scope'),
       ...(input.categories ? { categories: stringList(input.categories, 'knowledge constraint categories') } : {}),
+      ...(input.storageScope ? { storage_scope: input.storageScope } : {}),
+      ...(input.lookupScope ? { lookup_scope: input.lookupScope } : {}),
     });
   }
 

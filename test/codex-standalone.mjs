@@ -11,7 +11,7 @@ import { promisify } from 'node:util';
 
 const maestro = process.env.MAESTRO_REPLAY_CLI;
 assert.ok(maestro && isAbsolute(maestro), 'Set MAESTRO_REPLAY_CLI to the built Maestro JavaScript entry.');
-const memory = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
+const memory = fileURLToPath(new URL('../dist/workflow-cli.js', import.meta.url));
 const root = await mkdtemp(join(tmpdir(), 'evolve-codex-standalone-'));
 const execute = promisify(execFile);
 const project = 'standalone-fixture';

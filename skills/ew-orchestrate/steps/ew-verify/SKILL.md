@@ -69,5 +69,5 @@ contract:
 
 Read [preparation](references/prepare.md), then follow the [verification workflow](references/workflow.md).
 
-- Independent iron-gate verification over bound `current-plan` and `current-execution`: goal-backward structural proof + live command coverage + anti-pattern scan.
-- Emits `outputs/verification.json` (`latest-verification`), feeding `ew-test` or `ew-plan --gaps` on failure.
+- Independent iron-gate verification over bound `current-plan` and `current-execution` (plus optional `latest-review` when re-verifying after review remediation): goal-backward structural proof + live command coverage + canonical static anti-pattern scan.
+- Emits `outputs/verification.json` (`latest-verification`), feeding `ew-review` (standard acceptance) or `ew-plan --gaps` on failure.

@@ -5,7 +5,7 @@ search_profile:
   wiki: [constraints, references]
   memory: [correction, error, verified_fix]
 description: Perform multi-dimensional analysis of a topic or existing implementation, producing findings and a risk-matrix consumable by plan
-argument-hint: '[topic] [-y] [-q] [--from <artifact-alias>] [--gaps [ISS-ID]]'
+argument-hint: '[topic] [-y] [-q] [-c] [--from <artifact-alias>] [--gaps [ISS-ID]]'
 required_links:
   - references/prepare.md
   - references/workflow.md
@@ -16,6 +16,18 @@ contract:
     required: false
     schema: context-package/1.0
     role: attachment
+    accepts_negative_evidence: true
+  - kind: brainstorm
+    alias: current-brainstorm
+    required: false
+    schema: brainstorm/1.0
+    role: primary
+    accepts_negative_evidence: true
+  - kind: roadmap
+    alias: current-roadmap
+    required: false
+    schema: roadmap/1.0
+    role: primary
     accepts_negative_evidence: true
   - kind: blueprint
     alias: current-blueprint
@@ -66,5 +78,5 @@ session-mode: run
 
 Read [preparation](references/prepare.md), then follow the [analysis workflow](references/workflow.md).
 
-- Follow `skills/ew-orchestrate/references/boundary-grill.md` when a responsibility conflict is found (write findings into `findings.json#boundary_grill[]` + `report.md`; never append raw Markdown into `.json`).
+- Follow the Boundary Grill protocol (`evolve skill workflows show boundary-grill`) when a responsibility conflict is found (write findings into `findings.json#boundary_grill[]` + `report.md`; never append raw Markdown into `.json`).
 - Read [issue gap analysis](references/issue-gaps-analyze.md) for the --gaps branch.

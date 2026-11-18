@@ -11,11 +11,13 @@ import { mergePage, unionSources } from './upstream/merge.js';
 import { buildAnalysisPrompt, buildAnalysisSystemPrompt, buildGenerateFromAnalysisPrompt, buildGeneratePrompt, buildSystemPrompt } from './upstream/prompts.js';
 import { pageRelPath, slugify } from './upstream/slug.js';
 import { loadTemplate } from './upstream/template.js';
+import { proposeWikiChange } from './wiki-change.js';
 import { readWikiPages, structuralPages, type Wiki } from './wiki.js';
 
 export interface WikiIngestOptions {
   llm: LlmClient;
   mode?: 'two-stage' | 'single-stage';
+  propose?: boolean;
 }
 
 const inProgress = new Set<string>();
@@ -99,7 +101,46 @@ export async function ingestWiki(wiki: Wiki, source: string, options: WikiIngest
         rmSync(temp, { force: true });
       }
     }
-    return { written: [...staged.keys()], warnings, ...wiki.build() };
+    const buildResult = wiki.build();
+    const proposedChanges: Array<ReturnType<typeof proposeWikiChange>> = [];
+    if (options.propose) {
+      for (const [path, content] of staged) {
+        const parsed = parseFrontmatter(content);
+        const body = parsed.body.trim();
+        if (!body || wiki.getEntriesByExactBody(body).length > 0) continue;
+        const title = typeof parsed.frontmatter.title === 'string' && parsed.frontmatter.title.trim()
+          ? parsed.frontmatter.title.trim()
+          : basename(path, '.md');
+        const rawSlug = (slugify(title) || slugify(basename(path, '.md')) || 'ingest-page')
+          .toLowerCase()
+          .replace(/[^a-z0-9_-]+/g, '-')
+          .replace(/^[^a-z0-9]+|-+$/g, '');
+        if (!rawSlug) continue;
+        const entryId = `entries/${rawSlug}`;
+        const existing = wiki.getEntry(entryId);
+        if (existing && (!existing.entry || existing.entry.mode !== 'reference' || existing.entry.status !== 'active' || existing.body.trim() === body)) {
+          continue;
+        }
+        try {
+          proposedChanges.push(proposeWikiChange(wiki, {
+            operation: existing ? 'update' : 'create',
+            entry: entryId,
+            title,
+            mode: 'reference',
+            scope: ['project'],
+            body,
+          }, [`ingest:${sourceName}`]));
+        } catch (error) {
+          warnings.push(`Skipped proposal for ${entryId}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    }
+    return {
+      written: [...staged.keys()],
+      warnings,
+      ...buildResult,
+      ...(options.propose ? { proposed_changes: proposedChanges } : {}),
+    };
   } finally {
     inProgress.delete(root);
   }

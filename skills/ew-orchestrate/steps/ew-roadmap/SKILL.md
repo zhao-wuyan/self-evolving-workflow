@@ -24,6 +24,12 @@ contract:
     schema: context-package/1.0
     role: attachment
     accepts_negative_evidence: true
+  - kind: brainstorm
+    alias: current-brainstorm
+    required: false
+    schema: brainstorm/1.0
+    role: primary
+    accepts_negative_evidence: true
   - kind: blueprint
     alias: current-blueprint
     required: false

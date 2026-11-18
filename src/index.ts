@@ -22,10 +22,12 @@ export {
   type AgentMemoryPrompt,
   type AgentMemoryPromptKind,
 } from './agent-memory-prompts.js';
-export { Wiki, type WikiHit, type WikiReadOptions, type WikiSearchOptions } from './wiki.js';
+export { initWiki, Wiki, type WikiHit, type WikiReadOptions, type WikiSearchOptions } from './wiki.js';
 export type { WikiContext, WikiEntryMetadata } from './wiki-entry.js';
 export { reviewSession, reviewSkillExecution, type ReviewedRun, type SkillSignal } from './retrospective.js';
-export { draftSkillAddition, type SkillPriority } from './skill-addition.js';
+export {
+  draftSkillAddition, draftSkillRetirement, listSkillLearnings, type SkillFileChange, type SkillLearning, type SkillPriority,
+} from './skill-addition.js';
 export { decideSkillRoute, type SkillRetentionRoute, type SkillRouteContext, type SkillRouteDecision } from './skill-route.js';
 export {
   applySkillDesign,
@@ -43,6 +45,7 @@ export type { MemoryReader, MemorySearchResult } from './memory-reader.js';
 export { openKnowledgeSources, type KnowledgeSources, type KnowledgeBackend } from './knowledge-sources.js';
 export {
   context,
+  prioritizeMemoryHits,
   search,
   type ContextOptions,
   type SearchSources,

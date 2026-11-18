@@ -1,7 +1,7 @@
 ---
 name: ew-odyssey-ui
 description: "6-dimension visual experience audit with divergent exploration — survey design context, audit visual/interaction/a11y/responsive/motion/edge dimensions, diverge for polish+delight, fix, verify,"
-argument-hint: "<target> [--dimensions <list>] [--skip-fix] [--skip-generalize] [-y] [-c]"
+argument-hint: "<target> [--dimensions <list>] [--fix-threshold <severity>] [--skip-fix] [--skip-generalize] [-y] [-c]"
 contract:
   contract_version: 2.1
   produces:
@@ -30,7 +30,7 @@ goal: true
 
 ## Purpose
 
-Odyssey UI performs a full-lifecycle visual experience optimization cycle: survey design context → 6-dimension audit (visual hierarchy, interaction states, accessibility, responsiveness, micro-interactions, edge cases) → divergent exploration for polish and delight ideas → exhaustive fix → verify → generalize to sibling components → persist learnings. Unlike a standalone review or audit, odyssey-ui goes beyond defect fixing to explore what would make the UI delightful, then carries through to fix, verify, generalize, and persist.
+Odyssey UI performs a **multi-round iterative** visual experience optimization campaign: survey design context (`ew-impeccable` context + `PRODUCT.md`/`DESIGN.md`) → 6-dimension audit (visual hierarchy, interaction states, accessibility, responsiveness, micro-interactions, edge cases) → divergent exploration for polish and delight ideas → exhaustive fix → verify → generalize to sibling components → persist learnings. For **single-pass** UI design, redesign, critique, audit, or polish (or greenfield UI creation), route to `ew-impeccable` (`evolve skill workflows show ew-impeccable`) instead.
 
 ## Input Interpretation
 
@@ -47,27 +47,28 @@ The six dimensions (default all, overridable via `--dimensions`): visual_hierarc
 
 ## Required Context
 
-Satisfy the Knowledge Gate (`AGENTS.md`) before searching code:
+Satisfy the Knowledge Gate per [shared base](../odyssey-base.md) §Phase Initialization & Pre-load (`evolve skill workflows show session-run` — `session-priors` when scope matches → `evolve search "<query>" --mode context` / `evolve kb get <id>` with CLI `--reads`) for `ui` and `coding` scope before searching code (`evolve code search "<target keywords>"` → component hierarchy, design system structure).
 
-- Wiki & Memory (first): Run MCP `wiki_context` / `memory_search` + `wiki_reference` / `memory_get`, or CLI `evolve context "<target keywords>" --session <session> --include-memory --reads "<run_dir>/knowledge-reads.json"` (plus `evolve wiki get <id> --resolved --reads ... --from-search ...`) for `ui` and `coding` scope.
-- Code graph (after Knowledge Gate): `evolve code search "<target keywords>"` → component hierarchy, design system structure.
+- **Impeccable design context (mandatory before UI survey/edits)**: load `evolve skill workflows show ew-impeccable`, run `impeccable context` once (`node <impeccable-base>/scripts/impeccable.mjs context --target <target>` if available; on launcher failure, read existing `PRODUCT.md` and `DESIGN.md` directly without inventing missing context), and read `skills/ew-impeccable/reference/craft-floor.md` immediately before any UI edit in `S_FIX`.
 - Design system scan: scan for design tokens, CSS variables, theme imports at survey phase — these inform the audit baseline.
 
 When prior UI sessions of the same target exist, check their audit results and diverge ideas first to avoid re-auditing already-addressed dimensions.
 
 ## Run Artifact Metadata
 
-Attach `kind`, `schema`, `role`, and `alias` from `produces` to top-level `_meta` in `outputs/session.json`, the first JSON record in `outputs/evidence.ndjson`, and YAML frontmatter in `outputs/understanding.md` (`current_state: "END"` before `evolve run complete`).
+Follow [runtime adapters](../runtime-adapters.md) §4 for `_meta` attachment (`outputs/session.json`, first record of `outputs/evidence.ndjson`, YAML frontmatter of `outputs/understanding.md`), `current_state: "END"`, and `evolve run complete` sealing.
 
 ## Boundaries and Invariants
 
-- **Browser is truth** — the rendered visual output in the browser is the authoritative source of UI quality; code-level analysis alone is insufficient for visual/interaction judgment.
+- **Browser is truth (with fallback)** — rendered visual output in the browser at desktop & mobile breakpoints is the authoritative source of UI quality; when no browser/preview runtime is available, log `W001` and fall back to committed visual-regression fixtures and static DOM/CSS checks without fabricating rendered evidence.
+- **Impeccable guardrails before any UI edit** — honor `PRODUCT.md`, `DESIGN.md`, and the committed visual world from `impeccable context`; load `skills/ew-impeccable/reference/craft-floor.md` immediately before editing UI code in `S_FIX`.
+- **Single-pass vs campaign boundary** — single-pass UI design/audit/polish belongs to `ew-impeccable` (`evolve skill workflows show ew-impeccable`); multi-iteration UI campaigns use `ew-odyssey-ui`.
 - **Diverge before converge** — the DIVERGE phase explicitly generates ideas beyond the audit defects. Polish (shadows, transitions, hover, feedback, skeleton loading) and delight (motion design, progressive disclosure, smart defaults, celebratory feedback) are separate from fixing audit findings.
-- **Decision gate narrow scope** — ONLY these qualify as decisions requiring user input: brand/style direction requiring human creative judgment | layout restructuring that significantly changes user flow | requires new design tokens or breaking component API. Everything else is actionable without user escalation.
+- **Decision gate narrow scope (overrides [shared base](../odyssey-base.md) §Execution Discipline #2)** — ONLY these qualify as decisions requiring user input: brand/style direction requiring human creative judgment | layout restructuring that significantly changes user flow | requires new design tokens or breaking component API. Everything else is actionable without user escalation.
 - **All dimensions mandatory** — all 6 dimensions (or `--dimensions` subset) must be audited with independent agents. Zero dimensions reviewed is BLOCKED, not a warning.
-- **Priority-ordered fixing** — findings and ideas are fixed by priority tier (critical → high → medium → low + high-impact ideas). No partial-tier advancement.
+- **Priority-ordered fixing & fix loop cap** — fix all actionable findings (`>= fix_threshold`, default `all`: critical → high → medium → low) plus `high-impact` diverge ideas (`critical → high → medium → low + high-impact ideas`); medium/low ideas not implemented are triaged as `issue` or `skipped` with per-item reasons. `S_VERIFY → S_FIX` retries are bounded by `fix_rounds < max_fix_rounds` (default `5`). No partial-tier advancement.
 - **Evidence append-only** — evidence.ndjson entries are immutable observations; modifying or deleting them is forbidden.
-- **Fix scope** — source code modifications during fix phase are in-scope but MUST be committed per action. Session artifacts target `{run_dir}/outputs/` only.
+- **Fix scope** — source code modifications during fix phase are in-scope and MUST be committed per verified fix/action. Session artifacts target `{run_dir}/outputs/` only.
 - **Generalize is mandatory** unless `skip_generalize == true`; prior-phase convergence is NOT a valid skip reason.
 
 ## Risk Checklist
@@ -85,4 +86,4 @@ Attach `kind`, `schema`, `role`, and `alias` from `produces` to top-level `_meta
 
 - `all-dimensions-audited`: all 6 dimensions (or `--dimensions` subset) completed audit with structured findings (`[{title, severity, file, line, description, suggestion, dimension}]`), merged into severity matrix, and evidence phase=audit logged for each. Zero dimensions reviewed is BLOCKED (W002 partial coverage from agent failure is a warning, not a block).
 - `diverge-explored`: both Polish and Delight agents completed, returning distinct `[{idea, category, impact, effort, description, inspiration}]` entries. CLI-assisted analysis completed. All outputs consolidated with audit findings into a prioritized list (severity × impact × effort). Evidence phase=diverge logged. Understanding.md §4 written.
-- `zero-remaining-verified`: all prioritized findings and ideas are either fixed and verified, individually classified with justification (issue created / decision recorded), or legitimately skipped via `--skip-fix` flag. Tests pass (lint, unit, visual regression). Confirmation written. No unaddressed actionable findings remain. Understanding.md §5 updated. `needs_rework` routes back to FIX.
+- `zero-remaining-verified`: all actionable audit findings (`>= fix_threshold`) and `high-impact` diverge ideas are fixed and verified, individually classified with justification (issue created / decision recorded), or legitimately skipped via `--skip-fix` flag (medium/low ideas not implemented are triaged as `issue` or `skipped` with per-item reasons). Tests pass (lint, unit, visual regression) with rendered browser verification (or `W001` fallback). Confirmation written. No unaddressed actionable findings remain. Understanding.md §5 updated. `needs_rework` routes back to FIX while `fix_rounds < max_fix_rounds` (else escalates to S_RECORD).

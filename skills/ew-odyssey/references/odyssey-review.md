@@ -14,26 +14,22 @@ Back-half: `S_GENERALIZE → S_DISCOVER → S_RECORD → END` (see [shared phase
 
 ## Boundary
 
-**In scope:** Multi-dimensional deep review of target code → exhaustive fix ALL findings by severity → generalize patterns project-wide.
-**Out of scope:** Root cause debug → `--mode debug` | Feature implementation → `--mode planex` | UI visual optimization → `--mode ui`. Zero-residual applies (fix ALL findings within fix_threshold, default all).
+**In scope:** Multi-iteration multi-dimensional deep review of target code → exhaustive fix ALL findings within `fix_threshold` (default `all`) by severity → generalize patterns project-wide.
+**Out of scope:** Single-pass 4-dimension review (findings-only or inside an Evolve Session chain after `ew-execute`) → `ew-orchestrate` (`ew-review`) | Root cause debug → `--mode debug` | Feature implementation → `--mode planex` | UI visual optimization → `--mode ui`. Zero-residual applies (fix ALL findings within `fix_threshold`, default `all`).
 
 ---
 
 ## Target Resolution
 
-| Input | Resolution |
-|-------|-----------|
-| File/dir path | Review those files |
-| `HEAD` / `staged` | `git diff HEAD` / `git diff --staged` |
-| Session/Run ID or commit range | Evolve Run artifacts / `git diff <base>..<head>` |
-| PR number | `git diff main...HEAD` |
+Target resolution (`file|dir|HEAD|staged|session|run|phase#|PR#`) and `--dimensions`/`--fix-threshold` options are defined in [the selected mode preparation](prepare/odyssey-review.md) §Input Interpretation — that is the canonical wording.
 
 ---
 
 ## Session Fields
 
 ```json
-{ "target": "", "dimensions": [], "review_result": {"remaining_actionable": 0},
+{ "target": "", "dimensions": [], "fix_rounds": 0, "max_fix_rounds": 5,
+  "review_result": {"remaining_actionable": 0},
   "patterns": [], "confirmation": null, "generalization_stats": null }
 ```
 
@@ -41,7 +37,7 @@ Back-half: `S_GENERALIZE → S_DISCOVER → S_RECORD → END` (see [shared phase
 
 ## evidence.ndjson Phases
 
-`archaeology|explore|review|fix|discovery|decision|self-iteration`
+`archaeology|explore|review|fix|discovery|decision|issue|self-iteration`
 
 ---
 
@@ -49,12 +45,12 @@ Back-half: `S_GENERALIZE → S_DISCOVER → S_RECORD → END` (see [shared phase
 
 | ID | Goal | done_when | phase | skip_when |
 |----|------|-----------|-------|-----------|
-| G1 | Review completed | all dimensions reviewed | S_REVIEW | — |
-| G2 | Explore context | explore.json populated | S_EXPLORE | — |
+| G1 | Review completed | all selected dimensions reviewed | S_REVIEW | — |
+| G2 | Explore context | explore.json populated (or W006 gap logged) | S_EXPLORE | — |
 | G3 | Zero remaining | `remaining_actionable == 0` | S_CONFIRM | skip_fix |
 | G4 | Pattern generalized | patterns[] ≥1 | S_GENERALIZE | skip_generalize |
 | G5 | Discoveries triaged | all hits classified | S_DISCOVER | skip_generalize |
-| G6 | Learnings persisted | spec entries or no actionable | S_RECORD | — |
+| G6 | Learnings persisted | reusable Wiki candidates staged/proposed (or none actionable) | S_RECORD | — |
 
 ---
 
@@ -69,7 +65,7 @@ Back-half: `S_GENERALIZE → S_DISCOVER → S_RECORD → END` (see [shared phase
 7. Discoveries
 8. Learnings
 
-Specs: `evolve wiki constraints --category review`.
+Wiki constraints: `evolve kb list --kind constraint --category review`.
 
 ---
 
@@ -84,42 +80,23 @@ S_REVIEW  → S_RECORD       : both skip
 S_FIX     → S_CONFIRM      : tier complete
 S_CONFIRM → S_GENERALIZE   : confirmed, !skip_generalize
 S_CONFIRM → S_RECORD       : confirmed, skip_generalize
-S_CONFIRM → S_FIX          : needs_rework
+S_CONFIRM → S_FIX          : needs_rework, fix_rounds < max_fix_rounds (`fix_rounds++`)
+S_CONFIRM → S_RECORD       : needs_rework, fix_rounds >= max_fix_rounds (escalate per [shared base](odyssey-base.md) `<fix_loop_cap>`)
 ```
 
-Discover routes: fixable sibling → S_FIX; new target needing review → S_REVIEW (loops < max_loops).
+Discover routes: fixable sibling → S_FIX; new target needing review → S_REVIEW (`cross_phase_loops < max_loops`; after S_CONFIRM, re-run S_GENERALIZE only on newly added fixes per [shared base](odyssey-base.md) `A_DISCOVER`).
 
 ---
 
 ## Actions
 
-### A_ARCHAEOLOGY
+### A_ARCHAEOLOGY & A_EXPLORE
 
-Run 2 parallel subagents (join before advancing — see [runtime adapters](runtime-adapters.md)):
-- **Timeline**: `git log --oneline -20 -- {files}`
-- **Blame**: top 3 files `git blame -L {region}`
-
-Evidence phase=archaeology.
-
-`evolve delegate "PURPOSE: review recent modifications related to {target}. EXPECTED: JSON [{commit_sha, risk_level, analysis, could_cause_issue, explanation}]" --to codex --mode analysis`
-
-Update §2 (Archaeology).
-
-If an archaeology agent fails, log W003 and proceed with available results.
-
-### A_EXPLORE
-
-Skip if no CLI tools (W006).
-
-`evolve delegate "PURPOSE: trace call chains, recent changes, error gaps, and similar patterns for {target}. EXPECTED: JSON {call_chains, recent_changes, error_gaps, similar_patterns}" --to codex --mode analysis`
-
-Write `explore.json` + evidence phase=explore. Update §3 (Exploration). Mark G2.
-
-**GATE: discovery-complete** — archaeology/explore evidence logged, understanding.md §2-§3 updated, G2 marked (W003 partial / W006 skip acceptable).
+Follow [shared base](odyssey-base.md) §Shared Discovery Phases with `target_or_issue = {target}` (archaeology subagents + `explore.json` + `understanding.md` §2–§3 + `G2` + `W003`/`W006` probe).
 
 ### A_REVIEW
 
-Run N parallel subagents (one per dimension; join all before advancing — see [runtime adapters](runtime-adapters.md)):
+Run N parallel subagents (one per selected dimension — default all 4 below, or `--dimensions` subset; join all before advancing — see [runtime adapters](runtime-adapters.md)):
 - **Correctness**: logic errors, boundary conditions, null/undefined, race conditions
 - **Security**: injection, XSS, CSRF, data exposure, auth bypass
 - **Performance**: hot paths, N+1, memory leaks, unnecessary recomputation
@@ -127,7 +104,7 @@ Run N parallel subagents (one per dimension; join all before advancing — see [
 
 Each returns `[{title, severity, file, line, description, suggestion, cwe}]`. Merge → evidence phase=review. Write `review_result` + §4 severity matrix. Mark G1.
 
-**GATE: all-dimensions-reviewed** — all 4 dimension agents (correctness, security, performance, architecture) completed, findings merged into review_result with severity classification, evidence phase=review logged, §4 severity matrix written, G1 marked. Zero dimensions reviewed is BLOCKED (W002 partial with ≥1 dimension allowed).
+**GATE: all-dimensions-reviewed** — all selected dimension agents (default all 4: correctness, security, performance, architecture; or `--dimensions` subset) completed, findings merged into `review_result` with severity classification, evidence phase=review logged, §4 severity matrix written, G1 marked. Zero dimensions reviewed is BLOCKED (W002 partial with ≥1 dimension allowed).
 
 ### A_FIX
 
@@ -138,13 +115,16 @@ for tier in [critical, high, medium, low].filter(>= threshold):
   re-review modified area (new findings → append, continue; max 2 per tier)
   tier done → auto-commit
 ```
-Normal: structured prompt per tier | `-y`: auto-fix all. Remaining > 0 → retry (**MANDATORY hard limit: max_fix_rounds = 5**). Unchanged 2 rounds → classify each individually. After 5 rounds remaining > 0 → escalate: Normal: structured prompt (continue/accept/reclassify) | `-y`: classify remaining as `deferred`, proceed. **No partial-tier advancement** — a tier is complete only when every finding is fixed or individually classified. Blanket "pre-existing" forbidden. Commit per tier: `"odyssey-review({slug}): FIX-{tier} — {N} items fixed"`.
+Normal: structured prompt per tier | `-y`: auto-proceed fixing all actionable findings within `fix_threshold` (record human tier-confirmation as `deferred`). Cumulative `fix_rounds` across both `A_FIX` retry rounds and `S_CONFIRM → S_FIX` (`needs_rework`) rework loops is capped at **MANDATORY hard limit: `max_fix_rounds = 5`**. Unchanged 2 rounds → classify each individually (`issue` / `decision`). After `fix_rounds >= max_fix_rounds` with `remaining_actionable > 0` → escalate per [shared base](odyssey-base.md) `<fix_loop_cap>` (Normal: structured prompt for 1 bounded `+2` extension or classify remaining as `deferred`/`issue` → `S_RECORD`; `-y`: classify remaining as `deferred`/`issue` as `ESCALATED` → `S_RECORD`). **No partial-tier advancement** — a tier is complete only when every finding is fixed or individually classified. Blanket "pre-existing" forbidden. Commit per tier: `"odyssey-review({slug}): FIX-{tier} — {N} items fixed"`.
 
 ### A_CONFIRM
 
-Run tests + `evolve delegate "Review modified files for zero-residual defects across correctness, security, performance, and architecture; return remaining findings and verdict" --to codex --mode analysis`. `remaining == 0 AND new == 0` → confirmed, mark G3; otherwise → needs_rework → S_FIX. Update `confirmation` + `remaining_actionable` + §5.
+Run tests (reusing still-valid passing results from `A_FIX` rounds where files did not change; rerunning invalidated targets) + `evolve agent exec "Review modified files for zero-residual defects across selected dimensions; return remaining findings and verdict" --to codex --mode analysis`. Update `confirmation` + `remaining_actionable` + §5:
+- `remaining == 0 AND new == 0` → `confirmed`, mark G3
+- otherwise (`needs_rework`) with `fix_rounds < max_fix_rounds` → `fix_rounds++` → `S_FIX`
+- `needs_rework` with `fix_rounds >= max_fix_rounds` → escalate per [shared base](odyssey-base.md) `<fix_loop_cap>` → `S_RECORD`.
 
-**GATE: zero-remaining** — exhaustive fix applied tier-by-tier, `remaining_actionable == 0` (or all remaining individually classified as deferred after 5-round escalation), tests pass, CLI re-review confirms no new findings, confirmation + §5 written, G3 marked. `needs_rework` routes back to FIX; skippable only when `skip_fix == true`.
+**GATE: zero-remaining** — exhaustive fix applied tier-by-tier, `remaining_actionable == 0` (or remaining classified as `deferred`/`issue` after `max_fix_rounds` escalation), tests pass, CLI re-review confirms no new findings, confirmation + §5 written, G3 marked. `needs_rework` routes back to FIX while `fix_rounds < max_fix_rounds` (else escalates to `S_RECORD`); skippable only when `skip_fix == true`.
 
 ---
 
@@ -152,20 +132,20 @@ Run tests + `evolve delegate "Review modified files for zero-residual defects ac
 
 Review findings with severity >= medium.
 
-**Discover routing:** fixable sibling → S_FIX; new target → S_REVIEW.
+**Discover routing:** fixable sibling → S_FIX; new target → S_REVIEW (`cross_phase_loops < max_loops`, re-entry per [shared base](odyssey-base.md) `A_DISCOVER`).
 
 ---
 
 ## Knowledge Persistence (§8)
 
-Include verified reusable findings in the Run summary and harvest the completed Session through `evolve workflows show knowledge` (`evolve closeout session` → `evolve wiki propose`).
+Include verified reusable findings in the Run summary and harvest the completed Session through `evolve skill workflows show ew-knowledge` (`evolve kb harvest session` → `evolve kb propose`).
 
 | Category | Content | Follow-up |
 |----------|---------|-----------|
-| Cross-dimension recurring pattern | Pattern + affected dimensions + coding standard | `evolve closeout session` → `evolve wiki propose` (`category: review`) |
-| Security finding | Vulnerability type + triggers + fix approach | `evolve closeout session` → `evolve wiki propose` (`category: debug`) |
-| Architecture violation pattern | Violation + correct boundary + verification | `evolve closeout session` → `evolve wiki propose` (`category: arch`) |
-| Reusable generalization pattern | Signature + risk + fix template + scope | `evolve closeout session` → `evolve wiki propose` (`category: coding`) |
+| Cross-dimension recurring pattern | Pattern + affected dimensions + coding standard | `evolve kb harvest session` → `evolve kb propose` (`category: review`) |
+| Security finding | Vulnerability type + triggers + fix approach | `evolve kb harvest session` → `evolve kb propose` (`category: debug`) |
+| Architecture violation pattern | Violation + correct boundary + verification | `evolve kb harvest session` → `evolve kb propose` (`category: arch`) |
+| Reusable generalization pattern | Signature + risk + fix template + scope | `evolve kb harvest session` → `evolve kb propose` (`category: coding`) |
 
 ---
 
@@ -190,9 +170,9 @@ Goals:      {done}/{total} ({skipped} skipped)
 
 | Decision Point | Normal | `-y` |
 |---------------|--------|------|
-| S_FIX tier candidates | structured prompt | auto-fix `deferred` |
+| S_FIX tier candidates | structured prompt | auto-proceed fixing all actionable findings (`>= fix_threshold`), record tier confirmation `deferred` |
 | S_FIX re-review new findings | structured prompt | auto-append |
-| S_CONFIRM needs_rework | structured prompt | auto proceed |
+| S_CONFIRM needs_rework | structured prompt | auto-route to `S_FIX` while `fix_rounds < max_fix_rounds`; if `fix_rounds >= max_fix_rounds`, classify remaining as `deferred`/`issue` and proceed to `S_RECORD` |
 | A_DISCOVER routing | structured prompt | auto-fix w/ template, issue for rest |
 
 ---
@@ -200,27 +180,30 @@ Goals:      {done}/{total} ({skipped} skipped)
 ## Mode-Specific Phase Gates
 
 - **Discovery gate** (ARCHAEOLOGY/EXPLORE): evidence logged, understanding.md updated. Archaeology partial via W003 acceptable; explore W006 skip acceptable.
-- **Audit gate** (REVIEW): all dimension agents completed, findings merged. Zero dimensions reviewed is BLOCKED (W002 partial allowed).
-- **FIX gate:** current severity tier fully addressed. Per-fix evidence logged. Auto-commit per tier. No partial-tier advancement.
-- **CONFIRM gate:** tests pass; `remaining_actionable == 0` and new findings == 0; confirmation written. needs_rework → route back to FIX.
+- **Audit gate** (REVIEW): all selected dimension agents completed, findings merged. Zero dimensions reviewed is BLOCKED (W002 partial allowed).
+- **FIX gate:** current severity tier fully addressed. Per-fix evidence logged. Auto-commit per tier. No partial-tier advancement. Cumulative retries bounded by `max_fix_rounds = 5`.
+- **CONFIRM gate:** tests pass; `remaining_actionable == 0` and new findings == 0; confirmation written. `needs_rework` routes back to FIX while `fix_rounds < max_fix_rounds` (else escalates to `S_RECORD`).
 
 ---
 
 ## Error Codes (review-specific)
 
+Shared `E000–E004` and `W008` errors are defined in [SKILL.md](../SKILL.md).
+
 | Code | Severity | Condition | Recovery |
 |------|----------|-----------|----------|
+| W002 | warning | Some selected dimension agents failed (≥1 dimension succeeded) | Partial coverage accepted; log uncovered dimensions |
 | W003 | warning | Archaeology agent failure | Proceed with available results |
-| W006 | warning | No CLI tools | Skip explore |
+| W006 | warning | No CLI delegate executable (`codex\|agy\|claude`) available | Skip delegate explore, log gap |
 
 ---
 
 ## Success Criteria (review-specific)
 
-- [ ] Session + 4 output files + prior knowledge searched
+- [ ] Session + mode-contracted output files (`prepare/odyssey-review.md`) + prior knowledge searched
 - [ ] Archaeology + CLI review → evidence
 - [ ] CLI exploration → explore.json
-- [ ] All 4 dimensions reviewed with findings merged
+- [ ] All selected dimensions (default 4, or `--dimensions` subset) reviewed with findings merged
 - [ ] understanding.md 8 sections progressive
 - [ ] Exhaustive fix by severity tier + confirmed (unless --skip-fix)
 - [ ] Generalization + scan (unless --skip-generalize)

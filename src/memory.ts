@@ -1,12 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { existsSync, mkdirSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import type { DatabaseSync, SQLInputValue } from 'node:sqlite';
 import type { AgentMemoryPrompt } from './agent-memory-prompts.js';
-import { InputError, openDb, pageOffset, pagination, requireText, searchLimit, transaction } from './common.js';
+import {
+  InputError, LEGACY_AGENT_MEMORY_DIR, openDb, pageOffset, pagination,
+  requireText, resolveEvolveStorage, searchLimit, transaction,
+} from './common.js';
 import { exactMemoryValues, extractedMemoryId, groundMemories, type GroundedMemory, type MemorySource } from './memory-evidence.js';
-import { formatExtractionPrompt, getExtractMemoriesAgentPrompt } from './upstream/l1-extraction.js';
-import type { LlmClient } from './upstream/llm.js';
+import { formatEvidencePrompt, formatExtractionPrompt, getExtractMemoriesAgentPrompt } from './upstream/l1-extraction.js';
+import { chatWithFormatRetry, extractJsonArray, type LlmClient } from './upstream/llm.js';
 import { rrfMerge } from './upstream/search-utils.js';
 import { bm25RankToScore, buildFtsQuery, tokenizeForFts } from './upstream/tokenize.js';
 import type { KnowledgeReads } from './knowledge-reads.js';
@@ -47,6 +50,21 @@ export interface MemoryRecord {
   version: number;
 }
 
+/** memory_history 中被覆盖或删除前的旧版本。 */
+export interface MemoryHistoryRecord {
+  id: string;
+  version: number;
+  content: string;
+  type: string;
+  scene: string;
+  session: string;
+  priority: number;
+  sourceMessageIds: string[];
+  updatedAt: string;
+  archivedAt: string;
+  reason: 'update' | 'delete';
+}
+
 export interface MemorySearchOptions {
   limit?: number;
   page?: number;
@@ -55,6 +73,8 @@ export interface MemorySearchOptions {
   session?: string;
   embedding?: ArrayLike<number>;
 }
+
+export type MemoryListOptions = Pick<MemorySearchOptions, 'limit' | 'page' | 'type' | 'scene' | 'session'>;
 
 export interface MemoryStoreOptions {
   namespace?: string;
@@ -77,7 +97,7 @@ type Row = Omit<MemoryRecord, 'sourceMessageIds' | 'exactValues' | 'sourceMessag
   vector: string | null;
 };
 type Hit = MemoryRecord & { score: number };
-type StoredMemoryInput = MemoryInput & { evidence?: GroundedMemory['evidence'] };
+type StoredMemoryInput = MemoryInput & { evidence?: GroundedMemory['evidence']; exactValues?: string[] };
 
 const recordFields = `m.id, m.content, m.type, m.scene, m.session, m.priority,
   m.source_ids AS sourceMessageIds, m.created_at AS createdAt, m.updated_at AS updatedAt, m.version,
@@ -107,20 +127,29 @@ function normalized(values: ArrayLike<number>): number[] {
   return scaled.map(value => value / norm);
 }
 
+export function defaultMemoryDbPath(root: string): string {
+  return resolveEvolveStorage(root, ['memory.db'], join(resolve(root), LEGACY_AGENT_MEMORY_DIR, 'memory.db'));
+}
+
 export class MemoryStore {
-  private readonly db: DatabaseSync;
+  private readonly db?: DatabaseSync;
   private readonly namespace: string;
   private readonly embed?: MemoryStoreOptions['embed'];
   private readonly readOnly: boolean;
+  private tableNames?: Set<string>;
 
   constructor(path: string, options: MemoryStoreOptions = {}) {
     this.namespace = requireText(options.namespace ?? 'default', 'namespace');
     this.embed = options.embed;
     this.readOnly = Boolean(options.readOnly);
     const file = path === ':memory:' ? path : resolve(path);
-    if (file !== ':memory:' && !this.readOnly) mkdirSync(dirname(file), { recursive: true });
-    this.db = openDb(file, this.readOnly);
-    if (this.readOnly) return;
+    if (this.readOnly && file !== ':memory:') {
+      if (!existsSync(file)) return;
+      this.db = openDb(file, true);
+      return;
+    }
+    if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
+    this.db = openDb(file);
     try {
       this.db.exec(`
         PRAGMA foreign_keys = ON;
@@ -160,6 +189,22 @@ export class MemoryStore {
           offset INTEGER NOT NULL,
           PRIMARY KEY (namespace, source, session)
         );
+        CREATE TABLE IF NOT EXISTS memory_history (
+          key INTEGER PRIMARY KEY,
+          namespace TEXT NOT NULL,
+          id TEXT NOT NULL,
+          version INTEGER NOT NULL,
+          content TEXT NOT NULL,
+          type TEXT NOT NULL,
+          scene TEXT NOT NULL,
+          session TEXT NOT NULL,
+          priority INTEGER NOT NULL,
+          source_ids TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          archived_at TEXT NOT NULL,
+          reason TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS memory_history_record ON memory_history (namespace, id, key);
       `);
     } catch (error) {
       this.db.close();
@@ -167,12 +212,73 @@ export class MemoryStore {
     }
   }
 
+  private writableDb(): DatabaseSync {
+    if (this.readOnly || !this.db) throw new InputError('Memory store is opened read-only');
+    return this.db;
+  }
+
+  private hasTables(...names: string[]): boolean {
+    if (!this.db) return false;
+    if (!this.readOnly) return true;
+    if (!this.tableNames) {
+      const rows = this.db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as Array<{ name: string }>;
+      this.tableNames = new Set(rows.map(row => row.name));
+    }
+    return names.every(name => this.tableNames!.has(name));
+  }
+
   close(): void {
-    this.db.close();
+    this.db?.close();
   }
 
   async put(input: MemoryInput): Promise<MemoryRecord> {
     return (await this.putMany([input]))[0];
+  }
+
+  async create(input: MemoryInput): Promise<MemoryRecord> {
+    const id = requireText(input.id ?? randomUUID(), 'id');
+    const db = this.writableDb();
+    return (await this.writeMany([{ ...input, id }], () => {
+      if (db.prepare('SELECT 1 FROM memory_records WHERE namespace = ? AND id = ?').get(this.namespace, id)) {
+        throw new InputError(`Knowledge record already exists: ${id}`);
+      }
+      return true;
+    }))![0];
+  }
+
+  async update(id: string, patch: Partial<Omit<MemoryInput, 'id'>>): Promise<MemoryRecord | undefined> {
+    id = requireText(id, 'id');
+    const db = this.writableDb();
+    const select = db.prepare(`SELECT ${recordFields}, m.vector, m.key AS memoryKey, s.messages AS sourceMessages
+      FROM memory_records m LEFT JOIN memory_sources s ON m.key = s.memory_key WHERE m.namespace = ? AND m.id = ?`);
+    const stored = select.get(this.namespace, id) as (Row & { memoryKey: number; sourceMessages: string | null }) | undefined;
+    if (!stored) return undefined;
+    const snapshot = JSON.stringify(stored);
+    const { memoryKey, sourceMessages, ...row } = stored;
+    const current = record(row);
+    const preserveSources = patch.sourceMessageIds === undefined;
+    const evidence: GroundedMemory['evidence'] | undefined = preserveSources && sourceMessages !== null && current.sourceMessageScope
+      ? { messages: JSON.parse(sourceMessages) as ConversationMessage[], scope: current.sourceMessageScope }
+      : undefined;
+    const definedPatch = Object.fromEntries(
+      Object.entries(patch).filter(([, value]) => value !== undefined),
+    ) as Partial<Omit<MemoryInput, 'id'>>;
+    const contentChanged = definedPatch.content !== undefined && definedPatch.content !== current.content;
+    const embedding = definedPatch.embedding ?? (!contentChanged && typeof stored.vector === 'string'
+      ? JSON.parse(stored.vector) as number[] : undefined);
+    const exactValues = contentChanged || !preserveSources
+      ? exactMemoryValues(definedPatch.content ?? current.content)
+      : current.exactValues ?? exactMemoryValues(current.content);
+    const updated = await this.writeMany([{
+      ...current, ...definedPatch, id, embedding, exactValues, ...(evidence ? { evidence } : {}),
+    }], () => {
+      // 异步 embedding 期间，其他连接可能更新、删除或重建这条记录。
+      const latest = select.get(this.namespace, id);
+      if (!latest) return false;
+      if (JSON.stringify(latest) !== snapshot) throw new InputError(`Memory record changed during update; retry: ${id}`);
+      return true;
+    });
+    return updated?.[0];
   }
 
   async putMany(inputs: MemoryInput[]): Promise<MemoryRecord[]> {
@@ -180,7 +286,7 @@ export class MemoryStore {
   }
 
   private async writeMany(inputs: StoredMemoryInput[], advance?: () => boolean): Promise<MemoryRecord[] | undefined> {
-    if (this.readOnly) throw new InputError('Frozen knowledge is read-only');
+    const db = this.writableDb();
     const prepared = await Promise.all(inputs.map(async input => {
       const content = requireText(input.content, 'content');
       const priority = input.priority ?? 50;
@@ -194,13 +300,16 @@ export class MemoryStore {
         scene: input.scene ?? '', session: input.session ?? '',
         sourceIds: JSON.stringify(input.sourceMessageIds ?? []),
         evidence: input.evidence,
-        exactValues: new Set((input.evidence?.messages ?? [{ content }]).flatMap(message => exactMemoryValues(message.content))),
+        exactValues: new Set(input.exactValues ?? (input.evidence?.messages ?? [{ content }]).flatMap(message => exactMemoryValues(message.content))),
         vector: embedding === undefined ? null : normalized(embedding),
       };
     }));
     const now = new Date().toISOString();
-    return transaction(this.db, () => advance && !advance() ? undefined : prepared.map(input => {
-      const row = this.db.prepare(`
+    return transaction(db, () => advance && !advance() ? undefined : prepared.map(input => {
+      // 覆盖前保留旧版本正文，仅在内容性字段变化时归档（重新嵌入不产生历史）。
+      this.archive(db, input.id, now, 'update', `AND (content, type, scene, session, priority, source_ids) IS NOT (?, ?, ?, ?, ?, ?)`,
+        [input.content, input.type, input.scene, input.session, input.priority, input.sourceIds]);
+      const row = db.prepare(`
         INSERT INTO memory_records (
           namespace, id, content, type, scene, session, priority, source_ids, created_at, updated_at, version, vector, dimensions
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
@@ -216,31 +325,32 @@ export class MemoryStore {
       `).get(this.namespace, input.id, input.content, input.type, input.scene, input.session,
         input.priority, input.sourceIds, now, now,
         input.vector && JSON.stringify(input.vector), input.vector?.length ?? null);
-      const key = row?.key ?? (input.evidence && this.db.prepare('SELECT key FROM memory_records WHERE namespace = ? AND id = ?')
+      const key = row?.key ?? (input.evidence && db.prepare('SELECT key FROM memory_records WHERE namespace = ? AND id = ?')
         .get(this.namespace, input.id)?.key);
       if (typeof key === 'number' && input.evidence) {
         const snapshots = input.evidence.messages.map(({ id, role, timestamp, content, location }) => ({
           id, role, timestamp, content, ...(location && { location }),
         }));
-        this.db.prepare(`INSERT INTO memory_sources (memory_key, messages, scope) VALUES (?, ?, ?)
+        db.prepare(`INSERT INTO memory_sources (memory_key, messages, scope) VALUES (?, ?, ?)
           ON CONFLICT (memory_key) DO UPDATE SET messages = excluded.messages, scope = excluded.scope`)
           .run(key, JSON.stringify(snapshots), input.evidence.scope);
       } else if (row) {
-        this.db.prepare('DELETE FROM memory_sources WHERE memory_key = ?').run(Number(row.key));
+        db.prepare('DELETE FROM memory_sources WHERE memory_key = ?').run(Number(row.key));
       }
       if (typeof key === 'number') {
-        this.db.prepare('DELETE FROM memory_literals WHERE memory_key = ?').run(key);
-        const insert = this.db.prepare('INSERT INTO memory_literals (memory_key, value) VALUES (?, ?)');
+        db.prepare('DELETE FROM memory_literals WHERE memory_key = ?').run(key);
+        const insert = db.prepare('INSERT INTO memory_literals (memory_key, value) VALUES (?, ?)');
         for (const value of input.exactValues) insert.run(key, value);
-        this.db.prepare('DELETE FROM memory_fts WHERE rowid = ?').run(key);
-        this.db.prepare('INSERT INTO memory_fts(rowid, tokens) VALUES (?, ?)').run(key, tokenizeForFts(input.content));
+        db.prepare('DELETE FROM memory_fts WHERE rowid = ?').run(key);
+        db.prepare('INSERT INTO memory_fts(rowid, tokens) VALUES (?, ?)').run(key, tokenizeForFts(input.content));
       }
       return this.get(input.id)!;
     }));
   }
 
   get(id: string, options: { knowledgeReads?: KnowledgeReads; fromSearchId?: string } = {}): MemoryRecord | undefined {
-    const row = this.db.prepare(`SELECT ${recordFields} FROM memory_records m WHERE namespace = ? AND id = ?`)
+    if (!this.hasTables('memory_records', 'memory_literals', 'memory_sources')) return undefined;
+    const row = this.db!.prepare(`SELECT ${recordFields} FROM memory_records m WHERE namespace = ? AND id = ?`)
       .get(this.namespace, id) as Row | undefined;
     const result = row && record(row);
     if (result && options.knowledgeReads) {
@@ -253,21 +363,84 @@ export class MemoryStore {
   }
 
   sources(id: string): MemorySource[] {
-    const row = this.db.prepare(`SELECT m.session, s.messages FROM memory_records m
+    if (!this.hasTables('memory_records', 'memory_sources')) return [];
+    const row = this.db!.prepare(`SELECT m.session, s.messages FROM memory_records m
       JOIN memory_sources s ON m.key = s.memory_key WHERE m.namespace = ? AND m.id = ?`).get(this.namespace, id);
     if (!row) return [];
     return (JSON.parse(String(row.messages)) as ConversationMessage[]).map(message => ({ ...message, session: String(row.session) }));
   }
 
   delete(id: string): boolean {
-    if (this.readOnly) throw new InputError('Frozen knowledge is read-only');
-    return transaction(this.db, () => {
-      const row = this.db.prepare('DELETE FROM memory_records WHERE namespace = ? AND id = ? RETURNING key')
+    const db = this.writableDb();
+    return transaction(db, () => {
+      this.archive(db, id, new Date().toISOString(), 'delete');
+      const row = db.prepare('DELETE FROM memory_records WHERE namespace = ? AND id = ? RETURNING key')
         .get(this.namespace, id);
       if (!row) return false;
-      this.db.prepare('DELETE FROM memory_fts WHERE rowid = ?').run(Number(row.key));
+      db.prepare('DELETE FROM memory_fts WHERE rowid = ?').run(Number(row.key));
       return true;
     });
+  }
+
+  /** 把当前版本复制到 memory_history（自增键，重建后的同号版本也不会互相覆盖）。 */
+  private archive(db: DatabaseSync, id: string, archivedAt: string, reason: 'update' | 'delete', condition = '', args: SQLInputValue[] = []) {
+    db.prepare(`INSERT INTO memory_history (
+        namespace, id, version, content, type, scene, session, priority, source_ids, updated_at, archived_at, reason
+      ) SELECT namespace, id, version, content, type, scene, session, priority, source_ids, updated_at, ?, ?
+      FROM memory_records WHERE namespace = ? AND id = ? ${condition}`)
+      .run(archivedAt, reason, this.namespace, id, ...args);
+  }
+
+  /** 按归档时间倒序返回旧版本（含已删除记录）。 */
+  history(id: string): MemoryHistoryRecord[] {
+    if (!this.hasTables('memory_history')) return [];
+    const rows = this.db!.prepare(`SELECT id, version, content, type, scene, session, priority, source_ids, updated_at, archived_at, reason
+      FROM memory_history WHERE namespace = ? AND id = ? ORDER BY key DESC`).all(this.namespace, id);
+    return rows.map(row => ({
+      id: String(row.id), version: Number(row.version), content: String(row.content), type: String(row.type),
+      scene: String(row.scene), session: String(row.session), priority: Number(row.priority),
+      sourceMessageIds: JSON.parse(String(row.source_ids)) as string[], updatedAt: String(row.updated_at),
+      archivedAt: String(row.archived_at), reason: row.reason === 'delete' ? 'delete' : 'update',
+    }));
+  }
+
+  private filterWhere(options: Pick<MemorySearchOptions, 'type' | 'scene' | 'session'>): {
+    where: string;
+    args: SQLInputValue[];
+  } {
+    const clauses = ['m.namespace = ?'];
+    const args: SQLInputValue[] = [this.namespace];
+    for (const field of ['type', 'scene', 'session'] as const) {
+      if (options[field] !== undefined) {
+        clauses.push(`m.${field} = ?`);
+        args.push(options[field]);
+      }
+    }
+    return { where: clauses.join(' AND '), args };
+  }
+
+  /**
+   * 列出当前命名空间下满足过滤条件的工作记忆，按优先级和更新时间倒序排列。
+   */
+  list(options: Omit<MemorySearchOptions, 'embedding'> = {}) {
+    const limit = searchLimit(options.limit);
+    const page = options.page ?? 1;
+    const offset = pageOffset(page, limit);
+    const take = options.page === undefined ? limit : limit + 1;
+    if (!this.hasTables('memory_records', 'memory_literals', 'memory_sources')) {
+      return {
+        results: [] as MemoryRecord[],
+        ...(options.page !== undefined && { pagination: pagination(page, limit, false) }),
+      };
+    }
+    const { where, args } = this.filterWhere(options);
+    const rows = this.db!.prepare(`SELECT ${recordFields} FROM memory_records m WHERE ${where}
+      ORDER BY m.priority DESC, m.updated_at DESC, m.id ASC LIMIT ? OFFSET ?`)
+      .all(...args, take, offset) as Row[];
+    return {
+      results: rows.slice(0, limit).map(record),
+      ...(options.page !== undefined && { pagination: pagination(page, limit, rows.length > limit) }),
+    };
   }
 
   async search(query: string, options: MemorySearchOptions = {}) {
@@ -280,26 +453,23 @@ export class MemoryStore {
       strategy, results: hits.slice(0, limit),
       ...(options.page !== undefined && { pagination: pagination(page, limit, hits.length > limit) }),
     });
-    const clauses = ['m.namespace = ?'];
-    const args: SQLInputValue[] = [this.namespace];
-    for (const field of ['type', 'scene', 'session'] as const) {
-      if (options[field] !== undefined) {
-        clauses.push(`m.${field} = ?`);
-        args.push(options[field]);
-      }
+    const isExact = exactMemoryValues(text).includes(text);
+    if (!this.hasTables('memory_records', 'memory_literals', 'memory_sources', 'memory_fts')) {
+      return result(isExact ? 'exact' : 'fts', []);
     }
-    const where = clauses.join(' AND ');
-    if (exactMemoryValues(text).includes(text)) {
+    const db = this.db!;
+    const { where, args } = this.filterWhere(options);
+    if (isExact) {
       const indexed = `FROM memory_literals l JOIN memory_records m ON m.key = l.memory_key WHERE l.value = ? AND ${where}`;
-      const rows = this.db.prepare(`SELECT ${recordFields} ${indexed} ORDER BY m.id LIMIT ? OFFSET ?`)
+      const rows = db.prepare(`SELECT ${recordFields} ${indexed} ORDER BY m.id LIMIT ? OFFSET ?`)
         .all(text, ...args, take, offset) as Row[];
       const results = rows.map(row => ({ ...record(row), score: 1 }));
       // 旧条目仍可按其实际存储内容精确检索。
       if (results.length < take) {
         const indexedCount = offset && !rows.length
-          ? Number(this.db.prepare(`SELECT count(*) AS count ${indexed}`).get(text, ...args)?.count) : offset;
+          ? Number(db.prepare(`SELECT count(*) AS count ${indexed}`).get(text, ...args)?.count) : offset;
         let skip = Math.max(0, offset - indexedCount);
-        const legacy = this.db.prepare(`SELECT ${recordFields} FROM memory_records m
+        const legacy = db.prepare(`SELECT ${recordFields} FROM memory_records m
           WHERE ${where} AND instr(m.content, ?) > 0 AND NOT EXISTS
           (SELECT 1 FROM memory_sources WHERE memory_key = m.key) AND NOT EXISTS
           (SELECT 1 FROM memory_literals WHERE memory_key = m.key AND value = ?) ORDER BY m.id`).iterate(...args, text, text) as Iterable<Row>;
@@ -317,7 +487,7 @@ export class MemoryStore {
     const expression = buildFtsQuery(text);
     // 分页时用完整候选集融合排名，页码改变时保持相同顺序。
     const candidates = vector ? options.page === undefined ? limit * 3 : -1 : take;
-    const keyword: Hit[] = expression ? (this.db.prepare(`
+    const keyword: Hit[] = expression ? (db.prepare(`
       SELECT ${recordFields}, bm25(memory_fts) AS rank FROM memory_fts
       JOIN memory_records m ON m.key = memory_fts.rowid
       WHERE memory_fts MATCH ? AND ${where} ORDER BY rank, m.id LIMIT ? OFFSET ?
@@ -326,7 +496,7 @@ export class MemoryStore {
     })) : [];
     const semantic: Hit[] = [];
     if (vector) {
-      const statement = this.db.prepare(`
+      const statement = db.prepare(`
         SELECT ${recordFields}, m.vector FROM memory_records m WHERE ${where} AND m.dimensions = ? ORDER BY m.id
       `);
       for (const row of statement.iterate(...args, vector.length) as Iterable<Row>) {
@@ -351,7 +521,8 @@ export class MemoryStore {
   }
 
   extractionOffset(source: string, session: string): number {
-    const row = this.db.prepare(`SELECT offset FROM memory_extraction_offsets
+    if (!this.hasTables('memory_extraction_offsets')) return 0;
+    const row = this.db!.prepare(`SELECT offset FROM memory_extraction_offsets
       WHERE namespace = ? AND source = ? AND session = ?`).get(this.namespace, source, session);
     return Number(row?.offset ?? 0);
   }
@@ -361,7 +532,7 @@ export class MemoryStore {
     from: number;
     to: number;
   }): Promise<MemoryRecord[] | undefined> {
-    if (this.readOnly) throw new InputError('Frozen knowledge is read-only');
+    const db = this.writableDb();
     const { source, session, from, to } = options;
     if (!Number.isSafeInteger(from) || !Number.isSafeInteger(to) || from < 0 || to <= from) {
       throw new InputError('Invalid memory extraction offsets');
@@ -370,7 +541,7 @@ export class MemoryStore {
     const inputs = groundMemories(await extractMemoryInputs(messages, options), messages);
     return this.writeMany(inputs, () => {
       if (this.extractionOffset(source, session) !== from) return false;
-      this.db.prepare(`INSERT INTO memory_extraction_offsets (namespace, source, session, offset) VALUES (?, ?, ?, ?)
+      db.prepare(`INSERT INTO memory_extraction_offsets (namespace, source, session, offset) VALUES (?, ?, ?, ?)
         ON CONFLICT (namespace, source, session) DO UPDATE SET offset = excluded.offset`)
         .run(this.namespace, source, session, to);
       return true;
@@ -383,12 +554,19 @@ export async function extractMemoryInputs(messages: ConversationMessage[], optio
   if (!messages.length) return [];
   const ids = validateConversationMessages(messages);
   const agentMemoryPrompt = options.agentMemoryPrompt ?? getExtractMemoriesAgentPrompt(options.mode);
-  const raw = await options.llm.chat({
-    system: options.systemPrompt ?? agentMemoryPrompt.system,
-    prompt: formatExtractionPrompt({ newMessages: messages }),
-    label: agentMemoryPrompt.label,
-  });
-  return parseExtraction(raw, session, ids);
+  const useL1Prompt = !options.systemPrompt && agentMemoryPrompt.kind === 'memory-extract';
+  const prompt = useL1Prompt ? formatExtractionPrompt({ newMessages: messages }) : formatEvidencePrompt(messages);
+  const formatHint = agentMemoryPrompt.kind === 'closeout-harvest'
+    ? 'Return ONLY a JSON array shaped like [{"memories":[{"type":"work_method","content":"...","source_message_ids":["exact supplied ID"]}]}] or [].'
+    : agentMemoryPrompt.kind === 'session-signal'
+      ? 'Return ONLY a JSON array shaped like [{"memories":[{"type":"correction","content":"...","source_message_ids":["exact supplied ID"]}]}] or [].'
+      : 'Return ONLY a JSON array shaped like [{"scene_name":"...","message_ids":["..."],"memories":[{"content":"...","type":"work_fact","source_message_ids":["..."]}]}].';
+  return chatWithFormatRetry(
+    options.llm,
+    { system: options.systemPrompt ?? agentMemoryPrompt.system, prompt, label: agentMemoryPrompt.label },
+    raw => parseExtraction(raw, session, ids),
+    formatHint,
+  );
 }
 
 export function validateConversationMessages(messages: readonly ConversationMessage[]): Set<string> {
@@ -416,11 +594,13 @@ function object(value: unknown, label: string): Record<string, unknown> {
 }
 
 function parseExtraction(raw: string, session: string, messageIds: Set<string>): MemoryInput[] {
-  const text = raw.replace(/<think>[\s\S]*?<\/think>\s*/g, '').trim();
-  const json = text.match(/\[[\s\S]*\]/)?.[0];
-  if (!json) throw new Error('Memory extraction response must contain a JSON array');
-  const scenes: unknown = JSON.parse(json);
-  if (!Array.isArray(scenes)) throw new Error('Memory extraction response must be an array');
+  const items = extractJsonArray(raw, ['scenes', 'memories', 'items', 'results', 'data']);
+  if (!items) throw new Error('Memory extraction response must contain a JSON array');
+  // 小模型在 closeout/signal 场景可能省略外层 scene 包装而直接返回扁平记忆数组，这里统一归一。
+  const scenes = items.length > 0 && items.every(item => {
+    const record = object(item, 'scene');
+    return record.memories === undefined && typeof record.content === 'string';
+  }) ? [{ memories: items }] : items;
   const knownIds = (ids: unknown) => Array.isArray(ids)
     ? [...new Set(ids.map(String).filter(id => messageIds.has(id)))].sort()
     : [];

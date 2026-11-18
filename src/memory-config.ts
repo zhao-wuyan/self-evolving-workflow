@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
-import { fileURLToPath } from 'node:url';
-import { InputError } from './common.js';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { EVOLVE_DIR, InputError, LEGACY_AGENT_MEMORY_DIR, resolveEvolveStorage } from './common.js';
 
 const hosts = {
   codex: { label: 'Codex', file: ['.codex', 'hooks.json'] },
@@ -12,9 +13,12 @@ const hosts = {
 } as const;
 
 export type MemoryHost = keyof typeof hosts;
+export type MemoryConfigScope = 'project' | 'user';
+export type MemoryHookAction = 'host-hook' | 'session-start-hook';
 export const memoryHosts = Object.keys(hosts) as MemoryHost[];
 const agyHookName = 'evolve-agent-memory';
 const codexStatus = 'Extracting Agent Memory from Codex';
+const codexStartStatus = 'Loading Agent Memory reminders for Codex';
 
 type JsonObject = Record<string, unknown>;
 interface JsonFile { path: string; previous?: string; content: JsonObject }
@@ -60,64 +64,103 @@ function quoteCommand(args: string[]): string {
 
 const agyWindowsHook = ' memory host-hook --host agy';
 
-function agyWindowsCommand(entry: string, root: string) {
-  // Agy 在 Windows 启动 Hook 时直接保留 Node 的标准输入，路径以 base64url 跨过宿主命令解析。
-  const script = "const entry = Buffer.from(process.argv[1], 'base64url').toString(); " +
-    "const root = Buffer.from(process.argv[2], 'base64url').toString(); " +
-    "process.argv.splice(1, 2, entry); process.argv.push('--root', root); import(require('node:url').pathToFileURL(entry));";
-  return `node --input-type=commonjs -e "${script}" ${Buffer.from(entry).toString('base64url')} ${Buffer.from(root).toString('base64url')}${agyWindowsHook}`;
+function hookPath(root: string, host: MemoryHost, scope: MemoryConfigScope): string {
+  if (scope === 'project') return join(root, ...hosts[host].file);
+  if (host === 'codex') return join(process.env.CODEX_HOME || join(homedir(), '.codex'), 'hooks.json');
+  if (host === 'claude') return join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'settings.json');
+  return join(homedir(), '.gemini', 'config', 'hooks.json');
 }
 
-function memoryHandler(host: MemoryHost, root: string) {
-  const args = host === 'codex' ? ['codex-hook'] : ['host-hook', '--host', host];
-  const entry = fileURLToPath(new URL('./cli.js', import.meta.url));
-  const command = host === 'agy' && process.platform === 'win32' ? agyWindowsCommand(entry, root)
-    : quoteCommand([process.execPath, entry, 'memory', ...args, '--root', root]);
-  return { type: 'command', command, timeout: 150,
-    ...(host === 'codex' ? { statusMessage: codexStatus } : {}),
+function agyWindowsCommand(entry: string, root: string, action: MemoryHookAction, scope: MemoryConfigScope) {
+  // Antigravity 在 Windows 按空白拆词且不做引号反转义，命令必须保持无引号、无未编码空白。
+  const rootFlag = scope === 'user' ? '--root auto' : `--root-b64 ${Buffer.from(root).toString('base64url')}`;
+  const background = action === 'host-hook' ? ' --background' : '';
+  if (!/\s/.test(entry)) {
+    return `node ${entry} kb ${action} --host agy ${rootFlag}${background}`;
+  }
+  const urlB64 = Buffer.from(pathToFileURL(entry).href).toString('base64url');
+  return `node --input-type=module -e process.argv.splice(1,0,0),import(Buffer.from('${urlB64}','base64url').toString()) kb ${action} --host agy ${rootFlag}${background}`;
+}
+
+function memoryHandler(host: MemoryHost, root: string, scope: MemoryConfigScope = 'project', action: MemoryHookAction = 'host-hook') {
+  const args = host === 'codex' && action === 'host-hook' ? ['codex-hook'] : [action, '--host', host];
+  const rootArgs = scope === 'user' ? ['--root', 'auto'] : ['--root', root];
+  const backgroundArgs = action === 'host-hook' ? ['--background'] : [];
+  const entry = fileURLToPath(new URL('./workflow-cli.js', import.meta.url));
+  const command = host === 'agy' && process.platform === 'win32'
+    ? agyWindowsCommand(entry, root, action, scope)
+    : quoteCommand([process.execPath, entry, 'kb', ...args, ...rootArgs, ...backgroundArgs]);
+  return { type: 'command', command, timeout: 300,
+    ...(host === 'codex' ? { statusMessage: action === 'host-hook' ? codexStatus : codexStartStatus } : {}),
     ...(host === 'claude' && process.platform === 'win32' ? { shell: 'powershell' } : {}),
   };
 }
 
-function ownsHandler(host: MemoryHost, value: unknown): boolean {
+function ownsHandler(host: MemoryHost, value: unknown, action: MemoryHookAction): boolean {
   const hook = object(value);
   if (typeof hook?.command !== 'string') return false;
-  if (host === 'codex') return hook.statusMessage === codexStatus && hook.command.includes('codex-hook');
-  if (host === 'agy' && hook.command.startsWith('node --input-type=commonjs -e ') && hook.command.endsWith(agyWindowsHook)) return true;
-  return hook.command.includes(`'memory' 'host-hook' '--host' '${host}' '--root'`);
+  const command = hook.command;
+  if (host === 'codex') {
+    return (hook.statusMessage === codexStatus || hook.statusMessage === codexStartStatus) &&
+      command.includes(action === 'host-hook' ? 'codex-hook' : 'session-start-hook');
+  }
+  if (host === 'agy') {
+    if (action === 'host-hook' && command.startsWith('node --input-type=commonjs -e ') && command.endsWith(agyWindowsHook)) return true;
+    if (new RegExp(` (?:memory|kb) ${action} --host agy (?:--root-b64 [A-Za-z0-9_-]+|--root auto)(?: --background)?$`).test(command)) return true;
+    return ['memory', 'kb'].some(group =>
+      command.includes(`'${group}' '${action}' '--host' 'agy'`));
+  }
+  return ['memory', 'kb'].some(group => command.includes(`'${group}' '${action}' '--host' '${host}' '--root'`));
 }
 
-function hookFile(root: string, host: MemoryHost) {
-  const file = readJson(join(root, ...hosts[host].file));
+function hookFile(root: string, host: MemoryHost, scope: MemoryConfigScope = 'project') {
+  const file = readJson(hookPath(root, host, scope));
   if (host === 'agy') {
     const own = object(file.content[agyHookName]);
-    if (file.content[agyHookName] !== undefined &&
-        (!Array.isArray(own?.Stop) || own.Stop.length !== 1 || !ownsHandler(host, own.Stop[0]))) {
+    const validStop = Array.isArray(own?.Stop) && own.Stop.length === 1 && ownsHandler(host, own.Stop[0], 'host-hook');
+    const validSessionStart = own?.SessionStart === undefined ||
+      (Array.isArray(own.SessionStart) && own.SessionStart.length <= 1 && own.SessionStart.every(item => ownsHandler(host, item, 'session-start-hook')));
+    if (file.content[agyHookName] !== undefined && (!validStop || !validSessionStart)) {
       throw new InputError(`Conflicting hook ${agyHookName} in ${file.path}`);
     }
     return { file, configured: !!own && own.enabled !== false, update(enable: boolean) {
       if (!enable && !own) return;
       const { [agyHookName]: previousHook, ...other } = file.content;
-      const next = enable ? { ...own, enabled: true, Stop: [memoryHandler(host, root)] } : undefined;
+      const next = enable ? {
+        ...own,
+        enabled: true,
+        SessionStart: [memoryHandler(host, root, scope, 'session-start-hook')],
+        Stop: [memoryHandler(host, root, scope, 'host-hook')],
+      } : undefined;
       if (JSON.stringify(next) === JSON.stringify(previousHook)) return;
       return { ...file, content: next ? { ...other, [agyHookName]: next } : other };
     } };
   }
   const hooks = file.content.hooks === undefined ? {} : object(file.content.hooks);
-  const stop = hooks?.Stop ?? [];
-  if (!hooks || !Array.isArray(stop)) throw new InputError(`Invalid Stop hooks in ${file.path}`);
-  const own = stop.flatMap(group => Array.isArray(group?.hooks) ? group.hooks.filter((hook: unknown) => ownsHandler(host, hook)) : []);
-  return { file, configured: own.length > 0, update(enable: boolean) {
-    if (!enable && !own.length) return;
-    const entry = memoryHandler(host, root);
-    if (enable && own.length === 1 && JSON.stringify(own[0]) === JSON.stringify(entry)) return;
-    const otherGroups = stop.flatMap(group => {
-      if (!Array.isArray(group?.hooks) || !group.hooks.some((hook: unknown) => ownsHandler(host, hook))) return [group];
-      const remaining = group.hooks.filter((hook: unknown) => !ownsHandler(host, hook));
-      return remaining.length ? [{ ...group, hooks: remaining }] : [];
-    });
-    const content = { ...file.content, hooks: { ...hooks, Stop: enable ? [...otherGroups, { hooks: [entry] }] : otherGroups } };
-    return { ...file, content };
+  if (!hooks) throw new InputError(`Invalid hooks in ${file.path}`);
+  const events = ([['Stop', 'host-hook'], ['SessionStart', 'session-start-hook']] as const).map(([name, action]) => {
+    const groups = hooks[name] ?? [];
+    if (!Array.isArray(groups)) throw new InputError(`Invalid ${name} hooks in ${file.path}`);
+    const own = groups.flatMap(group => Array.isArray(group?.hooks)
+      ? group.hooks.filter((handler: unknown) => ownsHandler(host, handler, action)) : []);
+    return { name, action, groups, own };
+  });
+  return { file, configured: events[0].own.length > 0, update(enable: boolean) {
+    const nextHooks = { ...hooks };
+    for (const { name, action, groups, own } of events) {
+      if (!enable && !own.length) continue;
+      const entry = memoryHandler(host, root, scope, action);
+      if (enable && own.length === 1 && JSON.stringify(own[0]) === JSON.stringify(entry)) continue;
+      const otherGroups = groups.flatMap(group => {
+        if (!Array.isArray(group?.hooks) || !group.hooks.some((handler: unknown) => ownsHandler(host, handler, action))) return [group];
+        const remaining = group.hooks.filter((handler: unknown) => !ownsHandler(host, handler, action));
+        return remaining.length ? [{ ...group, hooks: remaining }] : [];
+      });
+      if (!enable && name === 'SessionStart' && !otherGroups.length) delete nextHooks[name];
+      else nextHooks[name] = enable ? [...otherGroups, { hooks: [entry] }] : otherGroups;
+    }
+    if (JSON.stringify(nextHooks) === JSON.stringify(hooks)) return;
+    return { ...file, content: { ...file.content, hooks: nextHooks } };
   } };
 }
 
@@ -128,8 +171,13 @@ export function installCodexMemoryHook(root: string) {
   return { path: hook.file.path, changed: !!updated };
 }
 
-function settingsFile(root: string) {
-  return readJson(join(root, '.agent-memory', 'config.json'));
+function globalConfigPath() {
+  return join(homedir(), EVOLVE_DIR, 'config.json');
+}
+
+function settingsFile(root: string, scope: MemoryConfigScope = 'project') {
+  if (scope === 'user') return readJson(globalConfigPath());
+  return readJson(resolveEvolveStorage(root, ['config.json'], join(resolve(root), LEGACY_AGENT_MEMORY_DIR, 'config.json')));
 }
 
 function setting(file: JsonFile, field: string) {
@@ -138,13 +186,29 @@ function setting(file: JsonFile, field: string) {
   return value;
 }
 
+function timeoutSetting(file: JsonFile): number | undefined {
+  const value = file.content.timeoutMs;
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    throw new InputError(`Invalid timeoutMs in ${file.path}`);
+  }
+  return Math.floor(value);
+}
+
 export function memoryModelSettings(root: string) {
-  const { AGENT_MEMORY_LLM_BASE_URL: baseUrl, AGENT_MEMORY_LLM_MODEL: model } = process.env;
-  if (baseUrl && model) return { baseUrl, model };
-  const file = settingsFile(root);
+  const { AGENT_MEMORY_LLM_BASE_URL: baseUrl, AGENT_MEMORY_LLM_MODEL: model, AGENT_MEMORY_LLM_TIMEOUT_MS: rawTimeout } = process.env;
+  const envTimeout = rawTimeout === undefined ? undefined : Number(rawTimeout);
+  if (envTimeout !== undefined && (!Number.isFinite(envTimeout) || envTimeout <= 0)) {
+    throw new InputError('AGENT_MEMORY_LLM_TIMEOUT_MS must be a positive number');
+  }
+  const projectFile = settingsFile(root, 'project');
+  const globalFile = resolve(root) === resolve(dirname(globalConfigPath()))
+    ? projectFile
+    : readJson(globalConfigPath());
   return {
-    baseUrl: baseUrl || setting(file, 'baseUrl'),
-    model: model || setting(file, 'model'),
+    baseUrl: baseUrl || setting(projectFile, 'baseUrl') || setting(globalFile, 'baseUrl'),
+    model: model || setting(projectFile, 'model') || setting(globalFile, 'model'),
+    timeoutMs: envTimeout ?? timeoutSetting(projectFile) ?? timeoutSetting(globalFile),
   };
 }
 
@@ -158,20 +222,25 @@ export function parseMemoryHosts(value: string, allowNone = false): MemoryHost[]
   return memoryHosts.filter(host => selected.includes(host));
 }
 
-interface ConfigOptions { host?: string; baseUrl?: string; model?: string; yes?: boolean }
+interface ConfigOptions { scope?: MemoryConfigScope; host?: string; baseUrl?: string; model?: string; timeoutMs?: number; yes?: boolean }
 
 export async function configureMemory(root: string, options: ConfigOptions) {
-  const file = settingsFile(root);
-  const hooks = memoryHosts.map(host => ({ host, ...hookFile(root, host) }));
+  const scope = options.scope ?? 'project';
+  const file = settingsFile(root, scope);
+  const hooks = memoryHosts.map(host => ({ host, ...hookFile(root, host, scope) }));
   const currentHosts = hooks.filter(hook => hook.configured).map(hook => hook.host);
   let selected = options.host;
   let baseUrl = options.baseUrl ?? setting(file, 'baseUrl');
   let model = options.model ?? setting(file, 'model');
+  const timeoutMs = options.timeoutMs ?? timeoutSetting(file);
+  if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
+    throw new InputError('Timeout must be a positive number of milliseconds');
+  }
   if (!options.yes) {
     if (!process.stdin.isTTY || !process.stdout.isTTY) throw new InputError('Use an interactive terminal or pass --yes');
     const ui = createInterface({ input: process.stdin, output: process.stdout });
     try {
-      process.stdout.write(`\nAgent Memory\n${root}\n\nAutomatic extraction\n`);
+      process.stdout.write(`\nAgent Memory (${scope})\n${scope === 'user' ? homedir() : root}\n\nAutomatic extraction\n`);
       for (const { host, configured } of hooks) {
         process.stdout.write(`  ${configured ? '[x]' : '[ ]'} ${host.padEnd(7)} ${hosts[host].label}\n`);
       }
@@ -180,7 +249,7 @@ export async function configureMemory(root: string, options: ConfigOptions) {
       process.stdout.write('\nExtraction model (AGENT_MEMORY_LLM_* environment variables take precedence)\n');
       baseUrl = (await ui.question(`Base URL${baseUrl ? ` [${baseUrl}]` : ' [environment]'}: `)).trim() || baseUrl;
       model = (await ui.question(`Model${model ? ` [${model}]` : ' [environment]'}: `)).trim() || model;
-      if (!/^y(?:es)?$/i.test((await ui.question('Save project settings? [y/N] ')).trim())) return { status: 'cancelled' };
+      if (!/^y(?:es)?$/i.test((await ui.question(`Save ${scope} settings? [y/N] `)).trim())) return { status: 'cancelled' };
     } finally {
       ui.close();
     }
@@ -193,11 +262,21 @@ export async function configureMemory(root: string, options: ConfigOptions) {
   }
   const enabled = selected === undefined ? currentHosts : parseMemoryHosts(selected, true);
   const updates = hooks.map(hook => hook.update(enabled.includes(hook.host)));
-  const content = { ...file.content, ...(baseUrl === undefined ? {} : { baseUrl }), ...(model === undefined ? {} : { model }) };
+  const content = {
+    ...file.content,
+    ...(baseUrl === undefined ? {} : { baseUrl }),
+    ...(model === undefined ? {} : { model }),
+    ...(options.timeoutMs === undefined ? {} : { timeoutMs: Math.floor(options.timeoutMs) }),
+  };
   if (JSON.stringify(content) !== JSON.stringify(file.content)) replaceJson({ ...file, content });
   for (const update of updates) if (update) replaceJson(update);
-  return { status: 'configured', hosts: hooks.map(({ host, file }) => ({ host, configured: enabled.includes(host), path: file.path })),
-    model_configured: !!(process.env.AGENT_MEMORY_LLM_MODEL || model) && !!(process.env.AGENT_MEMORY_LLM_BASE_URL || baseUrl),
-    ...(enabled.includes('codex') ? { codex: 'Review and trust the hook in Codex with /hooks.' } : {}),
+  const resolved = memoryModelSettings(scope === 'user' ? dirname(globalConfigPath()) : root);
+  return {
+    status: 'configured',
+    scope,
+    settings_path: file.path,
+    hosts: hooks.map(({ host, file }) => ({ host, configured: enabled.includes(host), path: file.path })),
+    model_configured: !!(resolved.model && resolved.baseUrl),
+    ...(enabled.includes('codex') ? { codex: 'Review and trust the hooks with /hooks or Settings > Hooks in Codex.' } : {}),
   };
 }

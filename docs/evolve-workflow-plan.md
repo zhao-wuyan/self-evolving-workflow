@@ -33,11 +33,11 @@ Maestro Session 完成 / 独立 Skill 明确结束
 
 ## 2. Session/Run 与 Skill 编排
 
-项目 Skill 位于 `skills/`。入口为 `ew-orchestrate`，包含 `ew-companion`、`ew-brainstorm`、`ew-analyze`、`ew-plan`、`ew-execute` 和 `ew-review` 六个步骤。`ew-odyssey` 与 `ew-skill-design` 按需调用，`team-swarm` 提供并行探索。
+项目 Skill 位于 `skills/`。入口为 `ew-orchestrate`，包含 `ew-companion`、`ew-brainstorm`、`ew-analyze`、`ew-plan`、`ew-execute` 和 `ew-review` 六个步骤。`ew-odyssey` 与 `ew-skill-design` 按需调用，`ew-swarm` 提供并行探索。
 
 ### Evolve 原生 Session/Run
 
-Session 管理目标、步骤链、决策和同一 Session 内的产物关系。Run 固定本次执行的 Git 版本和输入工件。Evolve 在 `.agent-memory/workflow.db` 的同一事务内封存产物并记录执行回执，Agent Memory 只读消费该数据库的证据。协调器调用 `evolve run next`、`run brief`、`run check`、`run complete`、`run decide` 和 `session complete`，以返回的定位、修订号和续步为准。旧 Session 仍可按其既有回执查询与沉淀。 [Evolve 运行手册](/D:/evolve_workflow/skills/ew-orchestrate/references/orchestrator-run-loop.md)
+Session 管理目标、步骤链、决策和同一 Session 内的产物关系。Run 固定本次执行的 Git 版本和输入工件。Evolve 在 `.agent-memory/workflow.db` 的同一事务内封存产物并记录执行回执，Agent Memory 只读消费该数据库的证据。协调器调用 `evolve run create`、`run get`、`run check`、`run complete`、`run decide` 和 `session complete`，以返回的定位、修订号和续步为准。旧 Session 仍可按其既有回执查询与沉淀。 [Evolve 运行手册](/D:/evolve_workflow/skills/ew-orchestrate/references/orchestrator-run-loop.md)
 
 ### Skill 自带流程，用 Markdown 链接连接
 
@@ -50,9 +50,9 @@ skills/
   ew-orchestrate/steps/ew-analyze/references/workflow.md
   ew-odyssey/SKILL.md
   ew-odyssey/references/
-  team-swarm/SKILL.md
-  team-swarm/roles/
-  team-swarm/scripts/
+  ew-swarm/SKILL.md
+  ew-swarm/roles/
+  ew-swarm/scripts/
 ```
 
 例如，`ew-orchestrate` 用 `[分析 Skill](steps/ew-analyze/SKILL.md)` 指向分析 Skill，分析 Skill 用 `[执行流程](references/workflow.md)` 指向下一份文件。第一跳由协调器从当前步骤的可信 Skill 入口确定。执行端以实际加载文件所在目录为基准解析后续链接。执行引用限于显式选定的 Skill 包和声明引用的共享说明。Wiki、任务报告和普通正文里的链接供读取，是否执行下一步仍由 Session 步骤链与续步决定。
@@ -81,7 +81,7 @@ skills/
 | --- | --- |
 | `ew-orchestrate` 的任务入口 | 轻量任务进入 Companion；需要产物交接时建立 Session 步骤链。 |
 | `ew-orchestrate` 的 `--auto` | 使用同一循环，允许授权范围内的有限重试与低风险调整。 |
-| `ew-orchestrate` 的 `--resume <session-id>` | 用 `evolve session status` 和 `evolve run brief` 恢复原 Run、决策和产物绑定。 |
+| `ew-orchestrate` 的 `--resume <session-id>` | 用 `evolve session get` 和 `evolve run get` 恢复原 Run、决策和产物绑定。 |
 
 迁移期的 Next 和 Ralph 入口不再作为独立 Skill 分发。原有路由、自动策略、目标修订和恢复规则统一收入 `ew-orchestrate`，由 `--auto` 与 `--goal` 选择执行模式。旧命令名只作为外部兼容映射，不再拥有独立的指令副本。 [EW 编排入口](/D:/evolve_workflow/skills/ew-orchestrate/SKILL.md:45) · [目标长链策略](/D:/evolve_workflow/skills/ew-orchestrate/references/goal.md:8)
 
@@ -89,11 +89,11 @@ skills/
 
 | Skill | 职责 |
 | --- | --- |
-| 元 Skill | `ew-skill-design` 负责设计、迁移和校验 Skill 包，按需引用契约和回放说明。`evolve skills validate <id>` 检查 Git 绑定、契约和必读链接。 |
+| 元 Skill | `ew-skill-design` 负责设计、迁移和校验 Skill 包，按需引用契约和回放说明。`evolve skill validate <id>` 检查 Git 绑定、契约和必读链接。 |
 | Odyssey | 保留长期诊断、修复和复验的迭代策略。各模式与共享阶段随 Odyssey 包分发，Session/Run 管理外层进度。 |
 | Swarm | 保留并行探索、评分及迭代收敛。协调器提交 Run 结果，角色、迭代文件和脚本由 Swarm 管理并随包分发。 |
 
-知识查询、Session/Skill 收尾、候选审查、迁移和 Wiki 发布统一由 Evolve 知识路由负责。`workflow-closeout` 保留为旧调用名的兼容入口，不再维护第二套知识规则。自进化仍保留独立入口，只有能归因到 Skill 行为的信号才进入该流程。元 Skill 使用 Memory 回溯为改动定位证据，Skill 变更按第 5 节回放、应用和回滚。 [知识路由](/D:/evolve_workflow/skills/ew-orchestrate/references/knowledge-route.md) · [元 Skill](/D:/evolve_workflow/skills/ew-skill-design/SKILL.md) · [Odyssey 模式](/D:/evolve_workflow/skills/ew-odyssey/SKILL.md) · [Swarm 包内引用](/D:/evolve_workflow/skills/team-swarm/SKILL.md)
+知识查询、Session/Skill 收尾、候选审查、迁移和 Wiki 发布统一由 Evolve 知识路由负责。`workflow-closeout` 保留为旧调用名的兼容入口，不再维护第二套知识规则。自进化仍保留独立入口，只有能归因到 Skill 行为的信号才进入该流程。元 Skill 使用 Memory 回溯为改动定位证据，Skill 变更按第 5 节回放、应用和回滚。 [知识路由](/D:/evolve_workflow/skills/ew-orchestrate/references/knowledge-route.md) · [元 Skill](/D:/evolve_workflow/skills/ew-skill-design/SKILL.md) · [Odyssey 模式](/D:/evolve_workflow/skills/ew-odyssey/SKILL.md) · [Swarm 包内引用](/D:/evolve_workflow/skills/ew-swarm/SKILL.md)
 
 ## 3. 统一 Wiki
 
@@ -146,8 +146,8 @@ sources:
 | 接口类别 | 规划签名 | ID 要求 | 返回内容 |
 | --- | --- | --- | --- |
 | 候选搜索 | `search(query, filters?)` | 不接收 `knowledge_id` | 摘要、稳定 `knowledge_id`、相关性、来源摘要和关系 ID |
-| 参考搜索 | `wiki references(query, context)` | 不接收 `knowledge_id` | 满足 `mode=reference`、状态和作用域的候选摘要 |
-| 约束解析 | `wiki constraints(context)` | 不接收条目 ID | 当前上下文生效的约束全文、`knowledge_id`、内容哈希和作用域 |
+| 参考搜索 | `kb search --kind reference(query, context)` | 不接收 `knowledge_id` | 满足 `mode=reference`、状态和作用域的候选摘要 |
+| 约束解析 | `kb list --kind constraint(context)` | 不接收条目 ID | 当前上下文生效的约束全文、`knowledge_id`、内容哈希和作用域 |
 | 精确读取 | `get(knowledge_id)` 或 `query({ id: knowledge_id })` | 必须接收稳定 ID | 单条完整正文、属性、来源和历史状态 |
 | 受控参考读取 | `reference(knowledge_id, context)` | 必须接收稳定 ID | 通过当前作用域和共享授权复验后的参考正文 |
 | 变更接口 | `propose`、`changes`、`apply` | 必须使用规范化条目 ID、候选 ID 或变更 ID | 提案状态、基线哈希、变更前后内容和应用回执 |
@@ -162,13 +162,15 @@ sources:
 
 ### Agent Memory 多 Agent 接口规划
 
-Agent Memory 作为宿主无关的工具基础设施。Codex、Agy、Claude 和其他 Agent 保留自己的 system prompt，通过 CLI、HTTP 或 MCP 调用统一接口。Agent Memory 的 `agent-memory/2.0` 提取提示词只用于后台窄推理算子，不注入宿主 system prompt。
+Agent Memory 作为宿主无关的工具基础设施。Codex、Agy、Claude 和其他 Agent 保留自己的 system prompt，通过 `evolve` CLI 调用统一接口。Agent Memory 的 `agent-memory/2.0` 提取提示词只用于后台窄推理算子，不注入宿主 system prompt。
 
-检索结果统一封装为 `agent-memory-envelope/1.0`，规划字段如下。
+聚合搜索默认返回统一排序列表，`--mode context` 返回 `evolve-context/1.0` 任务上下文信封，字段如下。
 
 ```json
 {
-  "schema_version": "agent-memory-envelope/1.0",
+  "schema_version": "evolve-context/1.0",
+  "mode": "context",
+  "query": "<query>",
   "trust_boundary": "untrusted_evidence_data_only",
   "context_scope": {
     "session_id": "<optional>",
@@ -177,18 +179,19 @@ Agent Memory 作为宿主无关的工具基础设施。Codex、Agy、Claude 和�
   },
   "constraints": [],
   "references": [],
-  "working_memories": []
+  "episodic": [],
+  "code": []
 }
 ```
 
 字段规则如下。
 
-- `knowledge_id` 表示正式 Wiki 条目，Search 结果必须返回，Get/Query 以它作为精确定位。
+- `id` 是条目稳定身份；所有命中均含 `source`、`kind`、`title`、`snippet`、`authority` 与实际存储 `scope`，精读使用 `kb get <id>`。
 - `source_id` 表示消息、回执或文件证据。普通 Search 只返回来源摘要，审查和 Closeout 返回完整来源。
 - `session_id` 表示工作上下文。它可以过滤 L1 Memory 和回溯证据，不作为正式 Wiki 条目的唯一身份。
 - `authority` 区分 `binding`、`advisory` 和 `unverified_episodic`。检索内容作为工具数据或用户上下文进入宿主，不能覆盖宿主 system prompt。
 
-多 Agent 适配采用无侵入流程。初始化阶段由宿主主动调用库级 `context()`、CLI `context` 或 HTTP `/context`，加载 L3 Wiki 约束与参考。执行阶段不读取宿主日志，不安装 Stop/Finish Hook，不改变宿主调用链。结束后优先通过已有 Session/Run 回执执行 `session review`、`closeout show` 和 `evolve review`。不同 CLI 的原始历史只作为未来显式回溯源，由宿主类型与配置路径选择性读取，不进入初始化和常规检索流程。Search 不接收 ID，Get/Reference 使用稳定 ID。
+多 Agent 适配采用无侵入流程。初始化阶段由宿主主动调用 `evolve search "<query>" --mode context`，加载适用约束、参考、情景记忆与代码入口；通过 `--from kb` 可只查询知识。执行阶段不读取宿主日志，不安装 Stop/Finish Hook，不改变宿主调用链。结束后优先通过已有 Session/Run 回执执行 `session review`、`kb candidates show` 和 `skill review`。不同 CLI 的原始历史只作为未来显式回溯源，由宿主类型与配置路径选择性读取，不进入初始化和常规检索流程。Search 不接收 ID，Get/Reference 使用稳定 ID。
 
 ## 4. 多层沉淀 Skill
 
@@ -198,11 +201,11 @@ Maestro Session 结束前固定本次可提取的证据范围和锚点，结束�
 
 用 `maestro session evidence <descriptor.json> --session <id> --json` 固定经选择的会话片段。它返回引用，重复提交同一片段会复用已有快照。把引用作为 `--evidence` 附在相关 Run 的状态变更上，Session 完成时收集并检查这些引用。已完成的 Session 有新式回执时，沉淀和回溯都按该回执选择快照。回溯可以从同一证据定位 Run 及其 Skill 版本。
 
-Session 自动沉淀由宿主配置启用。`MAESTRO_EVOLVE_CLI` 指向已安装的 Evolve JavaScript 入口，`MAESTRO_EVOLVE_PROJECT` 提供稳定项目 ID，`MAESTRO_EVOLVE_WIKI_ROOT` 可指定独立 Wiki 目录。完成事务把 Run 摘要及明确引用的会话快照锚点写入回执，后台进程按回执 ID 提取。模型失败或后台进程未启动时，可用 `agent-memory closeout scan <maestro-project> --project <id>` 补扫。用 `closeout show <receipt-id> --project <id>` 查看处理结果。
+Session 自动沉淀由宿主配置启用。`MAESTRO_EVOLVE_CLI` 指向已安装的 Evolve JavaScript 入口，`MAESTRO_EVOLVE_PROJECT` 提供稳定项目 ID，`MAESTRO_EVOLVE_WIKI_ROOT` 可指定独立 Wiki 目录。完成事务把 Run 摘要及明确引用的会话快照锚点写入回执，后台进程按回执 ID 提取。模型失败或后台进程未启动时，可用 `evolve kb harvest scan <maestro-project> --project <id>` 补扫。用 `kb candidates show <receipt-id> --project <id>` 查看处理结果。
 
 独立 Skill 通过执行入口明确记录 `succeeded`、`failed` 或 `cancelled`，生成包含执行 ID、实际 Skill 版本和证据引用的结束回执。两类回执进入同一沉淀入口。宿主 `Stop` 此时只作为会话监测信号。关联同一个 Skill 调用的 Session 回执和独立回执时，使用执行 ID 与证据锚点归并信号。沉淀和自进化 Skill 自身的执行事件排除在这一自动触发入口之外，避免递归触发。 [宿主 Stop 处理](/D:/maestro2/src/commands/hooks.ts:1360)
 
-项目内的独立 Skill 可用 `maestro skills run <id> "<任务>" --json` 在 Codex 的只读模式下执行。入口固定 `skills/<id>/SKILL.md` 所在的 Git 提交和目录树，宿主按需打开包内 Markdown。配置 `MAESTRO_EVOLVE_CLI` 和 `MAESTRO_EVOLVE_PROJECT` 后，进程结束先用 `closeout skill --record-only` 提交回执，再异步调用 `closeout resume <receipt-id>`。回执保存任务、输出、宿主终态和已读取的文档哈希。模型失败后可以凭同一个回执重试，或用 `closeout scan` 补处理。已有宿主回调仍可直接调用 `closeout skill <execution-id>`。已经归属 Maestro Session 的执行交给 Session 收尾。
+项目内的独立 Skill 可用 `maestro skills run <id> "<任务>" --json` 在 Codex 的只读模式下执行。入口固定 `skills/<id>/SKILL.md` 所在的 Git 提交和目录树，宿主按需打开包内 Markdown。配置 `MAESTRO_EVOLVE_CLI` 和 `MAESTRO_EVOLVE_PROJECT` 后，进程结束先用 `kb harvest skill --record-only` 提交回执，再异步调用 `kb harvest receipt <receipt-id>`。回执保存任务、输出、宿主终态和已读取的文档哈希。模型失败后可以凭同一个回执重试，或用 `kb harvest scan` 补处理。已有宿主回调仍可直接调用 `kb harvest skill <execution-id>`。已经归属 Maestro Session 的执行交给 Session 收尾。
 
 | 层次 | 内容与去向 |
 | --- | --- |
@@ -214,7 +217,7 @@ Session 自动沉淀由宿主配置启用。`MAESTRO_EVOLVE_CLI` 指向已安装
 
 ### 知识候选到 Skill 设计的路由
 
-Closeout 候选先经过只读路由决策，再选择 Wiki、Skill 附加修正或元 Skill 设计。`agent-memory closeout route <closeout-id> <candidate-id>` 根据候选证据、目标 Skill、重复次数和结构条件返回路由结果。
+Closeout 候选先经过只读路由决策，再选择 Wiki、Skill 附加修正或元 Skill 设计。`evolve kb candidates route <closeout-id> <candidate-id>` 根据候选证据、目标 Skill、重复次数和结构条件返回路由结果。
 
 | 条件 | 路由 |
 | --- | --- |
@@ -222,7 +225,7 @@ Closeout 候选先经过只读路由决策，再选择 Wiki、Skill 附加修正
 | 可归因到既有 Skill 的单条规则、条件链接或局部修正 | `workflow-evolve` 生成 `high/normal/low` 附加内容 |
 | 需要新契约、新产物、跨 Skill 路由、至少 3 个稳定步骤或明确新增 Skill | 元 Skill 设计 |
 
-元 Skill 路由会在当前项目 `.agent-memory/skill-design/tasks/` 生成设计任务。`skill-design run` 通过显式元 Skill runner 生成设计回执，`skill-design review` 校验候选能从目标 Skill 基线重建，`skill-design replay` 复用既有双 Worktree 回放，`skill-design apply|rollback` 复用现有版本应用链。这样知识沉淀可以形成可审查、可回放、可回滚的 Skill 改动，同时保持普通经验不被过度流程化。
+元 Skill 路由会在当前项目 `.agent-memory/skill-design/tasks/` 生成设计任务。`skill design run` 通过显式元 Skill runner 生成设计回执，`skill design review` 校验候选能从目标 Skill 基线重建，`skill design replay` 复用既有双 Worktree 回放，`skill design apply|rollback` 复用现有版本应用链。这样知识沉淀可以形成可审查、可回放、可回滚的 Skill 改动，同时保持普通经验不被过度流程化。
 
 ### 更新决策
 
@@ -236,7 +239,7 @@ Closeout 候选先经过只读路由决策，再选择 Wiki、Skill 附加修正
 
 候选只携带操作、目标 ID、修改前版本、证据引用和变更内容。更新入口按 ID 定位页面，应用前比对基线内容哈希。文件变动后重新对照当前正文、证据和作用域。当前通用 ingest 按类型和标题决定路径，这个受控入口按稳定 ID 写页面，随后重建或刷新现有 Wiki 索引。 [通用 ingest 当前写入逻辑](/D:/evolve_workflow/src/wiki-ingest.ts:59)
 
-用 `wiki propose <change.json>` 暂存 `create`、`update`、`promote` 或 `retire`。项目证据用 `--evidence` 提供，沉淀证据通过 `--closeout` 与 `--candidate` 绑定。与现有条目发生重叠或冲突时，提案记录审核关系、理由和涉及的 ID。用 `wiki changes --entry <id>` 核对修改前后内容及哈希，用 `wiki apply <change-id>` 应用已确认的版本。退役条目保留原 ID，可继续查询历史。
+用 `kb propose <change.json>` 暂存 `create`、`update`、`promote` 或 `retire`。项目证据用 `--evidence` 提供，沉淀证据通过 `--closeout` 与 `--candidate` 绑定。与现有条目发生重叠或冲突时，提案记录审核关系、理由和涉及的 ID。用 `kb changes --entry <id>` 核对修改前后内容及哈希，用 `kb apply <change-id>` 应用已确认的版本。退役条目保留原 ID，可继续查询历史。
 
 完成回执和候选处理状态放在本地运行存储中，优先复用现有 SQLite 运行数据层，与可重建的 Wiki 索引分开。以来源项目加完成回执 ID 幂等消费，输出内容措辞的变化不影响处理身份。候选或零候选结果持久化后才确认本次处理。补证以规范化的证据引用去重，发布时保存更新基线与目标版本。文件写入后、运行回执确认前发生中断时，通过目标内容哈希复核已完成的写入，避免重复改动。Wiki 正文可从 Git 历史恢复，回滚后重新索引。
 
@@ -244,17 +247,17 @@ Closeout 候选先经过只读路由决策，再选择 Wiki、Skill 附加修正
 
 ### Memory 提供只读回溯工具
 
-自进化 Skill 以项目根目录和 Session ID 调用 `agent-memory --root <project-root> session review <session-id>`。工具通过 Memory 模块的 Maestro 证据适配层，将已提交的 Run 状态、失败或阻塞原因、重试关系、完成摘要和经校验的会话片段整理成时间线。提取沿用 Memory L1 的消息格式、模型客户端和来源校验，使用专门的指令识别执行信号。独立调用用 `agent-memory --root <project-root> evolve review <execution-id> --project <source-project-id>` 读取对应的结束回执，共用提取接口。两个入口都只返回结构化结果。Wiki 发布和 Skill 应用沿用各自的写入入口。 [回溯实现](/D:/evolve_workflow/src/retrospective.ts) · [Memory L1 接入](/D:/evolve_workflow/src/memory.ts:240)
+自进化 Skill 以项目根目录和 Session ID 调用 `evolve --root <project-root> session review <session-id>`。工具通过 Memory 模块的 Maestro 证据适配层，将已提交的 Run 状态、失败或阻塞原因、重试关系、完成摘要和经校验的会话片段整理成时间线。提取沿用 Memory L1 的消息格式、模型客户端和来源校验，使用专门的指令识别执行信号。独立调用用 `evolve --root <project-root> skill review <execution-id> --project <source-project-id>` 读取对应的结束回执，共用提取接口。两个入口都只返回结构化结果。Wiki 发布和 Skill 应用沿用各自的写入入口。 [回溯实现](/D:/evolve_workflow/src/retrospective.ts) · [Memory L1 接入](/D:/evolve_workflow/src/memory.ts:240)
 
 新式完成回执把会话片段限定到其中列出的快照引用，包括显式空列表。缺少快照范围字段的旧 Session 按兼容路径读取其已经保存的快照。调用者需要补充上下文时，可显式传入经授权的 `--transcript <messages.json>`，消息保留单独的来源标识。有引用的快照缺失或校验失败时，回溯报告该证据错误。未固定到 Run 的片段可以用于定位问题，由调用者根据上下文核对关联。 [回执校验](/D:/evolve_workflow/src/closeout.ts:149) · [快照校验](/D:/evolve_workflow/src/transcript-evidence.ts:7)
 
 ### 初始化、Review 与自进化边界
 
-初始化阶段只加载 L3 运行上下文。宿主调用 `agent-memory context "<goal>" --task <kind> --session <session-id>`，读取适用的 `constraint` 和 `reference`，并把返回的 `agent-memory-envelope/1.0` 作为工具结果或用户上下文交给当前 Agent。需要补充当前 Session 的 L1 working memory 时显式加 `--include-memory`。该步骤不读取 Codex、Agy 或 Claude 的历史文件。
+初始化阶段只加载 L3 运行上下文。宿主调用 `evolve search "<goal>" --mode context --task <kind> --session <session-id>`，读取适用的 `constraint` 和 `reference`，并把返回的 `evolve-context/1.0` 作为工具结果或用户上下文交给当前 Agent。情景记忆默认参与召回，筛选特定历史 Session 时使用 `--memory-session <id>`。该步骤不读取 Codex、Agy 或 Claude 的历史文件。
 
-当前实现没有按 CLI 自动发现历史目录的能力。`session review` 读取 Maestro Session/Run 回执和已提交的 `transcript-evidence`，`evolve review` 读取独立 Skill 完成回执，`--transcript` 只接受用户或宿主显式授权的消息文件。Codex、Agy、Claude 的历史根目录和 JSONL 格式保留在后续回溯适配规范中，不进入初始化或常规搜索。
+当前实现没有按 CLI 自动发现历史目录的能力。`session review` 读取 Maestro Session/Run 回执和已提交的 `transcript-evidence`，`skill review` 读取独立 Skill 完成回执，`--transcript` 只接受用户或宿主显式授权的消息文件。Codex、Agy、Claude 的历史根目录和 JSONL 格式保留在后续回溯适配规范中，不进入初始化或常规搜索。
 
-任务结束后，Maestro 已提交的 Session/Run 回执是 Review 和自进化的首选证据。`agent-memory session review <session-id>` 负责回溯执行信号，`agent-memory closeout show <receipt-id>` 负责审查候选，`agent-memory evolve review <execution-id>` 负责归因到 Skill 版本。宿主只需要发起这些 CLI 调用，不需要安装 Hook 或改变模型调用。
+任务结束后，Maestro 已提交的 Session/Run 回执是 Review 和自进化的首选证据。`evolve session review <session-id>` 负责回溯执行信号，`evolve kb candidates show <receipt-id>` 负责审查候选，`evolve skill review <execution-id>` 负责归因到 Skill 版本。宿主只需要发起这些 CLI 调用，不需要安装 Hook 或改变模型调用。
 
 不同 CLI 的历史文件属于可选回溯源。未来适配器按 `host_kind`、历史根目录和会话匹配规则读取 Codex、Agy 或 Claude 的历史，再将选中的片段转换为现有 `transcript-evidence/1.0`。适配器只在显式 Review 请求中运行，必须记录来源路径、会话 ID、片段 ID 和哈希。未配置路径或无法定位会话时，保持回执回溯结果，不阻塞 Review 和自进化。
 
@@ -278,15 +281,15 @@ Closeout 候选先经过只读路由决策，再选择 Wiki、Skill 附加修正
 | 中 `normal` | 仅在可判断的场景中生效，命中时需要采用相应步骤。 | 在入口附加触发条件和相对 Markdown 链接。说明存放于包内 `references/learnings/`，满足条件时读取。 |
 | 低 `low` | 可选技巧、排障案例或窄范围做法。 | 存入同一包内的参考目录。执行者主动查阅参考索引时读取，单篇文档的链接放在索引中。 |
 
-用 `agent-memory evolve draft` 生成附加文本或链接文档。草稿记录证据引用、目标路径、优先级与入口基线哈希。评审中优先级草稿时检查 `--when` 是否明确指出何时读链接，例如“目标环境为 staging 时”。已有指令或文档覆盖同一行为时，先复用现有内容或提出局部调整。补充内容与现行步骤冲突时，提出针对原步骤的修订并单独评审。 [自进化 Skill](/D:/evolve_workflow/skills/workflow-evolve/SKILL.md) · [草稿生成](/D:/evolve_workflow/src/skill-addition.ts:28)
+用 `evolve skill draft` 生成附加文本或链接文档。草稿记录证据引用、目标路径、优先级与入口基线哈希。评审中优先级草稿时检查 `--when` 是否明确指出何时读链接，例如“目标环境为 staging 时”。已有指令或文档覆盖同一行为时，先复用现有内容或提出局部调整。补充内容与现行步骤冲突时，提出针对原步骤的修订并单独评审。 [自进化 Skill](/D:/evolve_workflow/skills/workflow-evolve/SKILL.md) · [草稿生成](/D:/evolve_workflow/src/skill-addition.ts:28)
 
 第一条低优先级草稿在入口增加一个按需打开的参考索引链接。后续草稿在 `references/learnings/index.md` 增加对应文档的链接。旧的单文档草稿可在回放时补齐索引链。中、低优先级链接按场景打开。`required_links` 专用于每次执行都要读取的文件。宿主沿固定 Git 版本中的相对 Markdown 链接读取。 [宿主 Markdown 读取](/D:/evolve-maestro-runtime/src/skills/git-skill.ts:98)
 
 ### 回放、应用与回滚
 
-`agent-memory evolve replay` 在两个独立 Git worktree 上对同一任务输入调用同一宿主脚本。场景覆盖旧版问题和已有成功流程。回执记录两版加载的文件与哈希。高优先级验证入口短指令改变目标行为。中优先级验证触发场景加载正确字节并执行对应步骤，非触发场景沿用原有路径。低优先级核对常规场景的读取清单与原路径一致，并验证主动查阅时能沿索引读取目标文档。
+`evolve skill replay` 在两个独立 Git worktree 上对同一任务输入调用同一宿主脚本。场景覆盖旧版问题和已有成功流程。回执记录两版加载的文件与哈希。高优先级验证入口短指令改变目标行为。中优先级验证触发场景加载正确字节并执行对应步骤，非触发场景沿用原有路径。低优先级核对常规场景的读取清单与原路径一致，并验证主动查阅时能沿索引读取目标文档。
 
-确认采用后，`agent-memory evolve apply` 对比当前提交、Skill 工作树和回执，再快进到已验证的候选。重新调用确认宿主加载新版。应用关联证据、回放结果与新旧版本。紧接该候选的回滚由 `agent-memory evolve rollback` 创建 Git 反向提交。后续提交已经改变历史时，重新核对影响后再恢复。
+确认采用后，`evolve skill apply` 对比当前提交、Skill 工作树和回执，再快进到已验证的候选。重新调用确认宿主加载新版。应用关联证据、回放结果与新旧版本。紧接该候选的回滚由 `evolve skill rollback` 创建 Git 反向提交。后续提交已经改变历史时，重新核对影响后再恢复。
 
 首版用本地项目 Skill 和真实宿主验证路径装载，候选装载实验限定在验证执行中。Wiki 继续承载跨任务约束与经验，Skill 中通过稳定 ID 引用相关知识。只有适合固化在执行步骤中的改动进入 Skill 文件。
 
@@ -310,7 +313,7 @@ Closeout 候选先经过只读路由决策，再选择 Wiki、Skill 附加修正
 
 共享参考复用 `share: [knowhow]`，每次搜索和打开都检查当前授权。检索在已过滤的 Markdown 上复用 MemoryKnowledge 全文检索和图谱遍历，免去共享库索引过期带来的范围误判。撤销共享后，搜索结果与原仓库引用随即失效。旧 Knowhow 文件在导入前沿用旧检索入口。 [双 CLI 共享验收](/D:/evolve_workflow/test/maestro-closeout.mjs)
 
-用 `agent-memory --root <project> wiki migrate <source> --project <id> --scope <scope>` 预览各层迁移，确认后加 `--apply`。全局层的 `<source>` 为 `MAESTRO_HOME`，团队与个人层为 Maestro 项目根目录，个人迁移另传 `--uid <member-uid>`。各目录沿用同一 Wiki 格式。
+用 `evolve kb import <source> --root <project> --project <id> --scope project|global` 预览迁移，确认后加 `--apply`。全局层的 `<source>` 为 `MAESTRO_HOME`，团队与个人层为 Maestro 项目根目录，团队与个人旧目录可作为显式 `<source>` 导入目标项目。各目录沿用同一 Wiki 格式。
 
 | 层 | 旧规则目录 | Wiki 条目目录 |
 | --- | --- | --- |
@@ -320,7 +323,7 @@ Closeout 候选先经过只读路由决策，再选择 Wiki、Skill 附加修正
 
 新 Run 按全局、共享仓库、项目、团队、个人的顺序合并约束。团队与个人沿用本地 Git 邮箱对应的成员记录。个人层只读取该成员的目录，快照记录层和 UID。仍有适用旧约束且对应层尚未导入时，分派沿用旧读取路径。旧脚手架的示例和空种子无需切换。已完成的 Run 使用分派时的快照。 [新旧分层验收](/D:/evolve_workflow/test/maestro-closeout.mjs)
 
-`agent-memory wiki constraints` 支持 `--keyword`、`--task` 和 `--path`。已导入的结构化条目继续使用原关键词，旧 Wiki 页面可从保存的迁移属性读取。运行中的查询只读取该 Run 固定的约束及其关键词。 [新旧读取验收](/D:/evolve_workflow/test/maestro-closeout.mjs)
+`evolve kb list --kind constraint` 支持 `--keyword`、`--task` 和 `--path`。已导入的结构化条目继续使用原关键词，旧 Wiki 页面可从保存的迁移属性读取。运行中的查询只读取该 Run 固定的约束及其关键词。 [新旧读取验收](/D:/evolve_workflow/test/maestro-closeout.mjs)
 
 ## 7. 迁移顺序与验收
 
@@ -333,11 +336,11 @@ Closeout 候选先经过只读路由决策，再选择 Wiki、Skill 附加修正
 | 5. 自进化闭环 | 封装 Memory 回溯接口。选一个项目 Skill，从结束回执提取信号、核对归因、分级生成附加内容，经真实宿主回放后应用并回滚。 | 信号可回查到原证据和 Skill 版本，缺少关键证据时保留待确认。旧版能复现问题，候选改善目标行为，原有成功场景通过。实际加载路径和哈希与候选一致，应用能拒绝基线漂移，回滚可复查。 |
 | 6. 扩大迁移范围 | 迁移元 Skill、Odyssey、Swarm 和其他步骤。按仓库或 Skill 比对旧规则，逐组切换。 | 宿主安装后可以从包内读取所需流程。Odyssey 可恢复原模式，Swarm 的角色及产物契约不变。新 Wiki 接管确认范围，旧运行记录走兼容读取。 |
 
-用 `evolve skills install ew-odyssey team-swarm` 安装长期流程与协作 Skill。提交到 Git 后，七个 `ew-odyssey-<mode>` 命令绑定同一个包，再选择各自的契约和必读文件。Swarm 从绑定提交读取角色、控制器和模板。旧 Run 按原绑定恢复。 [Odyssey 入口](/D:/evolve_workflow/skills/ew-odyssey/SKILL.md) · [Swarm 协议](/D:/evolve_workflow/skills/team-swarm/specs/swarm-protocol.md)
+用 `evolve skill install ew-odyssey ew-swarm` 安装长期流程与协作 Skill。提交到 Git 后，七个 `ew-odyssey-<mode>` 命令绑定同一个包，再选择各自的契约和必读文件。Swarm 从绑定提交读取角色、控制器和模板。旧 Run 按原绑定恢复。 [Odyssey 入口](/D:/evolve_workflow/skills/ew-odyssey/SKILL.md) · [Swarm 协议](/D:/evolve_workflow/skills/ew-swarm/specs/swarm-protocol.md)
 
 安装包验收已覆盖七种 Odyssey 模式和 Swarm 的项目导入、分派和恢复。契约测试逐项比对八个命令的旧版与新绑定哈希。 [安装包验收](/D:/evolve-maestro-runtime/scripts/check-session-run-packaged-install.mjs) · [契约测试](/D:/evolve-maestro-runtime/src/run/contract.test.ts)
 
-`npm run test:codex-campaigns` 用真实 Codex 验证 Odyssey Review 在 Git 版本变化后恢复原模式和文档，完成四维审查并封存 `review-session`。Security 样本完成 OWASP 十类和依赖锁文件的 quick 只读审计，Defensive 样本完成 8 类模式、局部切片、传播、Q4 与风险评分。Swarm 样本执行两轮。每轮由 Codex 协调宿主通过 `team_agent` 分派两个 ant 和独立的 scorer 进程。worker 按 Run 绑定读取原版角色文档，写入产物并回报。协调端重连后核对成员、任务、已确认消息与原分派，Python 控制器提交并重放同一轮的评分更新。analyst 从 MCP 恢复状态和消息。验收程序驱动 Python、analyst 和封存。 [真实宿主验收](/D:/evolve_workflow/test/codex-campaigns.mjs) · [Swarm MCP 协调说明](/D:/evolve_workflow/skills/team-swarm/references/mcp-coordination.md)
+`npm run test:codex-campaigns` 用真实 Codex 验证 Odyssey Review 在 Git 版本变化后恢复原模式和文档，完成四维审查并封存 `review-session`。Security 样本完成 OWASP 十类和依赖锁文件的 quick 只读审计，Defensive 样本完成 8 类模式、局部切片、传播、Q4 与风险评分。Swarm 样本执行两轮。每轮由 Codex 协调宿主通过 `team_agent` 分派两个 ant 和独立的 scorer 进程。worker 按 Run 绑定读取原版角色文档，写入产物并回报。协调端重连后核对成员、任务、已确认消息与原分派，Python 控制器提交并重放同一轮的评分更新。analyst 从 MCP 恢复状态和消息。验收程序驱动 Python、analyst 和封存。 [真实宿主验收](/D:/evolve_workflow/test/codex-campaigns.mjs) · [Swarm MCP 协调说明](/D:/evolve_workflow/skills/ew-swarm/references/mcp-coordination.md)
 
 Swarm 在分派前保存每轮的 assignment 批次，恢复时沿用原起点和 ant ID。LLM 模式要求评分覆盖同一轮的全部已接受 ant 产物。scorer 失败时，协调端可显式选择整轮 fallback。控制器回执保存评分方式，重放会检查分派、产物和评分输入。 [控制器回归](/D:/evolve-maestro-runtime/.claude/skills/team-swarm/scripts/test_aco.py)
 
@@ -347,7 +350,7 @@ Swarm 在分派前保存每轮的 assignment 批次，恢复时沿用原起点�
 
 `analyze`、`plan` 和 `execute` 的准备说明与流程已归入 Maestro 的 `steps/`，三步沿用原契约哈希。`brainstorm` 和 `review` 使用同一主包的步骤契约与链接。项目提交 `skills/ew-orchestrate/` 后，由 Maestro 主入口解析这些步骤，旧 Run 用恢复包中的 `guidance_files` 查找兼容文件。 [Analyze Step](/D:/evolve_workflow/skills/ew-orchestrate/steps/ew-analyze/SKILL.md) · [Plan Step](/D:/evolve_workflow/skills/ew-orchestrate/steps/ew-plan/SKILL.md) · [Execute Step](/D:/evolve_workflow/skills/ew-orchestrate/steps/ew-execute/SKILL.md)
 
-常规 `run next` 在分派时按绑定契约的 `consumes` 别名接收同一 Session 的封存产物，核对发布回执、类型、角色、schema 和字节摘要。`upstream_aliases` 将别名映射到 `upstream` 中的 Artifact ID，路径相对于 Session 目录。恢复时沿用原映射，封存时从 `input_refs` 记录产物来源。缺失的可选槽位由 Skill 自身处理。安装包样本用三次 `run next` 验证 `current-analysis` 和 `current-plan` 自动交接，同时覆盖篡改拒绝、请求重放、`plan --tdd` 引用、旧 `plan` Run 恢复和 `execute` 产物兼容性检查。 [安装包验收](/D:/evolve-maestro-runtime/scripts/check-session-run-packaged-install.mjs)
+常规 `run create` 在分派时按绑定契约的 `consumes` 别名接收同一 Session 的封存产物，核对发布回执、类型、角色、schema 和字节摘要。`upstream_aliases` 将别名映射到 `upstream` 中的 Artifact ID，路径相对于 Session 目录。恢复时沿用原映射，封存时从 `input_refs` 记录产物来源。缺失的可选槽位由 Skill 自身处理。安装包样本用三次 `run create` 验证 `current-analysis` 和 `current-plan` 自动交接，同时覆盖篡改拒绝、请求重放、`plan --tdd` 引用、旧 `plan` Run 恢复和 `execute` 产物兼容性检查。 [安装包验收](/D:/evolve-maestro-runtime/scripts/check-session-run-packaged-install.mjs)
 
 ### 7.1 `analyze` 试迁任务（已完成实现）
 
@@ -364,14 +367,14 @@ Swarm 在分派前保存每轮的 assignment 批次，恢复时沿用原起点�
 | **A5 接通旧 Run 和失败恢复** | 用持久化绑定区分新旧协议，验证旧运行中和已封存样本、同请求重放、缺失原版本以及显式改版重试。保留旧目录和兼容解析器，允许对新分派关闭试迁。 | A4 |
 | **A6 验收并清理试迁入口** | 按第 7.4 节跑真实宿主、构建后 CLI 和安装包验收。确认新路径已经切断旧指导读取，移除试迁中的重复解析调用，保留历史兼容入口。 | A5 |
 
-A1 的对照以现有 `contract_version: 2.1` 和流程分支为准。`--from` 仍走现有产物解析和校验。Session 目标与 Run 的位置参数各有来源，产物输入继续使用已封存的同 Session Artifact 引用。A1–A6 已落地：`skills/ew-orchestrate/steps/ew-analyze/` 提供入口、准备说明、工作流和条件引用，绑定在创建事务中固定 Skill 提交、目录树和契约，`run skill-read` 记录入口与 Markdown 链接的字节证据，旧 Run 继续沿兼容分支恢复。安装包验收覆盖 `analyze → plan → execute`、重放、旧 Run 恢复、产物交接和绑定失效。 [现有 `analyze` 契约](/D:/maestro2/prepare/analyze.md:4) · [现有分支和门禁](/D:/maestro2/workflows/analyze.md:36) · [Maestro Analyze Step](/D:/evolve_workflow/skills/ew-orchestrate/steps/ew-analyze/SKILL.md) · [安装包验收](/D:/evolve-maestro-runtime/scripts/check-session-run-packaged-install.mjs:245)
+A1 的对照以现有 `contract_version: 2.1` 和流程分支为准。`--from` 仍走现有产物解析和校验。Session 目标与 Run 的位置参数各有来源，产物输入继续使用已封存的同 Session Artifact 引用。A1–A6 已落地：`skills/ew-orchestrate/steps/ew-analyze/` 提供入口、准备说明、工作流和条件引用，绑定在创建事务中固定 Skill 提交、目录树和契约，`run read skill` 记录入口与 Markdown 链接的字节证据，旧 Run 继续沿兼容分支恢复。安装包验收覆盖 `analyze → plan → execute`、重放、旧 Run 恢复、产物交接和绑定失效。 [现有 `analyze` 契约](/D:/maestro2/prepare/analyze.md:4) · [现有分支和门禁](/D:/maestro2/workflows/analyze.md:36) · [Maestro Analyze Step](/D:/evolve_workflow/skills/ew-orchestrate/steps/ew-analyze/SKILL.md) · [安装包验收](/D:/evolve-maestro-runtime/scripts/check-session-run-packaged-install.mjs:245)
 
 ### 7.2 要移除的 Session/Run 读取
 
 | 调用面 | 新 `analyze` 路径 | 兼容与校验 |
 | --- | --- | --- |
-| 步骤发现、`session chain`、`run next` / `run create` | 两个入口共用可信绑定。新 Run 采用绑定的契约摘要。`createRunningRunV3` 及 `republishedConsumerInputs` 使用快照内的消费者槽位，避免再次从命令名解析 `prepare` / Skill。 | 保留前驱门禁、产物资格、修订号与请求回执校验。首次分派确定绑定，重放已有请求用原 Run。 |
-| `v3BirthPacket`、`run brief`、`session resume-view` | 启动和恢复从记录返回 `skill_ref` 与契约标识。新包跳过 `buildV3GuidanceSnapshot` 和 `resolveStepContent`。`goal_mode` 如仍需交给宿主，在绑定时作为元数据提取。`resume-view` 继续投影原运行索引。 | 旧 Run 的 `guidance` 兼容输出留在旧分支。`brief` 和 `resume-view` 继续只读。 |
+| 步骤发现、`session chain`、`run create` / `run create` | 两个入口共用可信绑定。新 Run 采用绑定的契约摘要。`createRunningRunV3` 及 `republishedConsumerInputs` 使用快照内的消费者槽位，避免再次从命令名解析 `prepare` / Skill。 | 保留前驱门禁、产物资格、修订号与请求回执校验。首次分派确定绑定，重放已有请求用原 Run。 |
+| `v3BirthPacket`、`run get`、`session resume-view` | 启动和恢复从记录返回 `skill_ref` 与契约标识。新包跳过 `buildV3GuidanceSnapshot` 和 `resolveStepContent`。`goal_mode` 如仍需交给宿主，在绑定时作为元数据提取。`resume-view` 继续投影原运行索引。 | 旧 Run 的 `guidance` 兼容输出留在旧分支。`brief` 和 `resume-view` 继续只读。 |
 | `run check` | 从 Run 读取已绑定契约并核对执行端的读取证据，去掉按命令名找当前契约和读取 workflow `finish:` 的逻辑。文字检查项由宿主随流程文档读取。 | 产物 schema、必要产物、报告摘要、状态和修订校验沿用现有实现。试迁前后核对 CLI 门禁结果。 |
 | `run complete --advance`、恢复封存、产物兼容性 | `assertRunContractSnapshot` 校验持久化契约摘要与绑定。`prepareArtifactPublication` 用相同快照校验输出。旧恢复封存仅留给历史路径。面向新 `analyze` 的兼容性检查如需要读消费者契约，使用该消费者的可信绑定。 | 保留封存、注册产物别名、记录产物来源和推进步骤的原子语义。新 Run 改版通过显式重试生成新绑定，旧 `run rebind` 逻辑留给旧路径。 |
 
@@ -383,7 +386,7 @@ A1 的对照以现有 `contract_version: 2.1` 和流程分支为准。`--from` �
 
 **绑定和失效处理。** 可信绑定从授权项目的固定 Git 提交生成，包含 Skill ID、仓库、提交、包根、入口路径、目录树 ID 和冻结契约摘要。`skill_ref` 可放入响应，绑定及契约随 Run 在原事务中持久化。Run 使用协调端登记的绑定，普通请求和工作者无法提交一份替代契约。必需链接缺失或内容不属于绑定版本时，定位失败的步骤、引用和版本，恢复可读取的原版本后继续。运行过程中的工作树改动由新提交和新绑定生效。
 
-`SKILL.md` 的 `required_links` 声明每次执行都要打开的入口链接。执行器用 `run skill-read` 读取入口和适用的后续链接，Store 将来源、目标、Git blob ID 和字节哈希记录到该 Run 的读取证据。检查和成功封存会按原 Git 树重验这份证据，封存回执保留已核对的记录。条件链接仍按 Skill 的分支说明读取。
+`SKILL.md` 的 `required_links` 声明每次执行都要打开的入口链接。执行器用 `run read skill` 读取入口和适用的后续链接，Store 将来源、目标、Git blob ID 和字节哈希记录到该 Run 的读取证据。检查和成功封存会按原 Git 树重验这份证据，封存回执保留已核对的记录。条件链接仍按 Skill 的分支说明读取。
 
 | Run 场景 | 恢复行为 |
 | --- | --- |

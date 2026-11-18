@@ -11,6 +11,7 @@ const historicalPairs: Array<readonly [string, string]> = [
   ['maestro-impeccable', 'ew-impeccable'],
   ['maestro-knowledge', 'ew-knowledge'],
   ['workflow-closeout', 'ew-knowledge'],
+  ['team-swarm', 'ew-swarm'],
   ...orchestrationSteps.map(step => [step, 'ew-' + step] as const),
   ...odysseyModes.map(mode => ['odyssey-' + mode, 'ew-odyssey-' + mode] as const),
 ];
@@ -21,6 +22,7 @@ const aliases = new Map<string, string>([
   ...historicalPairs,
   ['orchestrate', 'ew-orchestrate'],
   ['odyssey', 'ew-odyssey'],
+  ['swarm', 'ew-swarm'],
   ['skill-design', 'ew-skill-design'],
   ['impeccable', 'ew-impeccable'],
   ['knowledge', 'ew-knowledge'],

@@ -395,6 +395,17 @@ export function getExtractMemoriesAgentPrompt(mode: MemoryPromptMode = "chat"): 
  * @param backgroundMessages - Previous messages for context only (not for extraction)
  * @param previousSceneName - The last known scene name (for continuity)
  */
+export function formatExtractionMessages(messages: readonly ConversationMessage[]): string {
+  return messages
+    .map((m) => `[${m.id}] [${m.role}] [${new Date(m.timestamp).toISOString()}]: ${m.content}`)
+    .join("\n\n");
+}
+
+/** 构造非 L1 情境切分任务（如收尾方法提炼、会话信号提取）的纯证据输入提示词。 */
+export function formatEvidencePrompt(messages: readonly ConversationMessage[]): string {
+  return `Evidence messages (cite exact supplied message IDs in source_message_ids):\n${formatExtractionMessages(messages)}`;
+}
+
 export function formatExtractionPrompt(params: {
   newMessages: ConversationMessage[];
   backgroundMessages?: ConversationMessage[];
@@ -403,14 +414,10 @@ export function formatExtractionPrompt(params: {
   const { newMessages, backgroundMessages = [], previousSceneName = "无" } = params;
 
   const bgText = backgroundMessages.length > 0
-    ? backgroundMessages
-        .map((m) => `[${m.id}] [${m.role}] [${new Date(m.timestamp).toISOString()}]: ${m.content}`)
-        .join("\n\n")
+    ? formatExtractionMessages(backgroundMessages)
     : "无";
 
-  const newText = newMessages
-    .map((m) => `[${m.id}] [${m.role}] [${new Date(m.timestamp).toISOString()}]: ${m.content}`)
-    .join("\n\n");
+  const newText = formatExtractionMessages(newMessages);
 
   return `**输出语言**：根据下方"待提取的新消息"中 user 发言的主导语言书写 \`scene_name\` 和 memory \`content\`。
 

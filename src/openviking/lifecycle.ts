@@ -330,10 +330,11 @@ export async function finishSession(root: string, store: WorkflowStore, id: stri
           if (existsSync(statePath)) state = JSON.parse(readFileSync(statePath, 'utf8'));
           else {
             const driver = join(cache, 'assets', 'skills', 'workflow-evolve', 'scripts', 'evolve-loop.mjs');
+            const cli = join(bundle, 'dist', 'workflow-cli.js');
             const output = execFileSync(process.execPath, [driver, '--skill', target.entry, '--scenarios', target.scenarios, '--runner', target.runner,
-              '--memory-cli', join(bundle, 'dist', 'cli.js'), '--iterations', '1', '--auto', '--review', reviewPath, '--output-dir', outputDir], {
+              '--memory-cli', cli, '--iterations', '1', '--auto', '--review', reviewPath, '--output-dir', outputDir], {
               cwd: root, encoding: 'utf8', windowsHide: true, timeout: 1_800_000, maxBuffer: 16 * 1024 * 1024,
-              env: { ...process.env, EVOLVE_CLI: join(bundle, 'dist', 'workflow-cli.js'), AGENT_MEMORY_CLI: join(bundle, 'dist', 'cli.js'),
+              env: { ...process.env, EVOLVE_CLI: cli, AGENT_MEMORY_CLI: cli,
                 EVOLVE_KNOWLEDGE_SNAPSHOT: snapshot.path, AGENT_MEMORY_DB: join(snapshot.path, 'memory.db') }, stdio: ['pipe', 'pipe', 'pipe'],
             });
             state = JSON.parse(output);

@@ -32,7 +32,7 @@ export function projectFixture(t, server, options = {}) {
   const disposers = [];
   t.after(async () => { for (const dispose of disposers.reverse()) await dispose(); f.cleanup(); });
   f.git('rm', '-r', 'skills');
-  if (options.driver) f.evolve('skills', 'install', 'workflow-evolve');
+  if (options.driver) f.evolve('skill', 'install', 'workflow-evolve');
   f.write(entry, '---\nname: sample\ncontract:\n  consumes: []\n  produces: []\n  gates: {entry: [], exit: []}\n---\n# Sample deployment\nPrepare a release from the supplied build.\n');
   f.write('skills/sample/scripts/release.mjs', `export function release(input, requireMigration) {
   if (requireMigration && !input.migrationApproved) return { decision: 'blocked', artifact: null };
@@ -66,7 +66,7 @@ console.log(JSON.stringify({passed, loaded: [request.entry, script].map(path => 
   const project = { schema_version: 'evolve-openviking-project/1.0', project_id: id, account_id: 'fixture-account', user_id: 'fixture',
     root_uri: privateProjectUri('fixture', id), evolution_policy: 'evolution.json', enabled: true, failure_policy: 'local' };
   if (options.profile !== false) {
-    f.write('.evolve/openviking.json', JSON.stringify(project)); f.git('add', '.evolve/openviking.json'); f.git('commit', '-qm', '测试: 固定项目描述');
+    f.write('.evolve/openviking.json', JSON.stringify(project)); f.git('add', '-f', '.evolve/openviking.json'); f.git('commit', '-qm', '测试: 固定项目描述');
   }
   return { ...f, project, client: new OpenVikingClient(), entry, dispose: callback => disposers.push(callback) };
 }

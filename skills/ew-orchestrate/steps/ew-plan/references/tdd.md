@@ -22,10 +22,12 @@ REFACTOR is omitted when there is nothing to clean. RED and GREEN are never merg
 
 ## Per-task requirements
 
+Per [workflow](workflow.md), all TDD tasks use the canonical `plan-task/1.0` schema (`depends_on[]`, `convergence_criteria[]`, `type`, `action`, `implementation`, `meta`, etc.).
+
 ### RED — `type: test`
 
 - `action`: write a test describing the expected behavior; it MUST fail before the implementation exists.
-- `convergence.criteria` (grep/run-verifiable):
+- `convergence_criteria` (grep/run-verifiable):
   - test file exists at `{test_path}`
   - test run exits non-zero (**fails**, not errors)
   - failure message matches the expected behavior gap
@@ -35,13 +37,13 @@ REFACTOR is omitted when there is nothing to clean. RED and GREEN are never merg
 ### GREEN — `type: feature`, `depends_on: [TASK-{N}a]`
 
 - `action`: write the simplest code that makes the failing test pass — nothing beyond what the test requires.
-- `convergence.criteria`: the RED test now passes AND all pre-existing tests still pass.
+- `convergence_criteria`: the RED test now passes AND all pre-existing tests still pass.
 - `meta`: `{ tdd_phase: "green", tdd_group: "{N}" }`.
 
 ### REFACTOR — `type: refactor`, `depends_on: [TASK-{N}b]`, optional
 
 - `action`: improve structure/naming/duplication without changing behavior.
-- `convergence.criteria`: all tests still pass; no new behavior introduced.
+- `convergence_criteria`: all tests still pass; no new behavior introduced.
 - `meta`: `{ tdd_phase: "refactor", tdd_group: "{N}" }`.
 
 ## Convergence quality

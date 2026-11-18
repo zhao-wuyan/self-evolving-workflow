@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = mkdtempSync(join(tmpdir(), 'evolve-native-loop-'));
-const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
+const cli = fileURLToPath(new URL('../dist/workflow-cli.js', import.meta.url));
 const loop = fileURLToPath(new URL('../skills/workflow-evolve/scripts/evolve-loop.mjs', import.meta.url));
 const entry = 'skills/migration-preflight/SKILL.md';
 const db = join(root, 'memory.db');
@@ -33,7 +33,7 @@ try {
   run('git', 'config', 'user.email', 'evolve@example.invalid');
   run('git', 'add', entry);
   run('git', 'commit', '-qm', 'Migration preflight baseline');
-  run(process.execPath, cli, 'memory', 'put', 'Staging migration preflight starts with a schema check.',
+  run(process.execPath, cli, 'kb', 'add', 'Staging migration preflight starts with a schema check.',
     '--db', db, '--id', 'staging-schema-check');
 
   writeJson('scenarios.json', [

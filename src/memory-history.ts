@@ -1,9 +1,10 @@
 import { createReadStream, existsSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { InputError, NotFoundError, openDb, pageOffset, pagination, searchLimit } from './common.js';
-import { memoryHosts, type MemoryHost } from './memory-config.js';
+import { memoryHosts, memoryModelSettings, type MemoryHost } from './memory-config.js';
+import { recordConversationSignals, buildSessionStartNotice } from './memory-reminders.js';
 import type { ConversationMessage, MemoryStore } from './memory.js';
 import type { LlmClient } from './upstream/llm.js';
 
@@ -52,6 +53,7 @@ interface ImportOptions {
   root: string;
   memory: MemoryStore;
   model: () => LlmClient;
+  allowUnconfiguredModel?: boolean;
 }
 
 interface Transcript {
@@ -182,7 +184,7 @@ function agyMessage({ row, start }: TranscriptRow, session: string, path: string
   const location = { path, byteOffset: start };
   if (row.type === 'USER_INPUT' && row.source === 'USER_EXPLICIT') {
     // Antigravity 的完整日志会把宿主附加说明拼在用户正文之外。
-    const wrapped = /^<USER_REQUEST>\r?\n([\s\S]*?)\r?\n<\/USER_REQUEST>(?=\s*(?:<(?:ADDITIONAL_METADATA|USER_SETTINGS_CHANGE)>|$))/.exec(row.content);
+    const wrapped = /^<USER_REQUEST>\r?\n([\s\S]*?)\r?\n<\/USER_REQUEST>(?=\s*(?:<[A-Z][A-Z0-9_]*>|$))/.exec(row.content);
     const content = wrapped?.[1] ?? row.content;
     if (readableText(content)) return { step: row.step_index, hasToolData: false,
       item: { id, role: 'user' as const, timestamp: row.created_at, content, location } };
@@ -190,6 +192,22 @@ function agyMessage({ row, start }: TranscriptRow, session: string, path: string
     return { step: row.step_index, hasToolData: Array.isArray(row.tool_calls) && row.tool_calls.length > 0,
       item: { id, role: 'assistant' as const, timestamp: row.created_at, content: row.content, location } };
   }
+}
+
+function resolveAgyTranscriptPath(path: string): string {
+  if (basename(path) !== 'transcript.jsonl') return path;
+  const fullPath = join(dirname(path), 'transcript_full.jsonl');
+  return existsSync(fullPath) ? fullPath : path;
+}
+
+async function countAgyErrorSteps(path: string, fromStep: number, size: number): Promise<number> {
+  let errors = 0;
+  for await (const { row } of transcriptRows(path, 0, size)) {
+    if (row && typeof row.step_index === 'number' && row.step_index >= fromStep && row.status === 'ERROR') {
+      errors++;
+    }
+  }
+  return errors;
 }
 
 async function* agyTurns({ path }: Transcript, session: string, offset: number, size: number) {
@@ -208,18 +226,26 @@ async function* agyTurns({ path }: Transcript, session: string, offset: number, 
 
 const turnReaders = { codex: codexTurns, claude: claudeTurns, agy: agyTurns };
 
-async function importTranscript(host: MemoryHost, transcript: Transcript, { root, memory, model }: ImportOptions) {
-  const info = statSync(transcript.path);
+async function importTranscript(
+  host: MemoryHost, transcript: Transcript, { root, memory, model, allowUnconfiguredModel }: ImportOptions,
+) {
+  const path = host === 'agy' ? resolveAgyTranscriptPath(transcript.path) : transcript.path;
+  const target = { ...transcript, path };
+  const info = statSync(path);
   if (!info.isFile()) throw new InputError('Transcript must be a file');
-  const session = host === 'codex' ? await codexSession(transcript, root, info.size)
-    : host === 'claude' ? await claudeSession(transcript, root, info.size) : transcript.session;
+  const session = host === 'codex' ? await codexSession(target, root, info.size)
+    : host === 'claude' ? await claudeSession(target, root, info.size) : target.session;
   if (!session) return;
   let offset = memory.extractionOffset(host, session);
   if (host !== 'agy' && offset > info.size) throw new InputError('Transcript is shorter than its saved extraction offset');
+  const errorCount = host === 'agy' ? await countAgyErrorSteps(path, offset, info.size) : 0;
+  const settings = allowUnconfiguredModel ? memoryModelSettings(root) : undefined;
+  const skipModel = Boolean(allowUnconfiguredModel && (!settings?.baseUrl || !settings?.model));
   let remembered = 0;
   let processed = 0;
-  for await (const turn of turnReaders[host](transcript, session, offset, info.size)) {
-    if (memory.extractionOffset(host, session) === offset) {
+  for await (const turn of turnReaders[host](target, session, offset, info.size)) {
+    recordConversationSignals(root, { host, session, messages: turn.messages, errorCount });
+    if (!skipModel && memory.extractionOffset(host, session) === offset) {
       const records = await memory.extractIncremental(turn.messages, {
         source: host, from: offset, to: turn.end, llm: model(), session, mode: 'code',
       });
@@ -233,22 +259,47 @@ async function importTranscript(host: MemoryHost, transcript: Transcript, { root
   return { session, processed, remembered };
 }
 
+export function memoryHookTarget(
+  host: MemoryHost, input: unknown, projectRoot: string,
+): { session: string; path: string; lastAssistant?: string } | undefined {
+  const event = object(input);
+  const root = realpathSync(projectRoot);
+  const candidateCwd = event?.cwd ?? (Array.isArray(event?.workspacePaths) ? event.workspacePaths[0] : undefined);
+  const cwd = typeof candidateCwd === 'string' ? workspacePath(candidateCwd) ?? candidateCwd : candidateCwd;
+  if (!projectContains(root, cwd)) return;
+  if (host === 'agy') {
+    if (readableText(event?.conversationId) && readableText(event.transcriptPath) && !event.error) {
+      return { session: event.conversationId, path: resolveAgyTranscriptPath(resolve(root, event.transcriptPath)) };
+    }
+    return;
+  }
+  if (event?.hook_event_name === 'Stop' && readableText(event.transcript_path) && readableText(event.session_id)) {
+    return { session: event.session_id, path: resolve(root, event.transcript_path),
+      ...(readableText(event.last_assistant_message) ? { lastAssistant: event.last_assistant_message } : {}) };
+  }
+}
+
 export async function handleMemoryHook(host: MemoryHost, input: unknown, options: ImportOptions) {
+  const root = realpathSync(options.root);
+  const target = memoryHookTarget(host, input, root);
+  if (target) await importTranscript(host, target, { ...options, root });
+  return host === 'agy' ? { decision: 'stop' } : {};
+}
+
+export function handleSessionStartHook(host: MemoryHost, input: unknown, options: { root: string }) {
   const event = object(input);
   const root = realpathSync(options.root);
+  const candidateCwd = event?.cwd ?? (Array.isArray(event?.workspacePaths) ? event.workspacePaths[0] : undefined);
+  if (candidateCwd !== undefined && !projectContains(root, workspacePath(String(candidateCwd)) ?? candidateCwd)) {
+    return {};
+  }
+  const notice = buildSessionStartNotice(root, host);
+  if (!notice) return {};
   if (host === 'agy') {
-    if (readableText(event?.conversationId) && readableText(event.transcriptPath) && !event.error &&
-        projectContains(root, event.cwd ?? (Array.isArray(event.workspacePaths) ? event.workspacePaths[0] : undefined))) {
-      await importTranscript(host, { path: event.transcriptPath, session: event.conversationId }, { ...options, root });
-    }
-    return { decision: 'stop' };
+    return { injectSteps: [{ systemMessage: { systemMessage: notice } }] };
   }
-  if (event?.hook_event_name === 'Stop' && readableText(event.transcript_path) && readableText(event.session_id) &&
-      projectContains(root, event.cwd)) {
-    await importTranscript(host, { path: event.transcript_path, session: event.session_id,
-      lastAssistant: readableText(event.last_assistant_message) ? event.last_assistant_message : undefined }, { ...options, root });
-  }
-  return {};
+  return { systemMessage: notice,
+    hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: notice } };
 }
 
 function workspacePath(uri: string): string | undefined {
@@ -278,7 +329,7 @@ function* agyTranscripts(root: string, session: string | undefined, full: boolea
         const uris: unknown = JSON.parse(raw);
         if (!Array.isArray(uris) || typeof uris[0] !== 'string' || !projectContains(root, workspacePath(uris[0]))) continue;
         const directory = join(home, 'brain', id, '.system_generated', 'logs');
-        const names = full ? ['transcript_full.jsonl', 'transcript.jsonl'] : ['transcript.jsonl'];
+        const names = ['transcript_full.jsonl', 'transcript.jsonl'];
         const path = names.map(name => join(directory, name)).find(existsSync);
         if (path) {
           seen.add(id);
@@ -386,6 +437,24 @@ export async function readMemoryConversation(target: string, options: Conversati
   if (page === undefined) { page = 1; messages = firstPage; hasNext = count > limit; }
   return { host, session, ...(memory && { memoryId: memory.id }), ...(anchor && { anchor: { messageId: anchor, page: anchorPage ?? null } }),
     pagination: pagination(page, limit, hasNext), messages };
+}
+
+export async function readHostConversationMessages(root: string, session: string, host?: MemoryHost) {
+  const located = await locateConversation(realpathSync(root), session, host ? [host] : memoryHosts);
+  const messages: ConversationMessage[] = [];
+  let previous: ConversationMessage | undefined;
+  for await (const entry of transcriptRows(located.path, 0, located.size)) {
+    const completed = located.host === 'codex' ? codexCompletedMessage(entry, session, located.path) : undefined;
+    const item = located.host === 'codex' ? completed ?? codexMessage(entry, session, located.path)
+      : located.host === 'claude' ? claudeMessage(entry, session, located.path)?.item
+      : agyMessage(entry, session, located.path)?.item;
+    if (!item?.content.trim()) continue;
+    const repeated = completed && previous?.role === 'assistant' && previous.content === completed.content;
+    if (repeated) continue;
+    previous = item;
+    messages.push(item);
+  }
+  return { host: located.host, session, path: located.path, messages };
 }
 
 export async function syncMemoryHost(host: MemoryHost, options: ImportOptions, session?: string) {

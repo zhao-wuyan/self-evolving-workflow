@@ -12,7 +12,7 @@ const steps = [
   'ew-verify', 'ew-test', 'ew-auto-test', 'ew-review', 'ew-debug', 'ew-retrospective',
 ];
 const retiredCompanionName = ['maestro', 'companion'].join('-');
-const topLevelForbidden = ['maestro', 'maestro-odyssey', 'maestro-skill-design', 'maestro-next', 'maestro-ralph', retiredCompanionName,
+const topLevelForbidden = ['maestro', 'maestro-odyssey', 'maestro-skill-design', 'maestro-next', 'maestro-ralph', retiredCompanionName, 'team-swarm',
   'workflow-closeout', 'init', 'analyze', 'plan', 'execute', 'brainstorm', 'grill', 'blueprint', 'roadmap', 'verify', 'test', 'auto-test', 'review', 'debug', 'retrospective', ...steps];
 
 function markdown(path) {
@@ -81,7 +81,7 @@ for (const file of walk(orchestrator)) {
 }
 
 for (const file of [orchestrator, knowledge, join(project, 'skills', 'ew-odyssey'), join(project, 'skills', 'ew-skill-design'),
-  join(project, 'skills', 'ew-impeccable')].flatMap(walk)) {
+  join(project, 'skills', 'ew-swarm'), join(project, 'skills', 'ew-impeccable')].flatMap(walk)) {
   if (!file.endsWith('.md')) continue;
   const directory = dirname(file);
   for (const match of readFileSync(file, 'utf8').matchAll(/\]\(([^)]+)\)/g)) {
@@ -93,12 +93,29 @@ for (const file of [orchestrator, knowledge, join(project, 'skills', 'ew-odyssey
   }
 }
 
-for (const file of walk(join(project, 'skills'))) {
+for (const file of [...walk(join(project, 'skills')), ...walk(join(project, 'agents'))]) {
   if (!file.endsWith('.md')) continue;
   const content = readFileSync(file, 'utf8').replace(/https?:\/\/[^\s)>]+/g, '');
   assert.doesNotMatch(content,
     /(?:\bmaestro\s+(?:run|session|delegate|execution|skills|capabilities|search|load|kg|knowledge|agent-msg|plan|artifact)\b|[$/]maestro(?:\b|-[\w-]+)|mcp__maestro|~\/\.maestro)/,
     `External workflow command in ${relative(project, file)}`);
+}
+
+const requiredAgents = [
+  'cli-explore-agent', 'workflow-codebase-mapper', 'workflow-external-researcher', 'workflow-research-synthesizer',
+  'workflow-analyzer', 'workflow-roadmapper', 'workflow-planner', 'workflow-collab-planner', 'workflow-plan-checker',
+  'workflow-executor', 'workflow-verifier', 'workflow-integration-checker', 'workflow-nyquist-auditor',
+  'workflow-reviewer', 'workflow-debugger', 'team-worker',
+  'impeccable-agent', 'impeccable-asset-producer', 'impeccable-documenter',
+  'impeccable-finish-reviewer', 'impeccable-manual-edit-applier', 'impeccable-motion-reviewer',
+];
+for (const agentName of requiredAgents) {
+  const agentFile = markdown(join(project, 'agents', `${agentName}.md`));
+  assert.match(agentFile, new RegExp(`^name: ${agentName}$`, 'm'), `Missing name frontmatter in agents/${agentName}.md`);
+  assert.match(agentFile, /^description: .+$/m, `Missing description frontmatter in agents/${agentName}.md`);
+  assert.match(agentFile, /^allowed-tools:/m, `Missing allowed-tools frontmatter in agents/${agentName}.md`);
+  assert.doesNotMatch(agentFile, /(?:\.workflow\/scratch\b|\bTaskList\b|\bTaskGet\b|\bTaskUpdate\b)/,
+    `Stale task-board or scratch path in agents/${agentName}.md`);
 }
 
 const readme = markdown(join(project, 'README.md'));

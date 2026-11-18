@@ -1,9 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { linkSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, linkSync, lstatSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { stringify } from 'yaml';
-import { InputError, NotFoundError, openDb, requireText, transaction } from './common.js';
+import {
+  InputError, LEGACY_AGENT_MEMORY_DIR, NotFoundError, openDb,
+  requireText, resolveEvolveStorage, transaction,
+} from './common.js';
 import { parseFrontmatter } from './upstream/frontmatter.js';
 import { unionSources } from './upstream/merge.js';
 import { readWikiEntryMetadata } from './wiki-entry.js';
@@ -63,8 +66,12 @@ function exactChangeId(id: string): string {
   return id;
 }
 
+export function closeoutDbPath(root: string): string {
+  return resolveEvolveStorage(root, ['closeout.db'], join(resolve(root), LEGACY_AGENT_MEMORY_DIR, 'closeout.db'));
+}
+
 function openChanges(wiki: Wiki) {
-  const path = join(wiki.root, '.agent-memory', 'closeout.db');
+  const path = closeoutDbPath(wiki.root);
   mkdirSync(dirname(path), { recursive: true });
   const db = openDb(path);
   try {
@@ -272,7 +279,6 @@ function writeChange(path: string, change: Change): void {
   const temporary = join(dirname(path), `.${randomUUID()}.tmp`);
   try {
     writeFileSync(temporary, change.after, { encoding: 'utf8', flag: 'wx' });
-    if (readEntry(path) !== change.before) throw new InputError(`Wiki entry changed since review: ${change.entry}`);
     if (change.before === null) linkSync(temporary, path);
     else renameSync(temporary, path);
   } finally {
@@ -284,23 +290,10 @@ export function applyWikiChange(wiki: Wiki, id: string) {
   exactChangeId(id);
   const db = openChanges(wiki);
   try {
-    const lookup = () => {
+    return transaction(db, () => {
       const row = db.prepare('SELECT * FROM wiki_changes WHERE id = ?').get(id);
       if (!row) throw new NotFoundError(`Wiki change not found: ${id}`);
-      return readChange(id, row);
-    };
-    transaction(db, () => {
-      const { change, state } = lookup();
-      if (state !== 'pending') return;
-      const current = readEntry(entryPath(wiki, change.entry));
-      if (current !== change.before && !(change.operation === 'create' && current === change.after)) {
-        throw new InputError(`Wiki entry changed since review: ${change.entry}`);
-      }
-      if (change.operation !== 'retire') assertUniqueContent(wiki, change.entry, change.after);
-      db.prepare("UPDATE wiki_changes SET state = 'applying' WHERE id = ?").run(id);
-    });
-    return transaction(db, () => {
-      const { change, state, appliedAt } = lookup();
+      const { change, state, appliedAt } = readChange(id, row);
       if (state === 'applied') return { ...preview(id, change, state, appliedAt), replayed: true };
       const path = entryPath(wiki, change.entry);
       const current = readEntry(path);
@@ -322,7 +315,7 @@ export function applyWikiChange(wiki: Wiki, id: string) {
 export function listWikiChanges(wiki: Wiki, selection?: { id?: string; entry?: string }) {
   if (selection?.id) exactChangeId(selection.id);
   if (selection?.entry) entryPath(wiki, selection.entry);
-  const path = join(wiki.root, '.agent-memory', 'closeout.db');
+  const path = closeoutDbPath(wiki.root);
   if (!lstatSync(path, { throwIfNoEntry: false })?.isFile()) return [];
   const db = openDb(path, true);
   try {
@@ -337,4 +330,22 @@ export function listWikiChanges(wiki: Wiki, selection?: { id?: string; entry?: s
   } finally {
     db.close();
   }
+}
+
+/**
+ * 删除受管 Wiki 条目文件并刷新索引；受锁保护条目拒绝删除。
+ */
+export function deleteWikiEntry(wiki: Wiki, entryId: string): { deleted: boolean; id: string; path?: string } {
+  const path = entryPath(wiki, entryId);
+  const content = readEntry(path);
+  if (content === null) return { deleted: false, id: entryId };
+  const parsed = parseFrontmatter(content.replace(/^\uFEFF/, ''));
+  if (parsed.frontmatter.locked === true) {
+    throw new InputError(`Wiki entry is locked: ${entryId}`);
+  }
+  rmSync(path, { force: true });
+  if (existsSync(join(wiki.root, 'wiki'))) {
+    wiki.build();
+  }
+  return { deleted: true, id: entryId, path: `wiki/${entryId}.md` };
 }

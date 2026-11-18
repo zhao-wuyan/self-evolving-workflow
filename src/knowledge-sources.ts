@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { InputError } from './common.js';
-import { MemoryStore } from './memory.js';
+import { MemoryStore, defaultMemoryDbPath } from './memory.js';
 import type { MemoryReader } from './memory-reader.js';
 import { Wiki } from './wiki.js';
 import { readEvolveSessions } from './workflow-runtime.js';
@@ -57,7 +57,7 @@ export async function openKnowledgeSources(root: string, options: {
   const receipt = sidecar ? readRemoteReceipt(sidecar) : undefined;
   const local = (fallback?: string): KnowledgeSources => ({
     wiki: new Wiki(options.wikiRoot ?? root),
-    ...(options.includeMemory ? { memory: new MemoryStore(options.db ?? join(root, '.agent-memory', 'memory.db'), { namespace: options.namespace }) } : {}),
+    ...(options.includeMemory ? { memory: new MemoryStore(options.db ?? defaultMemoryDbPath(root), { namespace: options.namespace }) } : {}),
     backend: { configured: project?.enabled === false || !project ? 'local' : 'openviking', active: 'local', ...(fallback ? { fallback_reason: fallback } : {}) },
   });
   if (session && !session.openviking) return local();
@@ -91,7 +91,7 @@ export async function openKnowledgeSources(root: string, options: {
     const wikiRoot = join(cache, 'wiki');
     if (options.wikiRoot && resolve(options.wikiRoot) !== resolve(wikiRoot)) throw new InputError('OPENVIKING_WIKI_ROOT_PINNED');
     const backend: KnowledgeBackend = { configured: 'openviking', active: pinnedRelease && existsSync(cached) ? 'cache' : 'openviking' };
-    const openLocal = () => new MemoryStore(options.db ?? join(root, '.agent-memory', 'memory.db'), { namespace: options.namespace });
+    const openLocal = () => new MemoryStore(options.db ?? defaultMemoryDbPath(root), { namespace: options.namespace });
     let memory: MemoryReader | undefined;
     if (options.includeMemory) {
       memory = options.memoryBackend === 'local' ? openLocal() : new OpenVikingMemoryReader(root, client, project, release, manifest, Boolean(options.session || sidecar));

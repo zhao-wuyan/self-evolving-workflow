@@ -1,9 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { InputError, openDb, requireText, transaction } from './common.js';
+import { dirname, join, resolve } from 'node:path';
+import { homedir } from 'node:os';
+import {
+  evolveDir, evolvePath, InputError, LEGACY_AGENT_MEMORY_DIR, openDb, requireText,
+  resolveEvolveStorage, transaction,
+} from './common.js';
 import { contentSha256, KnowledgeReads, validateKnowledgeReads, type KnowledgePriorReuse, type KnowledgeReadsReceipt } from './knowledge-reads.js';
 import { Wiki } from './wiki.js';
+import { appliesToContext } from './wiki-entry.js';
 import { buildWikiPrior, wikiLookupScope, type WikiLookupScope, type WikiPrior } from './workflow-knowledge.js';
 import { workflowName } from './workflow-names.js';
 import type { AssetBinding, OpenVikingReadEvidence } from './openviking/types.js';
@@ -211,7 +216,7 @@ function artifactMetadata(path: string, bytes: Buffer) {
 }
 
 export function workflowDbPath(root: string) {
-  return join(root, '.agent-memory', 'workflow.db');
+  return resolveEvolveStorage(root, ['workflow.db'], join(resolve(root), LEGACY_AGENT_MEMORY_DIR, 'workflow.db'));
 }
 
 export function readEvolveSessions(root: string, id?: string): Session[] {
@@ -225,6 +230,29 @@ export function readEvolveSessions(root: string, id?: string): Session[] {
   } finally {
     db.close();
   }
+}
+
+/** Run 结局：被重试、失败、阻塞、取消或带顾虑完成均视为非干净结局。 */
+export function runOutcome(session: Session, run: Run): 'clean' | 'non_clean' | 'pending' {
+  if (run.status === 'failed' || run.status === 'blocked' || run.status === 'cancelled' ||
+      run.verdict === 'done_with_concerns' || session.runs.some(other => other.retry_of_run_id === run.id)) {
+    return 'non_clean';
+  }
+  return run.status === 'sealed' ? 'clean' : 'pending';
+}
+
+/** Session 完成后提示自进化的信号，供完成回执与提醒共用。 */
+export function sessionEvolveSignals(session: Session): string[] {
+  const signals: string[] = [];
+  if (session.runs.some(run => Boolean(run.retry_of_run_id))) signals.push('run_retry');
+  if (session.runs.some(run => run.status === 'failed' || run.status === 'blocked' || run.status === 'cancelled')) {
+    signals.push('non_clean_run');
+  }
+  if (session.runs.some(run => run.verdict === 'done_with_concerns')) signals.push('done_with_concerns');
+  if (session.runs.length > 0 && session.runs.every(run => !run.knowledge_reads?.reads.length && !run.knowledge_reads?.searches.length)) {
+    signals.push('empty_knowledge_reads');
+  }
+  return signals;
 }
 
 export function evolveSessionReceipt(session: Session) {
@@ -247,6 +275,33 @@ export function evolveSessionReceipt(session: Session) {
       ];
     }),
   };
+}
+
+export function* readCompletedVerificationArtifacts(root: string, id?: string) {
+  const sessions = readEvolveSessions(root, id).filter(session => session.status === 'completed');
+  if (!sessions.length) return;
+  const db = openDb(workflowDbPath(root), true);
+  try {
+    const read = db.prepare('SELECT body FROM artifacts WHERE session = ? AND id = ?');
+    for (const session of sessions) {
+      const finalRuns = new Set(session.steps.flatMap(step => step.status === 'completed' && step.run_id ? [step.run_id] : []));
+      const verified = new Map(session.runs.filter(run => finalRuns.has(run.id) && runOutcome(session, run) === 'clean')
+        .map(run => [run.id, run.skill.skill_id]));
+      for (const artifact of Object.values(session.artifacts)) {
+        if (artifact.role !== 'primary' || artifact.status !== 'sealed' || !(
+          artifact.schema === 'test-results/1.0' && verified.get(artifact.run_id) === 'ew-test' ||
+          artifact.schema === 'verification/1.0' && verified.get(artifact.run_id) === 'ew-verify'
+        )) continue;
+        const value = read.get(session.id, artifact.id)?.body;
+        const bytes = value instanceof Uint8Array ? Buffer.from(value.buffer, value.byteOffset, value.byteLength) : undefined;
+        if (!bytes || workflowHash(bytes) !== artifact.sha256) {
+          throw new InputError('Sealed verification bytes are unavailable or changed: ' + artifact.id);
+        }
+        yield { session: session.id, id: artifact.id, sha256: artifact.sha256, schema: artifact.schema,
+          body: workflowRecord(JSON.parse(bytes.toString('utf8').replace(/^\uFEFF/, '')), 'verification artifact') };
+      }
+    }
+  } finally { db.close(); }
 }
 
 export class WorkflowStore {
@@ -274,7 +329,7 @@ export class WorkflowStore {
     const session = this.find(id);
     if (!session) {
       if (existsSync(join(this.root, '.workflow', 'sessions', workflowId(id, 'Session ID')))) {
-        throw new InputError('Historical Session: use evolve session review or evolve closeout session to inspect pre-Evolve Sessions');
+        throw new InputError('Historical Session: use evolve session review or evolve kb harvest session to inspect pre-Evolve Sessions');
       }
       throw new InputError('Evolve Session not found: ' + id);
     }
@@ -480,15 +535,25 @@ export class WorkflowStore {
   }
 
   private runDir(id: string, runId: string) {
-    return join(this.root, '.agent-memory', 'workflow', 'runs', id, runId);
+    const target = evolvePath(this.root, 'runs', id, runId);
+    if (existsSync(target)) return target;
+    const legacy = join(resolve(this.root), LEGACY_AGENT_MEMORY_DIR, 'workflow', 'runs', id, runId);
+    return existsSync(legacy) ? legacy : target;
   }
 
   private packet(session: Session, run: Run) {
+    const knowledgeProfile = {
+      task: workflowName(run.task.command).replace(/^ew-/, ''),
+      ...(run.skill.wiki_categories?.length ? { categories: run.skill.wiki_categories } : {}),
+      ...(run.skill.search_profile?.wiki?.length ? { wiki: run.skill.search_profile.wiki } : {}),
+      ...(run.skill.search_profile?.memory?.length ? { memory_types: run.skill.search_profile.memory } : {}),
+    };
     return {
       session_id: session.id, run_id: run.id, run_dir: this.runDir(session.id, run.id),
       status: run.status, revision: run.revision, orchestration_revision: session.revision,
       task: { ...run.task, input_refs: run.inputs },
       skill_ref: run.skill, gates: run.skill.gates, upstream_aliases: run.input_aliases,
+      knowledge_profile: knowledgeProfile,
       upstream: Object.fromEntries(run.inputs.map(id => [id, session.artifacts[id]])),
       skill_reads: this.readProof(run), retry_of_run_id: run.retry_of_run_id,
       ...(session.boundary_contract ? { boundary_contract: session.boundary_contract } : {}),
@@ -587,7 +652,7 @@ export class WorkflowStore {
       const scopes = workflowRecord(JSON.parse(content), 'session-priors').lookup_scopes;
       const expected = JSON.stringify(wikiLookupScope(scope));
       if (!Array.isArray(scopes) || !scopes.some(item => JSON.stringify(wikiLookupScope(item)) === expected)) {
-        throw new InputError('Wiki scope is outside session-priors; use wiki_context in this Run');
+        throw new InputError('Wiki scope is outside session-priors; use evolve search --mode context in this Run');
       }
       transaction(this.db, () => {
         const latest = this.status(id);
@@ -610,23 +675,39 @@ export class WorkflowStore {
 
   private cliWikiPriors(session: Session, knowledge: KnowledgeReadsReceipt | undefined) {
     if (!knowledge || (!knowledge.constraints_bound.length && !knowledge.reads.some(item => item.kind === 'wiki'))) return;
-    const root = this.wikiRoot(session.id);
-    if (!existsSync(join(root, 'wiki'))) return;
-    const wiki = new Wiki(root);
+    const project = new Wiki(this.wikiRoot(session.id));
+    const global = new Wiki(evolveDir(homedir()));
     const priors: WikiPrior[] = [];
-    for (const bound of knowledge.constraints_bound) {
-      const page = wiki.getEntry(bound.knowledge_id);
-      if (page && contentSha256(page.body) === bound.content_sha256) {
-        priors.push(buildWikiPrior(page, 'constraint', {}, ''));
+    const scopeFrom = (filters: Record<string, unknown> = {}) => wikiLookupScope(Object.fromEntries(
+      Object.entries(filters).filter(([key]) => ['repository', 'task', 'paths', 'categories'].includes(key)),
+    ));
+    const pin = (id: string, hash: string | undefined, lookup: WikiLookupScope,
+      storageScope?: 'project' | 'global', checkScope = true, searchId = '') => {
+      const layers = storageScope === 'global' ? [global] : storageScope === 'project' ? [project] : [project, global];
+      const pages = layers.map(wiki => ({ page: wiki.getEntry(id), wiki })).filter(item => item.page);
+      const selected = pages.find(item => !hash || contentSha256(item.page!.body) === hash);
+      if (!selected) throw new InputError('Wiki evidence changed or disappeared during this Run: ' + id);
+      const page = selected.page!;
+      if (checkScope && page.entry && (page.entry.status !== 'active' || !appliesToContext(page.entry, lookup, page.body))) {
+        throw new InputError('Wiki evidence is no longer available in the recorded scope: ' + id);
       }
+      const prior = buildWikiPrior(page, page.entry?.mode === 'constraint' ? 'constraint' : 'reference', lookup, searchId);
+      return { ...prior, storage_scope: selected.wiki === global ? 'global' as const : 'project' as const };
+    };
+    for (const bound of knowledge.constraints_bound) {
+      priors.push(pin(bound.knowledge_id, bound.content_sha256, scopeFrom(bound.lookup_scope),
+        bound.storage_scope, bound.lookup_scope !== undefined));
     }
     for (const read of knowledge.reads) {
       if (read.kind !== 'wiki' || priors.some(item => item.id === read.id)) continue;
-      const page = wiki.getEntry(read.id);
-      if (!page) continue;
       const search = knowledge.searches.find(item => item.search_id === read.from_search_id);
-      const lookupScope = wikiLookupScope(search?.filters ?? {});
-      priors.push(buildWikiPrior(page, page.entry?.mode === 'constraint' ? 'constraint' : 'reference', lookupScope, read.from_search_id ?? ''));
+      if (search && (!['wiki', 'wiki_references', 'context'].includes(search.source) || !search.returned_ids.includes(read.id))) {
+        throw new InputError('Wiki read was not returned by its recorded search: ' + read.id);
+      }
+      const storageScope = search?.filters?.scope === 'project' || search?.filters?.scope === 'global'
+        ? search.filters.scope : undefined;
+      priors.push(pin(read.id, read.content_sha256, scopeFrom(search?.filters), storageScope,
+        search !== undefined, read.from_search_id ?? ''));
     }
     return priors.length ? priors : undefined;
   }
@@ -808,14 +889,28 @@ export class WorkflowStore {
       session.completed_at = new Date().toISOString();
       if (session.openviking) session.openviking.publication = { state: 'pending' };
       const completion = evolveSessionReceipt({ ...session, revision: session.revision + 1 });
-      return { status: session.status, completed_at: session.completed_at, completion_id: completion.id };
+      const evolveSignals = sessionEvolveSignals(session);
+      const closeoutCommand = `evolve kb harvest session ${session.id} --project <project-id>`;
+      const reviewCommand = `evolve session review ${session.id}`;
+      return {
+        status: session.status,
+        completed_at: session.completed_at,
+        completion_id: completion.id,
+        closeout_command: closeoutCommand,
+        evolve_reminder: evolveSignals.length > 0,
+        ...(evolveSignals.length > 0 ? { evolve_signals: evolveSignals, review_command: reviewCommand } : {}),
+        recommended_actions: [
+          closeoutCommand,
+          ...(evolveSignals.length > 0 ? [reviewCommand] : []),
+        ],
+      };
     });
   }
 
   team(id: string, runId: string, action: 'assign' | 'report' | 'cancel', assignment: Assignment, change: Mutation) {
     return this.mutate(id, 'team.' + action, change, { runId, assignment }, session => {
       const run = findRun(session, runId);
-      if (run.skill.skill_id !== 'team-swarm' || run.status !== 'running') throw new InputError('Select a running Swarm Run');
+      if (workflowName(run.skill.skill_id) !== 'ew-swarm' || run.status !== 'running') throw new InputError('Select a running Swarm Run');
       if (action !== 'report' && run.owner !== change.actor) throw new InputError('Use the Swarm coordinator identity');
       const taskId = workflowId(assignment.id, 'assignment ID');
       const roster = run.assignments ??= {};
@@ -850,7 +945,7 @@ export class WorkflowStore {
 
   swarmController(id: string, runId: string) {
     const run = this.brief(id, runId);
-    if (run.skill_ref.skill_id !== 'team-swarm' || run.status !== 'running') throw new InputError('Select a running Swarm Run');
+    if (workflowName(run.skill_ref.skill_id) !== 'ew-swarm' || run.status !== 'running') throw new InputError('Select a running Swarm Run');
     const work = join(run.run_dir, 'work');
     const target = join(work, 'controller');
     mkdirSync(target, { recursive: true });
@@ -870,6 +965,7 @@ export class WorkflowStore {
       const session = this.status(id);
       const run = findRun(session, runId);
       if (run.status !== 'running') throw new InputError('Select a running Run for knowledge reads');
+      if (safeFile(this.runDir(id, runId), 'knowledge-reads.json')) throw new InputError('Select a single Run knowledge receipt source');
       const trace = new KnowledgeReads(run.knowledge_reads);
       update(trace, prior => {
         const hash = contentSha256(prior.content);
