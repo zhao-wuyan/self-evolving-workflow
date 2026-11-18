@@ -31,7 +31,7 @@ const defaultCli = fileURLToPath(new URL('../../../dist/workflow-cli.js', import
 const selectedCli = resolve(root, option('--memory-cli', process.env.EVOLVE_CLI || process.env.AGENT_MEMORY_CLI || defaultCli));
 const memoryCli = /(?:^|[\\/])cli\.js$/i.test(selectedCli) && existsSync(join(dirname(selectedCli), 'workflow-cli.js'))
   ? join(dirname(selectedCli), 'workflow-cli.js') : selectedCli;
-const agy = option('--agy', 'agy');
+const agy = option('--agy', process.env.AGY_EXECUTABLE || 'agy');
 const maxRetries = Number(option('--max-retries', '1'));
 if (!Number.isInteger(maxRetries) || maxRetries < 0) throw new Error('--max-retries must be a non-negative integer');
 const historyFlags = ['--session', '--execution', '--history', '--review'].filter(name => has(name));
