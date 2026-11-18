@@ -32,7 +32,11 @@ const server = createServer(async (request, response) => {
   if (url.pathname === '/chat/completions') {
     if (state.model === 'error') return send(503, { error: 'model unavailable' });
     const source = input.messages[1].content.match(/evolve:[A-Za-z0-9_-]+#run-[A-Za-z0-9_-]+/)?.[0];
-    const content = state.model === 'signal' ? JSON.stringify([{ scene_name: 'workflow', memories: [
+    if (input.messages[0].content.startsWith('Suggest data-only replay inputs')) {
+      const content = JSON.stringify([{ source, input: { build: '00999', migrationApproved: false } }]);
+      return send(200, { choices: [{ message: { content } }] });
+    }
+    const content = ['signal', 'generated'].includes(state.model) ? JSON.stringify([{ scene_name: 'workflow', memories: [
       { type: 'workflow_issue', content: 'Deployment must check the migration gate before applying.', source_message_ids: [source] },
     ] }]) : '[]';
     return send(200, { choices: [{ message: { content } }] });

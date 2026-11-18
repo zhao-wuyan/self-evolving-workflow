@@ -296,8 +296,13 @@ test('completed Sessions survive model failure and finish recovers once without 
 
 test('automatic Session review drives business replay through the installed CLI boundary without local dependencies', async t => {
   const server = await protocol(t);
-  await server.update({ model: 'signal' });
+  await server.update({ model: 'generated' });
   const f = projectFixture(t, server, { driver: true }); childModel(f, server); fakeAgy(f);
+  f.write('tools/scenarios.json', JSON.stringify([
+    { id: 'approved', input: { build: '00123', migrationApproved: true }, baseline: true },
+    { id: 'prior-fixed-case', input: { build: '00234', migrationApproved: true }, baseline: false },
+  ]));
+  f.git('add', 'tools/scenarios.json'); f.git('commit', '-qm', '测试: 旧复现用例已通过');
   const base = await seed(f);
   assert.equal(existsSync(join(f.root, 'dist')), false); assert.equal(existsSync(join(f.root, 'node_modules')), false);
   f.open('evolution', 'sample'); completeSample(f, 'evolution', 'Deployment failed: the migration approval check was omitted');
@@ -310,6 +315,18 @@ test('automatic Session review drives business replay through the installed CLI 
   assert.match(f.git('show', 'HEAD:' + f.entry), /migration_approval/);
   const snapshot = join(f.root, '.agent-memory/openviking/jobs/evolution/knowledge');
   assert.equal(frozenKnowledgeHash(snapshot), readFileSync(join(snapshot, 'sha256'), 'utf8'));
+  const job = readFileSync(join(f.root, '.agent-memory/openviking/jobs/evolution/finish.json'), 'utf8');
+  const input = JSON.parse(job).scenario_inputs[f.entry];
+  assert.ok(input.sources.some(source => source.startsWith('evolve:evolution#')));
+  const scenarios = join(f.root, '.agent-memory/openviking/jobs/evolution', sha256(f.entry) + '-evolution', 'scenarios.json');
+  const validated = JSON.parse(f.git('show', 'HEAD:tools/scenarios.json'));
+  assert.equal(validated.length, 2);
+  assert.equal(sha256(readFileSync(scenarios)), input.sha256);
+  const proofPath = join(f.git('rev-parse', '--absolute-git-dir'), 'evolve-validations', release.verification.validation_id + '.json');
+  const proof = JSON.parse(readFileSync(proofPath, 'utf8'));
+  assert.equal(proof.targets[0].scenarios_sha256, input.sha256);
+  assert.ok(proof.targets[0].observations.some(item => item.id.startsWith('repro-')));
+  assert.equal((await server.inspect()).calls.filter(call => call.input?.messages?.[0]?.content.startsWith('Suggest data-only replay inputs')).length, 1);
 });
 
 test('Agy rejection, foreign evidence and post-apply runner failures never advance the remote pointer', async t => {
@@ -394,6 +411,61 @@ test('init commits only the profile and missing bundled Skills, and remains expl
   assert.ok(manifest.files.some(file => file.path === 'skills/workflow-evolve/scripts/evolve-loop.mjs'));
   assert.equal(f.evolve('openviking', 'init', '--policy', 'evolution.json').head.release_id, initialized.head.release_id);
   assert.equal(f.evolve('openviking', 'config', '--enabled', 'false').backend, 'local');
+});
+
+test('empty default policy syncs approved knowledge without a model or Skill replay', async t => {
+  const server = await protocol(t);
+  const f = projectFixture(t, server, { profile: false, minimalSkills: true });
+  f.git('rm', 'evolution.json'); f.git('commit', '-qm', '测试: 不预置演进策略');
+  const initial = f.evolve('openviking', 'init', '--project-id', f.project.project_id);
+  assert.equal(existsSync(join(f.root, 'evolution.json')), false);
+  assert.equal(initial.project.evolution_policy, '.evolve/evolution.json');
+  assert.deepEqual(JSON.parse(f.git('show', 'HEAD:.evolve/evolution.json')), {
+    schema_version: 'evolve-openviking-policy/1.0', targets: [],
+  });
+  assert.deepEqual(f.evolve('openviking', 'policy'), { mode: 'sync', path: '.evolve/evolution.json', targets: [] });
+  f.open('sync-only', 'sample'); completeSample(f, 'sync-only');
+  const local = new MemoryStore(defaultMemoryDbPath(f.root));
+  await local.put({ id: 'sync-note', content: 'Share the deployment checklist.' }); local.close();
+  selectMemory(f.root, 'sync-note', 'share');
+  const result = f.sealSession('sync-only');
+  const release = await loadRelease(f.client, f.project, result.asset_publication.published_release);
+  const original = await loadRelease(f.client, f.project, initial.head.release_id);
+  assert.equal(release.verification.kind, 'knowledge');
+  assert.deepEqual(release.verification.replay_ids, []);
+  assert.deepEqual(release.files.filter(file => file.path.startsWith('skills/')), original.files);
+  assert.equal(release.memory[0].origin_id, 'sync-note');
+
+  f.open('reject-skill', 'sample'); completeSample(f, 'reject-skill');
+  f.write('skills/sample/unverified.txt', 'Never published');
+  f.git('add', '--', 'skills/sample/unverified.txt'); f.git('commit', '-qm', '测试: 未验证 Skill 变更');
+  const extra = new MemoryStore(defaultMemoryDbPath(f.root));
+  await extra.put({ id: 'next-note', content: 'An approved follow-up.' }); extra.close();
+  selectMemory(f.root, 'next-note', 'share');
+  assert.throws(() => f.sealSession('reject-skill'));
+  assert.equal(f.status('reject-skill').openviking.publication.error, 'OPENVIKING_UNVERIFIED_SKILL_CHANGES');
+  assert.equal((await readProjectHead(f.client, f.project)).head.release_id, result.asset_publication.published_release);
+});
+
+test('Agent policy preview binds the committed replay inputs and cannot apply after HEAD changes', async t => {
+  const server = await protocol(t);
+  const f = projectFixture(t, server, { profile: false, minimalSkills: true });
+  f.git('rm', 'evolution.json'); f.git('commit', '-qm', '测试: 由 Agent 管理策略');
+  const initial = f.evolve('openviking', 'init', '--project-id', f.project.project_id);
+  const args = ['openviking', 'policy', '--entry', f.entry, '--runner', 'tools/replay.mjs', '--scenarios', 'tools/scenarios.json'];
+  const before = f.git('rev-parse', 'HEAD');
+  const preview = f.evolve(...args);
+  assert.equal(preview.status, 'preview');
+  assert.equal(f.git('rev-parse', 'HEAD'), before);
+  assert.equal(existsSync(join(f.root, 'evolution.json')), false);
+  f.git('commit', '--allow-empty', '-qm', '测试: 预览后更新 HEAD');
+  assert.throws(() => f.evolve(...args, '--apply', preview.preview_id), error => /OPENVIKING_POLICY_PREVIEW_STALE/.test(error.stderr));
+  const apply = f.evolve(...args, '--apply', f.evolve(...args).preview_id);
+  assert.equal(apply.status, 'applied');
+  assert.equal(f.git('diff-tree', '--no-commit-id', '--name-only', '-r', apply.commit), '.evolve/evolution.json');
+  assert.equal(f.evolve(...args).status, 'unchanged');
+  assert.equal(f.evolve('openviking', 'policy').targets[0].entry, f.entry);
+  assert.equal((await readProjectHead(f.client, f.project)).head.release_id, initial.head.release_id);
 });
 
 test('merged Skill trees are replayed on the frozen knowledge before their release can become current', async t => {

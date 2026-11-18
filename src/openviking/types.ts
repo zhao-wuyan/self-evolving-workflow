@@ -6,7 +6,7 @@ export interface OpenVikingProject {
   account_id: string;
   user_id: string;
   root_uri: string;
-  evolution_policy: string;
+  evolution_policy?: string;
   enabled?: boolean;
   failure_policy?: 'local' | 'fail';
 }

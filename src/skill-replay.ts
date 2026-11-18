@@ -565,7 +565,7 @@ export function changeSkillVersion(root: string, id: string, rollback = false) {
   return { id, commit: gitText(root, ['rev-parse', 'HEAD']), replayed: false };
 }
 
-export function verifySkillCommit(root: string, commit: string, targets: readonly EvolutionTarget[], knowledgeSnapshot: string) {
+function observeSkillCommit(root: string, commit: string, targets: readonly EvolutionTarget[], knowledgeSnapshot: string, verify: boolean, inputs?: unknown) {
   root = repoRoot(root);
   if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit)) throw new InputError('Invalid candidate commit');
   const knowledge_sha256 = frozenKnowledgeHash(knowledgeSnapshot);
@@ -584,33 +584,42 @@ export function verifySkillCommit(root: string, commit: string, targets: readonl
       const runner = realpathSync(join(root, target.runner));
       const scenarioPath = join(root, target.scenarios);
       const runner_sha256 = sha256(readFileSync(runner));
-      const scenarioBytes = readFileSync(scenarioPath);
-      const scenarios = loadScenarios(JSON.parse(scenarioBytes.toString('utf8')));
+      const scenarioBytes = inputs === undefined ? readFileSync(scenarioPath) : undefined;
+      const scenarios = loadScenarios(scenarioBytes ? JSON.parse(scenarioBytes.toString('utf8')) : inputs);
       const packagePath = dirname(target.entry).replaceAll('\\', '/');
       const observations = scenarios.map(scenario => {
-        const payload = { id: scenario.id, input: scenario.input, entry: target.entry, package_path: packagePath, commit, mode: 'package' };
+        const payload = { id: scenario.id, input: scenario.input, entry: target.entry, commit,
+          ...(verify ? { package_path: packagePath, mode: 'package' } : {}) };
         const observed = observe(scenario, () => runOnce(worktree, commit, runner, payload, packagePath, target.entry, true));
-        if (!observed.passed) throw new InputError('Merged Skill validation failed: ' + scenario.id);
-        assertKnowledgeReads(observed, scenario.knowledgeReads, scenario.id);
+        if (verify && !observed.passed) throw new InputError('Merged Skill validation failed: ' + scenario.id);
+        if (observed.passed) assertKnowledgeReads(observed, scenario.knowledgeReads, scenario.id);
         return { id: scenario.id, input_sha256: sha256(JSON.stringify(scenario.input)), ...observed };
       });
-      if (sha256(readFileSync(runner)) !== runner_sha256 || !readFileSync(scenarioPath).equals(scenarioBytes)) throw new InputError('Validation inputs changed');
-      return { entry: target.entry, runner_sha256, scenarios_sha256: sha256(scenarioBytes), observations };
+      if (sha256(readFileSync(runner)) !== runner_sha256 || scenarioBytes && !readFileSync(scenarioPath).equals(scenarioBytes)) throw new InputError('Validation inputs changed');
+      return { entry: target.entry, runner_sha256, scenarios_sha256: scenarioBytes && sha256(scenarioBytes), observations };
     });
     if (frozenKnowledgeHash(knowledgeSnapshot) !== knowledge_sha256) throw new InputError('OPENVIKING_FROZEN_KNOWLEDGE_CHANGED');
-    const proof = { commit, knowledge_sha256, targets: results };
-    const content = JSON.stringify(proof);
-    const id = sha256(content);
-    const path = join(gitText(root, ['rev-parse', '--absolute-git-dir']), 'evolve-validations', id + '.json');
-    mkdirSync(dirname(path), { recursive: true });
-    if (existsSync(path)) { if (readFileSync(path, 'utf8') !== content) throw new InputError('Validation receipt changed'); }
-    else writeFileSync(path, content, { flag: 'wx' });
-    git(root, ['update-ref', 'refs/evolve/validations/' + id, commit]);
-    return { id, ...proof };
+    return { commit, knowledge_sha256, targets: results };
   } finally {
     if (previousSnapshot === undefined) delete process.env.EVOLVE_KNOWLEDGE_SNAPSHOT; else process.env.EVOLVE_KNOWLEDGE_SNAPSHOT = previousSnapshot;
     if (previousDb === undefined) delete process.env.AGENT_MEMORY_DB; else process.env.AGENT_MEMORY_DB = previousDb;
     if (added) git(root, ['worktree', 'remove', '--force', worktree]);
     rmSync(scratch, { recursive: true, force: true });
   }
+}
+
+export function probeSkillBaseline(root: string, commit: string, target: EvolutionTarget, knowledgeSnapshot: string, scenarios: unknown) {
+  return observeSkillCommit(root, commit, [target], knowledgeSnapshot, false, scenarios).targets[0].observations;
+}
+
+export function verifySkillCommit(root: string, commit: string, targets: readonly EvolutionTarget[], knowledgeSnapshot: string) {
+  const proof = observeSkillCommit(root, commit, targets, knowledgeSnapshot, true);
+  const content = JSON.stringify(proof);
+  const id = sha256(content);
+  const path = join(gitText(root, ['rev-parse', '--absolute-git-dir']), 'evolve-validations', id + '.json');
+  mkdirSync(dirname(path), { recursive: true });
+  if (existsSync(path)) { if (readFileSync(path, 'utf8') !== content) throw new InputError('Validation receipt changed'); }
+  else writeFileSync(path, content, { flag: 'wx' });
+  git(root, ['update-ref', 'refs/evolve/validations/' + id, commit]);
+  return { id, ...proof };
 }
