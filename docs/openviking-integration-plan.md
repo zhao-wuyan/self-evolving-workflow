@@ -21,6 +21,7 @@ evolve openviking status
 ```
 
 - 首次初始化默认使用 `.evolve/evolution.json`，缺失时生成 `targets: []` 的空策略。空策略只同步资产，不发布 Skill 改动。已有策略可用 `init --policy <file>` 显式绑定；也可让 Agent 用 `evolve openviking policy` 预览，确认后提交策略。
+- 首个资产版本只包含与审批记录一致的 Wiki 条目。刚迁移或尚未审批的条目留在原项目，不阻塞 `init`；CLI 的 `local_only_wiki` 列出这些条目的 ID。要纳入后续版本，先审阅并应用对应 Wiki 变更。
 - `.evolve/openviking.json` 和 `.evolve/evolution.json` 由 Git 追踪；`.evolve/` 下的其他运行产物仍忽略。连接凭据不进 Git。
 - Session 完成后，CLI 根据 Run 证据准备并冻结本轮用例；无法复现则不发布 Skill 改动。用例和回执不进入 Git。
 - 连接只读取绝对路径环境变量 `EVOLVE_OPENVIKING_CONFIG` 指定的文件，或 `~/.openviking/ovcli.conf` 的 `url`、`api_key`。项目描述不保存凭据。

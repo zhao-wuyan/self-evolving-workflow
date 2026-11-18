@@ -413,6 +413,32 @@ test('init commits only the profile and missing bundled Skills, and remains expl
   assert.equal(f.evolve('openviking', 'config', '--enabled', 'false').backend, 'local');
 });
 
+test('init keeps migrated Wiki local until an explicit approval is published', async t => {
+  const server = await protocol(t);
+  const f = projectFixture(t, server, { profile: false, minimalSkills: true });
+  f.write('.workflow/knowhow/migration.md', '---\ntitle: Legacy deployment checklist\n---\n\nCheck the legacy deployment window.\n');
+  const { entries: [migrated] } = f.evolve('kb', 'import', '--project', 'legacy-project', '--apply');
+  const entry = `entries/${migrated.id}`;
+  const localFile = join(f.root, 'wiki', `${entry}.md`);
+  const original = readFileSync(localFile);
+  approve(new Wiki(f.root), 'entries/approved', 'Publish only after review.');
+
+  const initial = f.evolve('openviking', 'init', '--project-id', f.project.project_id);
+  const bootstrap = await loadRelease(f.client, f.project, initial.head.release_id);
+  assert.deepEqual(initial.local_only_wiki, [entry]);
+  assert.deepEqual(bootstrap.wiki.map(item => item.entry), ['entries/approved']);
+  assert.equal(bootstrap.files.some(file => file.path === `wiki/${entry}.md`), false);
+  assert.deepEqual(readFileSync(localFile), original);
+  assert.deepEqual(f.evolve('kb', 'changes', '--entry', entry), []);
+
+  f.open('publish-migrated', 'sample'); completeSample(f, 'publish-migrated');
+  const proposal = f.evolve('kb', 'update', entry, '--evidence', 'fixture:reviewed-legacy-checklist');
+  f.evolve('kb', 'apply', proposal.id);
+  const result = f.sealSession('publish-migrated');
+  const release = await loadRelease(f.client, f.project, result.asset_publication.published_release);
+  assert.equal(release.wiki.find(item => item.entry === entry).approval.id, proposal.id);
+});
+
 test('empty default policy syncs approved knowledge without a model or Skill replay', async t => {
   const server = await protocol(t);
   const f = projectFixture(t, server, { profile: false, minimalSkills: true });

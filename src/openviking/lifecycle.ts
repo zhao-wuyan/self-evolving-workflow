@@ -67,7 +67,7 @@ export async function initializeProject(root: string, policyPath?: string, proje
         acknowledgeKnowledge(root, consumed.wiki, consumed.memory);
         saveJob(join(folder, 'published.json'), head);
         saveJob(join(root, '.agent-memory', 'openviking', 'materialized.json'), { release_id: sha256(manifestBytes(manifest)), files: manifest.files.filter(file => file.path.startsWith('skills/')) });
-        return { project: existing, head, existing: true, recovered: true };
+        return { project: existing, head, existing: true, recovered: true, local_only_wiki: consumed.local_only_wiki as string[] | undefined };
       });
     }
     const { head } = await readProjectHead(client, existing);
@@ -136,14 +136,14 @@ export async function initializeProject(root: string, policyPath?: string, proje
     for (const [path, body] of skills.bytes) {
       const file = join(folder, 'assets', path); mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, body);
     }
-    saveJob(join(folder, 'knowledge.json'), { wiki: wiki.consumed, memory: memory.consumed });
+    saveJob(join(folder, 'knowledge.json'), { wiki: wiki.consumed, memory: memory.consumed, local_only_wiki: wiki.localOnly });
     saveJob(join(folder, 'manifest.json'), manifest);
     await ensureDirectory(client, project.root_uri);
     const head = await publishRelease(client, project, manifest, skills.bytes, null);
     acknowledgeKnowledge(root, wiki.consumed, memory.consumed);
     saveJob(join(folder, 'published.json'), head);
     saveJob(join(root, '.agent-memory', 'openviking', 'materialized.json'), { release_id: head.release_id, files: skills.files });
-    return { project, head, existing: false, skill_commit: commit };
+    return { project, head, existing: false, skill_commit: commit, local_only_wiki: wiki.localOnly };
   });
 }
 
