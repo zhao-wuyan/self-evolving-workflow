@@ -51,11 +51,17 @@ export function exportWiki(root: string, base?: ProjectManifest, initial?: Recor
   const entries = new Map((base?.wiki ?? []).map(item => [item.entry, item]));
   const bodies = new Map<string, Buffer>();
   const consumed: WikiPublication['changes'] = {};
+  const localOnly: string[] = [];
   for (const page of readWikiPages(root, true)) {
     const bytes = readFileSync(join(root, page.path));
     const content = bytes.toString('utf8');
     const hash = sha256(bytes);
     const applied = listWikiChanges(wiki, { entry: page.id }).filter(change => change.state === 'applied' && change.after === content).at(-1);
+    // 首次发布只纳入已审批的条目；本地迁移并不授权上传。
+    if (!base && !applied) {
+      localOnly.push(page.id);
+      continue;
+    }
     const original = base?.wiki.find(item => item.entry === page.id);
     const originalFile = base?.files.find(item => item.path === original?.path);
     if (applied && originalFile?.sha256 === hash && original?.approval.id === applied.id) {
@@ -78,7 +84,7 @@ export function exportWiki(root: string, base?: ProjectManifest, initial?: Recor
       if (!existsSync(join(root, 'wiki', entry + '.md'))) throw new InputError('OPENVIKING_WIKI_UNAPPROVED: use retire, not physical deletion');
     }
   }
-  return { wiki: [...entries.values()], bodies, consumed };
+  return { wiki: [...entries.values()], bodies, consumed, localOnly };
 }
 export function exportMemory(root: string, base?: ProjectManifest) {
   const path = join(root, '.agent-memory', 'openviking', 'share.json');
