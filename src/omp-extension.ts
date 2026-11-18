@@ -4,6 +4,7 @@ import { InputError, requireText } from './common.js';
 import { KnowledgeReads } from './knowledge-reads.js';
 import { knowledgeSourceFingerprint, openKnowledgeSources, type KnowledgeSources } from './knowledge-sources.js';
 import { registerOmpExperience } from './omp-experience.js';
+import { registerOmpIgnore } from './omp-ignore.js';
 import { registerOmpMigration } from './omp-migrate.js';
 import { registerOmpOpenViking } from './omp-openviking.js';
 import { registerOmpStatus } from './omp-status.js';
@@ -34,6 +35,7 @@ function latestAssociation(ctx: OmpContext, store: WorkflowStore): HostKnowledge
 
 export default function ompExtension(api: OmpExtensionApi) {
   registerOmpExperience(api);
+  registerOmpIgnore(api);
   registerOmpMigration(api);
   registerOmpOpenViking(api);
   registerOmpStatus(api);

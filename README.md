@@ -108,6 +108,8 @@ omp plugin install .
 
 `/evolve-status` 不带参数即可查看当前项目的 Session / 最近 Run、Skill 安装情况、OpenViking 本地配置和个人经验采集状态。只读取，不初始化项目，也不探测远端。
 
+在 OMP 输入 `/evolve-ignore`，从当前目录找到 Git 仓库根目录，仅补齐 `.gitignore` 对 `/.evolve/`、`/.agent-memory/` 和 `/.codegraph/` 的忽略规则。用 `/evolve-ignore --check` 只检查，不写入。命令保留已有规则，不暂存或提交；如果目录中有已跟踪的文件，只提示，不取消跟踪。
+
 要启用 **项目资产同步**，在目标仓库根目录执行 `/evolve-openviking init [策略文件]`（默认 `evolution.json`）。先提交策略、回放脚本与场景文件，并配置下文的 OpenViking 服务。命令会显示目标仓库、服务和策略，确认后才创建项目 Git 基线并向服务发布首个资产版本。只用个人经验库不需要执行此命令。
 
 插件不会自动安装 Skills。显式调用 `evolve_workflow`，传入 `{"argv":["skill","install","--scope","project","--yes"]}`，再将项目 `skills/` 与 `AGENTS.md` 提交到 Git。已有副本默认保留，`kept_sources` 会报告路径、版本和包内容哈希。
