@@ -73,6 +73,10 @@ omp plugin link /path/to/self-evolving-workflow
 
 在 OMP 输入 `/evolve-experience` 查看中文帮助。你也可以直接告诉 Agent「整理待发布个人经验，给出建议后统一提交确认」，无需逐条输入命令。Agent 会用 `evolve_experience_pending` 读取候选，说明建议，再用 `evolve_experience_publish` 发起一次预览和确认；取消不会发布。手动也可以用 `/evolve-experience publish <候选 ID> [更多候选 ID]`。发布逐条校验，遇到变化或失败会停止并报告进度。两种入口均无需另装全局 `evolve`。
 
+在目标项目的 OMP 会话输入 `/evolve-migrate [--knowhow-only] [旧项目目录]`，即可预览 Maestro Flow 的旧 Spec / Knowhow，确认后写入当前项目 Wiki。省略来源时使用当前项目，不修改旧文件，不转换旧 Session、Run 或工作流产物。
+
+`/evolve-status` 不带参数即可查看当前项目的 Session / 最近 Run、Skill 安装情况、OpenViking 本地配置和个人经验采集状态。只读取，不初始化项目，也不探测远端。
+
 插件不会自动安装 Skills。显式调用 `evolve_workflow`，传入 `{"argv":["skill","install","--scope","project","--yes"]}`，再将项目 `skills/` 与 `AGENTS.md` 提交到 Git。已有副本默认保留，`kept_sources` 会报告路径、版本和包内容哈希。
 
 宿主证据记录在项目 `.evolve/workflow.db` 的独立表（旧项目沿用原有数据库），OMP 会话分支仅保存关联 ID。绑定前的读取不会补记进 Run，同一个 Run 不混用文件回执与进程内回执。OpenViking release 在当前知识范围内固定；配置变更后须先 `reset`，再绑定和搜索。
