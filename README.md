@@ -86,7 +86,7 @@ evolve skill workflows show ew-impeccable
 
 本地工作流不需要 OpenViking。启用共享前，先在 `~/.openviking/ovcli.conf` 配置服务的 `url` 与 `api_key`，不要提交凭据。没有服务时，参照 [OpenViking 部署指南](https://docs.openviking.ai/en/getting-started/04-setup-for-agent)。
 
-**共享项目 Skill、Wiki 和记忆**：先提交策略文件及其引用的回放脚本和场景，在仓库根目录运行 `evolve openviking init --policy evolution.json`。详见[项目资产接入说明](docs/openviking-integration-plan.md#可拔插后端与故障策略)。
+**共享项目 Skill、Wiki 和记忆**：在仓库根目录运行 `evolve openviking init`。首次会准备 `.evolve/evolution.json`，空策略只同步，不自动演进 Skill。详见[项目资产接入说明](docs/openviking-integration-plan.md#可拔插后端与故障策略)。
 
 ### OpenViking 个人经验库（可选）
 
@@ -100,7 +100,7 @@ evolve experience disable   # 停止采集，不删除已发布经验
 
 采集默认关闭，候选经验须经确认才发布。详见[经验检索](skills/ew-knowledge/references/knowledge-route.md#个人跨项目经验可选)和[审阅发布](skills/ew-knowledge/references/closeout-protocol.md#个人跨项目经验审阅)。
 
-项目 Skill、引导文件和审阅后的 Wiki 可以提交；运行产物和凭据留在本地。
+项目 Skill、引导文件、审阅后的 Wiki 和 OpenViking 项目配置可以提交；运行产物和凭据留在本地。
 
 ## 迁移与开发
 

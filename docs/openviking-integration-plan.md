@@ -13,13 +13,16 @@
 没有 `.evolve/openviking.json` 时保持原本地模式，不读取 OpenViking 凭据，也不增加网络或模型调用。显式初始化后启用远端：
 
 ```bash
-evolve openviking init --policy evolution.json
+evolve openviking init
 evolve openviking config --enabled false
 evolve openviking config --enabled true --failure-policy local
 evolve openviking config --failure-policy fail
 evolve openviking status
 ```
 
+- 首次初始化默认使用 `.evolve/evolution.json`，缺失时生成 `targets: []` 的空策略。空策略只同步资产，不发布 Skill 改动。已有策略可用 `init --policy <file>` 显式绑定；也可让 Agent 用 `evolve openviking policy` 预览，确认后提交策略。
+- `.evolve/openviking.json` 和 `.evolve/evolution.json` 由 Git 追踪；`.evolve/` 下的其他运行产物仍忽略。连接凭据不进 Git。
+- Session 完成后，CLI 根据 Run 证据准备并冻结本轮用例；无法复现则不发布 Skill 改动。用例和回执不进入 Git。
 - 连接只读取绝对路径环境变量 `EVOLVE_OPENVIKING_CONFIG` 指定的文件，或 `~/.openviking/ovcli.conf` 的 `url`、`api_key`。项目描述不保存凭据。
 - `enabled: false` 关闭新查询与新 Session 的远端接入；默认 `failure_policy: local` 在服务不可达、服务端故障或限流时显式回退本地。`fail` 要求远端可用。响应中的 `knowledge_backend` 标明实际后端和回退原因。
 - 已固定远端版本的 Session 不切换 Skill 或 Wiki 约束；优先使用该版本的已验证缓存。远端 Memory 的 `ov:<release>:<origin>` ID 不映射成本地同名记录，缓存缺失时明确失败。

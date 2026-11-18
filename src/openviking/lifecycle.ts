@@ -17,7 +17,9 @@ import { downloadAsset, loadRelease, manifestBytes, publishRelease, readProjectH
 import { acknowledgeKnowledge, cacheRelease, exportMemory, exportWiki, fileRecord, sourceWikiHashes, type WikiPublicationChanges, type MemorySelection } from './knowledge.js';
 import { applyAssetCommit, assertCleanIndex, assertManagedClean, createAssetCommit, gitBytes, gitText, skillAssets } from './git.js';
 import { freezeKnowledge, frozenKnowledgeHash } from './frozen.js';
+import { frozenScenarioTarget, prepareEvolutionScenarios, type FrozenScenarios } from './evolution-scenarios.js';
 import { mergeProjectAssets } from './merge.js';
+import { defaultEvolutionPolicyPath, requireCommittedPolicyFiles } from './policy.js';
 import type { AssetFile, EvolutionTarget, OpenVikingProject, ProjectManifest } from './types.js';
 
 const bundle = fileURLToPath(new URL('../../', import.meta.url));
@@ -46,11 +48,14 @@ async function locked<T>(folder: string, action: () => Promise<T>): Promise<T> {
   }
 }
 
-export async function initializeProject(root: string, policyPath: string, projectId?: string) {
+export async function initializeProject(root: string, policyPath?: string, projectId?: string) {
   const client = new OpenVikingClient();
   const existing = readProject(root);
   if (existing) {
-    readPolicy(root, existing.evolution_policy);
+    if (policyPath !== undefined && workflowPath(policyPath) !== existing.evolution_policy) {
+      throw new InputError('OPENVIKING_POLICY_BINDING_MISMATCH: use openviking policy to manage targets');
+    }
+    if (existing.evolution_policy) readPolicy(root, existing.evolution_policy);
     const folder = join(root, '.agent-memory', 'openviking', 'jobs', 'init-' + existing.project_id);
     if (existsSync(join(folder, 'manifest.json')) && !existsSync(join(folder, 'published.json'))) {
       return locked(folder, async () => {
@@ -70,10 +75,13 @@ export async function initializeProject(root: string, policyPath: string, projec
   }
   const base = workflowHead(root);
   assertManagedClean(root);
-  const policy = readPolicy(root, policyPath);
-  for (const path of [policyPath, ...policy.targets.flatMap(target => [target.runner, target.scenarios])]) {
-    gitBytes(root, ['ls-files', '--error-unmatch', '--', workflowPath(path)]);
-    if (gitText(root, ['status', '--porcelain', '--', path])) throw new InputError('OPENVIKING_POLICY_NOT_COMMITTED');
+  const createPolicy = policyPath === undefined &&
+    !lstatSync(join(root, defaultEvolutionPolicyPath), { throwIfNoEntry: false }) &&
+    !gitText(root, ['ls-files', '--', defaultEvolutionPolicyPath]);
+  policyPath = workflowPath(policyPath ?? defaultEvolutionPolicyPath);
+  if (!createPolicy) {
+    const policy = readPolicy(root, policyPath);
+    requireCommittedPolicyFiles(root, [policyPath, ...policy.targets.flatMap(target => [target.runner, target.scenarios])]);
   }
   const repositories = [...new Set(readWikiPages(root, true).flatMap(page => page.entry?.repositories ?? []))];
   if (!projectId && repositories.length > 1) throw new InputError('OPENVIKING_PROJECT_ID_REQUIRED');
@@ -81,7 +89,7 @@ export async function initializeProject(root: string, policyPath: string, projec
   const id = projectId ?? repositories[0] ?? randomUUID();
   const project: OpenVikingProject = { schema_version: 'evolve-openviking-project/1.0', project_id: id,
     account_id: health.account_id, user_id: health.user_id, root_uri: privateProjectUri(health.user_id, id),
-    evolution_policy: workflowPath(policyPath), enabled: true, failure_policy: 'local' };
+    evolution_policy: policyPath, enabled: true, failure_policy: 'local' };
   const folder = join(root, '.agent-memory', 'openviking', 'jobs', 'init-' + id);
   return locked(folder, async () => {
     const wiki = exportWiki(root);
@@ -102,11 +110,18 @@ export async function initializeProject(root: string, policyPath: string, projec
     for (const name of installed.installed) walk('skills/' + name);
     const descriptor = Buffer.from(JSON.stringify(project, null, 2) + '\n');
     added.push(fileRecord('.evolve/openviking.json', descriptor)); bodies.set('.evolve/openviking.json', descriptor);
+    if (createPolicy) {
+      const emptyPolicy = Buffer.from(JSON.stringify({ schema_version: 'evolve-openviking-policy/1.0', targets: [] }, null, 2) + '\n');
+      added.push(fileRecord(defaultEvolutionPolicyPath, emptyPolicy)); bodies.set(defaultEvolutionPolicyPath, emptyPolicy);
+    }
     const commit = createAssetCommit(root, base, added, bodies, [], 'chore: 建立 OpenViking 项目资产基线');
     // 新安装包属于本次操作；仅移除逐字节未变的临时副本，让 Git 安全地创建跟踪文件。
     for (const file of added.filter(file => file.path.startsWith('skills/'))) {
       if (!readFileSync(join(root, file.path)).equals(bodies.get(file.path)!)) throw new InputError('OPENVIKING_LOCAL_CHANGED');
       rmSync(join(root, file.path));
+    }
+    if (createPolicy && lstatSync(join(root, defaultEvolutionPolicyPath), { throwIfNoEntry: false })) {
+      throw new InputError('OPENVIKING_LOCAL_CHANGED: ' + defaultEvolutionPolicyPath);
     }
     applyAssetCommit(root, base, commit);
     const skills = skillAssets(root, commit);
@@ -218,6 +233,7 @@ interface FinishJob {
   resolved_against?: string;
   created_at: string; base_release: string; base_commit: string; local_head: string;
   review?: { session: string; evidence: number; runs: ReviewedRun[]; signals: SkillSignal[] };
+  scenario_inputs?: Record<string, FrozenScenarios>;
   candidate_commit?: string; replay_ids: string[]; validation_id?: string;
   manifest?: ProjectManifest; expected_head?: string;
   wiki_consumed?: WikiPublicationChanges;
@@ -261,28 +277,31 @@ export async function finishSession(root: string, store: WorkflowStore, id: stri
       const baseBytes = new Map<string, Buffer>();
       for (const file of base.files) baseBytes.set(file.path, file.path.startsWith('memory/')
         ? await downloadAsset(client, project, file) : readFileSync(join(cache, 'assets', file.path)));
-      if (!job.review) {
-        job.review = await reviewSession(root, id, { model: () => createModelClient(root) }); saveJob(path, job);
-      }
-      const policy = readPolicy(root, project.evolution_policy);
-      for (const path of [project.evolution_policy, ...policy.targets.flatMap(target => [target.runner, target.scenarios])]) {
-        gitBytes(root, ['ls-files', '--error-unmatch', '--', path]);
-        if (gitText(root, ['status', '--porcelain', '--', path])) throw new InputError('OPENVIKING_POLICY_NOT_COMMITTED');
-      }
-      const policyHash = sha256(stableJson([project.evolution_policy, ...policy.targets.flatMap(target => [target.runner, target.scenarios])]
-        .map(path => [path, sha256(readFileSync(join(root, path)))])));
-      if (job.policy_sha256 && job.policy_sha256 !== policyHash) throw new InputError('OPENVIKING_POLICY_CHANGED');
-      job.policy_sha256 = policyHash; saveJob(path, job);
-      const signals = job.review.signals.filter(signal => ['correction', 'error', 'retry', 'verified_fix', 'workflow_issue'].includes(signal.kind));
+      const policyPath = project.evolution_policy;
+      const policy = policyPath && readPolicy(root, policyPath);
+      const evolutionTargets = policy ? policy.targets : [];
       const targetSignals = new Map<string, SkillSignal[]>();
-      for (const signal of signals) {
-        const runs = job.review.runs.filter(run => signal.runIds.includes(run.id) && run.skillRef && run.skillReads?.files.some(file => file.path === run.skillRef!.entry));
-        const sources = new Set(runs.flatMap(run => [run.source, run.skillReads?.source, run.knowledgeReads?.source, run.retryOf ? run.source + ':retry' : undefined]).filter(Boolean));
-        if (!runs.length || signal.sources.some(source => !sources.has(source))) throw new InputError('OPENVIKING_SIGNAL_SOURCE_INVALID');
-        for (const run of runs) {
-          const entry = `${run.skillRef!.package_path}/${run.skillRef!.entry}`;
-          if (!policy.targets.some(target => target.entry === entry)) throw new InputError('OPENVIKING_EVOLUTION_TARGET_MISSING: ' + entry);
-          targetSignals.set(entry, [...targetSignals.get(entry) ?? [], signal]);
+      if (policyPath) {
+        const inputs = [policyPath, ...evolutionTargets.flatMap(target => [target.runner, target.scenarios])];
+        requireCommittedPolicyFiles(root, inputs);
+        const policyHash = sha256(stableJson(inputs.map(path => [path, sha256(readFileSync(join(root, path)))])));
+        if (job.policy_sha256 && job.policy_sha256 !== policyHash) throw new InputError('OPENVIKING_POLICY_CHANGED');
+        job.policy_sha256 = policyHash; saveJob(path, job);
+      } else if (job.policy_sha256) throw new InputError('OPENVIKING_POLICY_CHANGED');
+      if (evolutionTargets.length) {
+        if (!job.review) {
+          job.review = await reviewSession(root, id, { model: () => createModelClient(root) }); saveJob(path, job);
+        }
+        const signals = job.review.signals.filter(signal => ['correction', 'error', 'retry', 'verified_fix', 'workflow_issue'].includes(signal.kind));
+        for (const signal of signals) {
+          const runs = job.review.runs.filter(run => signal.runIds.includes(run.id) && run.skillRef && run.skillReads?.files.some(file => file.path === run.skillRef!.entry));
+          const sources = new Set(runs.flatMap(run => [run.source, run.skillReads?.source, run.knowledgeReads?.source, run.retryOf ? run.source + ':retry' : undefined]).filter(Boolean));
+          if (!runs.length || signal.sources.some(source => !sources.has(source))) throw new InputError('OPENVIKING_SIGNAL_SOURCE_INVALID');
+          for (const run of runs) {
+            const entry = `${run.skillRef!.package_path}/${run.skillRef!.entry}`;
+            if (!evolutionTargets.some(target => target.entry === entry)) throw new InputError('OPENVIKING_EVOLUTION_TARGET_MISSING: ' + entry);
+            targetSignals.set(entry, [...targetSignals.get(entry) ?? [], signal]);
+          }
         }
       }
       const knowledgePath = join(folder, 'knowledge-input.json');
@@ -306,10 +325,10 @@ export async function finishSession(root: string, store: WorkflowStore, id: stri
         acknowledgeKnowledge(root, wiki.consumed, memory.consumed);
         return store.recordAssetPublication(id, { state: 'no_change' }, fence);
       }
-      const snapshot = await freezeKnowledge(join(folder, 'knowledge'), cache, client, project, base);
+      const snapshot = evolutionTargets.length ? await freezeKnowledge(join(folder, 'knowledge'), cache, client, project, base) : undefined;
       if (!job.candidate_commit) {
         const allowedHeads = new Set([job.local_head]);
-        for (const target of policy.targets.filter(target => targetSignals.has(target.entry))) {
+        for (const target of evolutionTargets.filter(target => targetSignals.has(target.entry))) {
           const stateFile = join(folder, sha256(target.entry) + '-evolution', 'state.json');
           if (existsSync(stateFile)) {
             const state = JSON.parse(readFileSync(stateFile, 'utf8'));
@@ -320,19 +339,27 @@ export async function finishSession(root: string, store: WorkflowStore, id: stri
         const pinned = skillAssets(root, job.base_commit);
         const current = skillAssets(root, job.local_head);
         if (stableJson(pinned.files) !== stableJson(current.files)) throw new InputError('OPENVIKING_UNVERIFIED_SKILL_CHANGES');
-        for (const target of policy.targets.filter(target => targetSignals.has(target.entry))) {
+        for (const target of evolutionTargets.filter(target => targetSignals.has(target.entry))) {
+          if (!snapshot || !job.review) throw new InputError('OPENVIKING_REPLAY_REQUIRED');
           const review = { ...job.review, signals: targetSignals.get(target.entry) };
           const reviewPath = join(folder, sha256(target.entry) + '-review.json');
           saveJob(reviewPath, review);
           const outputDir = join(folder, sha256(target.entry) + '-evolution');
+          job.scenario_inputs ??= {};
+          const frozen = job.scenario_inputs[target.entry] ??= await prepareEvolutionScenarios(
+            root, job.local_head, target, outputDir, snapshot.path, review.signals!);
+          saveJob(path, job);
+          if ('skipped' in frozen) continue;
+          const runTarget = frozenScenarioTarget(root, target, outputDir, frozen);
           const statePath = join(outputDir, 'state.json');
           let state;
           if (existsSync(statePath)) state = JSON.parse(readFileSync(statePath, 'utf8'));
           else {
             const driver = join(cache, 'assets', 'skills', 'workflow-evolve', 'scripts', 'evolve-loop.mjs');
             const cli = join(bundle, 'dist', 'workflow-cli.js');
-            const output = execFileSync(process.execPath, [driver, '--skill', target.entry, '--scenarios', target.scenarios, '--runner', target.runner,
-              '--memory-cli', cli, '--iterations', '1', '--auto', '--review', reviewPath, '--output-dir', outputDir], {
+            const output = execFileSync(process.execPath, [driver, '--skill', target.entry, '--scenarios', runTarget.scenarios, '--runner', target.runner,
+              '--memory-cli', cli, '--iterations', '1', '--auto', '--review', reviewPath, '--output-dir', outputDir,
+              '--bank', join(outputDir, 'scenario-bank.json')], {
               cwd: root, encoding: 'utf8', windowsHide: true, timeout: 1_800_000, maxBuffer: 16 * 1024 * 1024,
               env: { ...process.env, EVOLVE_CLI: cli, AGENT_MEMORY_CLI: cli,
                 EVOLVE_KNOWLEDGE_SNAPSHOT: snapshot.path, AGENT_MEMORY_DB: join(snapshot.path, 'memory.db') }, stdio: ['pipe', 'pipe', 'pipe'],
@@ -364,7 +391,7 @@ export async function finishSession(root: string, store: WorkflowStore, id: stri
       const baseSkills = base.files.filter(file => file.path.startsWith('skills/'));
       const changedSkillPaths = [...new Set([...baseSkills, ...candidate.files].map(file => file.path))].filter(path =>
         stableJson(baseSkills.find(file => file.path === path)) !== stableJson(candidate.files.find(file => file.path === path)));
-      const affected = policy.targets.filter(target => changedSkillPaths.some(path => path.startsWith(dirname(target.entry).replaceAll('\\', '/') + '/')));
+      const affected = evolutionTargets.filter(target => changedSkillPaths.some(path => path.startsWith(dirname(target.entry).replaceAll('\\', '/') + '/')));
       if (changedSkillPaths.some(path => !affected.some(target => path.startsWith(dirname(target.entry).replaceAll('\\', '/') + '/')))) {
         throw new InputError('OPENVIKING_EVOLUTION_TARGET_MISSING');
       }
@@ -401,10 +428,14 @@ export async function finishSession(root: string, store: WorkflowStore, id: stri
         }
         const changed = [...new Set([...base.files, ...manifest.files].filter(file => file.path.startsWith('skills/')).map(file => file.path))]
           .filter(path => stableJson(manifest.files.find(file => file.path === path)) !== stableJson(base.files.find(file => file.path === path))).map(path => ({ path }));
-        const targets = policy.targets.filter(target => changed.some(file => file.path.startsWith(dirname(target.entry).replaceAll('\\', '/') + '/')));
+        const targets = evolutionTargets.filter(target => changed.some(file => file.path.startsWith(dirname(target.entry).replaceAll('\\', '/') + '/')));
         if (changed.some(file => !targets.some(target => file.path.startsWith(dirname(target.entry).replaceAll('\\', '/') + '/')))) throw new InputError('OPENVIKING_EVOLUTION_TARGET_MISSING');
-        const validation = verifySkillCommit(root, job.candidate_commit!, targets, snapshot.path);
-        job.validation_id = validation.id; manifest.verification.validation_id = validation.id;
+        if (snapshot) {
+          const frozenTargets = targets.map(target => frozenScenarioTarget(root, target,
+            join(folder, sha256(target.entry) + '-evolution'), job.scenario_inputs?.[target.entry]));
+          const validation = verifySkillCommit(root, job.candidate_commit!, frozenTargets, snapshot.path);
+          job.validation_id = validation.id; manifest.verification.validation_id = validation.id;
+        }
         job.manifest = manifest; job.expected_head = latest.raw.toString('base64');
         writeFileSync(join(folder, 'manifest.bin'), manifestBytes(manifest));
         for (const [name, body] of bytes) {

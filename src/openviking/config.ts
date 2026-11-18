@@ -42,7 +42,8 @@ export function validateProject(value: unknown): OpenVikingProject {
     throw new InputError('OPENVIKING_BACKEND_CONFIG_INVALID');
   }
   return { schema_version: item.schema_version, project_id: item.project_id, account_id, user_id,
-    root_uri: item.root_uri, evolution_policy: workflowPath(requireText(item.evolution_policy, 'evolution policy')),
+    root_uri: item.root_uri,
+    ...(item.evolution_policy === undefined ? {} : { evolution_policy: workflowPath(requireText(item.evolution_policy, 'evolution policy')) }),
     enabled: item.enabled !== false, failure_policy: item.failure_policy === 'fail' ? 'fail' : 'local' };
 }
 export function readProject(root: string): OpenVikingProject | undefined {
@@ -52,8 +53,13 @@ export function readProject(root: string): OpenVikingProject | undefined {
   return validateProject(JSON.parse(readFileSync(path, 'utf8').replace(/^\uFEFF/, '')));
 }
 export function readPolicy(root: string, path: string): EvolutionPolicy {
-  const value = workflowRecord(JSON.parse(readFileSync(join(root, workflowPath(path)), 'utf8')), 'evolution policy');
-  if (value.schema_version !== 'evolve-openviking-policy/1.0' || !Array.isArray(value.targets) || !value.targets.length) {
+  const file = join(root, workflowPath(path));
+  if (!lstatSync(file, { throwIfNoEntry: false })?.isFile()) throw new InputError('OPENVIKING_POLICY_MISSING: ' + path);
+  return validateEvolutionPolicy(root, JSON.parse(readFileSync(file, 'utf8')));
+}
+export function validateEvolutionPolicy(root: string, input: unknown): EvolutionPolicy {
+  const value = workflowRecord(input, 'evolution policy');
+  if (value.schema_version !== 'evolve-openviking-policy/1.0' || !Array.isArray(value.targets)) {
     throw new InputError('OPENVIKING_POLICY_INVALID');
   }
   const targets = value.targets.map(input => {
@@ -64,8 +70,9 @@ export function readPolicy(root: string, path: string): EvolutionPolicy {
     const scenarios = workflowPath(requireText(item.scenarios, 'scenarios'));
     if (!lstatSync(join(root, runner)).isFile()) throw new InputError('OPENVIKING_POLICY_RUNNER_INVALID');
     const cases: unknown = JSON.parse(readFileSync(join(root, scenarios), 'utf8'));
-    if (!Array.isArray(cases) || !cases.some(item => item.baseline === true) || !cases.some(item => item.baseline === false) ||
-        cases.some(item => !item || typeof item.id !== 'string' || typeof item.baseline !== 'boolean' || !('input' in item)) ||
+    if (!Array.isArray(cases) ||
+        cases.some(item => !item || typeof item !== 'object' || typeof item.id !== 'string' || typeof item.baseline !== 'boolean' || !('input' in item)) ||
+        !cases.some(item => item.baseline === true) || !cases.some(item => item.baseline === false) ||
         new Set(cases.map(item => item.id)).size !== cases.length) throw new InputError('OPENVIKING_POLICY_SCENARIOS_INVALID');
     return { entry, runner, scenarios };
   });

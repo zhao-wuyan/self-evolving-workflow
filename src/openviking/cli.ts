@@ -8,15 +8,19 @@ import { isUnavailable, OpenVikingClient } from './client.js';
 import { projectFile, readProject, replaceJson } from './config.js';
 import { loadRelease, readProjectHead } from './assets.js';
 import { selectMemory } from './knowledge.js';
+import { manageEvolutionPolicy } from './policy.js';
 
 export const openVikingHelp = [
-  'evolve openviking init --policy <file> [--project-id <UUID>] [--root <project>]',
+  'evolve openviking init [--policy <file>] [--project-id <UUID>] [--root <project>]',
+  'evolve openviking policy [--entry <skill> --runner <script> --scenarios <file> [--apply <preview-id>]]',
   'evolve openviking config [--enabled true|false] [--failure-policy local|fail] [--root <project>]',
   'evolve openviking status [--root <project>]',
   'evolve openviking sync --session <id> --actor <actor> --expected-orchestration-revision <n> [--request-id <id>]',
   'evolve openviking finish --session <id> --actor <actor> --expected-orchestration-revision <n> [--candidate-commit <sha>] [--request-id <id>]',
   'evolve openviking memory share|unshare <local-memory-id> [--root <project>]',
   'No project profile: local backend. init enables OpenViking; failure-policy defaults to local.',
+  'init defaults to .evolve/evolution.json and creates an empty policy when absent. Empty targets sync assets without evolving Skills.',
+  'policy previews by default; --apply creates a local Git commit and never publishes.',
   'Fallback never publishes, bypasses integrity checks, or substitutes local data for an ov: ID.',
 ].join('\n');
 
@@ -24,6 +28,7 @@ export async function runOpenVikingCli(argv: string[]): Promise<void> {
   const string = { type: 'string' } as const;
   const { values, positionals: [action, ...args] } = parseArgs({ args: argv, allowPositionals: true, options: {
     root: string, policy: string, 'project-id': string, session: string, actor: string,
+    entry: string, runner: string, scenarios: string, apply: string,
     'expected-orchestration-revision': string, 'request-id': string, 'candidate-commit': string,
     enabled: string, 'failure-policy': string, help: { type: 'boolean', short: 'h' }, json: { type: 'boolean' },
   } });
@@ -32,7 +37,14 @@ export async function runOpenVikingCli(argv: string[]): Promise<void> {
   const print = (value: unknown) => { process.stdout.write(JSON.stringify(value, null, 2) + '\n'); };
   if (action === 'init') {
     if (args.length) throw new InputError(openVikingHelp);
-    return print(await initializeProject(root, requireText(values.policy, 'evolution policy'), values['project-id']));
+    return print(await initializeProject(root, values.policy, values['project-id']));
+  }
+  if (action === 'policy') {
+    if (args.length) throw new InputError(openVikingHelp);
+    const target = [values.entry, values.runner, values.scenarios, values.apply].some(value => value !== undefined)
+      ? { entry: requireText(values.entry, 'Skill entry'), runner: requireText(values.runner, 'replay runner'), scenarios: requireText(values.scenarios, 'replay scenarios') }
+      : undefined;
+    return print(manageEvolutionPolicy(root, target, values.apply));
   }
   const project = readProject(root);
   if (action === 'status' && !project) return print({ backend: 'local', enabled: false, configured: false });

@@ -32,6 +32,11 @@ export function projectFixture(t, server, options = {}) {
   const disposers = [];
   t.after(async () => { for (const dispose of disposers.reverse()) await dispose(); f.cleanup(); });
   f.git('rm', '-r', 'skills');
+  if (options.minimalSkills) {
+    for (const { name, status } of f.evolve('skill', 'status', '--scope', 'project').targets[0].skills) {
+      if (status !== 'retired') f.write(`skills/${name}/SKILL.md`, `---\nname: ${name}\n---\n# ${name}\n`);
+    }
+  }
   if (options.driver) f.evolve('skill', 'install', 'workflow-evolve');
   f.write(entry, '---\nname: sample\ncontract:\n  consumes: []\n  produces: []\n  gates: {entry: [], exit: []}\n---\n# Sample deployment\nPrepare a release from the supplied build.\n');
   f.write('skills/sample/scripts/release.mjs', `export function release(input, requireMigration) {
