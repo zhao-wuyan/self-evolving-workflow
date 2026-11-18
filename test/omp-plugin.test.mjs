@@ -22,6 +22,7 @@ async function closeHarnesses(root) {
 function harness(root, session = randomUUID(), history = []) {
   const tools = {};
   const handlers = {};
+  const commands = {};
   const schema = () => ({ optional() { return this; } });
   const state = { root, session, entries: [...history], failAppend: false };
   const ctx = {
@@ -34,6 +35,7 @@ function harness(root, session = randomUUID(), history = []) {
   };
   extension({
     zod: { string: schema, array: schema, object: schema },
+    registerCommand: (name, command) => { commands[name] = command; },
     registerTool: tool => { tools[tool.name] = tool; },
     on: (name, handler) => { handlers[name] = handler; },
     appendEntry: (customType, data) => {
@@ -46,7 +48,7 @@ function harness(root, session = randomUUID(), history = []) {
     const result = await tools['evolve_' + name].execute(id, args, signal, undefined, ctx);
     return result.isError ? result : JSON.parse(result.content[0].text);
   };
-  const h = { state, ctx, tools, event, call };
+  const h = { state, ctx, tools, commands, event, call };
   if (!sessions.has(root)) sessions.set(root, []);
   sessions.get(root).push(h);
   return h;
@@ -287,4 +289,77 @@ test('OMP workflow control uses the bundled CLI, rejects root escape and reports
   const failure = await h.call('workflow', { argv: ['session', 'status', '--session', 'missing'] });
   assert.equal(failure.isError, true);
   assert.match(failure.content[0].text, /Session not found/);
+});
+
+test('OMP experience batches only selected candidates and requires one interactive confirmation', async t => {
+  const f = fixture('omp-experience-');
+  t.after(async () => { await closeHarnesses(f.root); f.cleanup(); });
+  const server = await protocol(t);
+  f.write('ovcli.conf', JSON.stringify({ url: server.url, api_key: 'fixture-key' }));
+  const flags = { EVOLVE_OPENVIKING_CONFIG: join(f.root, 'ovcli.conf'), EVOLVE_EXPERIENCE_CONFIG: join(f.root, 'personal.json') };
+  const previous = Object.fromEntries(Object.keys(flags).map(key => [key, process.env[key]]));
+  Object.assign(process.env, flags);
+  Object.assign(f.env, flags);
+  t.after(() => { for (const [key, value] of Object.entries(previous)) {
+    if (value === undefined) delete process.env[key]; else process.env[key] = value;
+  } });
+
+  const h = harness(f.root);
+  const { handler } = h.commands['evolve-experience'];
+  let approve = false;
+  let cancelPreview = false;
+  let confirmationCount = 0;
+  let output;
+  const ctx = Object.assign(h.ctx, { hasUI: true, ui: {
+    notify(message) { assert.fail(message); },
+    async editor(_title, text) { output = JSON.parse(text); return cancelPreview ? undefined : text; },
+    async confirm() { confirmationCount++; return approve; },
+  } });
+  await handler('enable', ctx);
+  assert.equal(f.evolve('experience', 'status').collecting, true);
+
+  f.open('tested', 'ew-test');
+  const run = f.next('tested');
+  readBound(f, 'tested', run);
+  f.saveArtifact(run, 'test-results.json', {
+    summary: { passed: 2, failed: 0 }, tests: [{ test_id: 'T1', status: 'passed' }, { test_id: 'T2', status: 'passed' }],
+    experiences: [
+      { domain: 'python', stack: 'python@3.12', title: 'Bound a queue', applicability: 'Bursty requests',
+        lesson: 'Limit the concurrent work queue.', evidence: 'T1', verification: 'Burst test stayed within capacity.' },
+      { domain: 'go', stack: 'go@1.24', title: 'Set a timeout', applicability: 'Slow requests',
+        lesson: 'Bound the time spent waiting for I/O.', evidence: 'T2', verification: 'The timeout stopped slow requests.' },
+    ],
+  });
+  writeFileSync(join(run.run_dir, 'report.md'), '---\nverdict: ready\nsummary: Burst test passed\nconstraints: []\ndecisions: []\nconcerns: []\nnext: []\n---\n\nBurst test passed.\n');
+  f.finish('tested', run, 'Burst test passed', run.gates.exit.flatMap(gate => ['--gate', gate]));
+  f.sealSession('tested');
+  const pending = await h.call('experience_pending', {});
+  const candidates = pending.candidates.map(({ id }) => ({ id }));
+  assert.equal(candidates.length, 2);
+  const publish = `publish ${candidates.map(item => item.id).join(' ')}`;
+
+  cancelPreview = true;
+  await handler(publish, ctx);
+  assert.equal(confirmationCount, 0);
+  cancelPreview = false;
+  ctx.hasUI = false;
+  await assert.rejects(h.call('experience_publish', { candidates }), /需要能够展示预览并确认/);
+  ctx.hasUI = true;
+  assert.equal((await h.call('experience_publish', { candidates })).status, 'cancelled');
+  assert.equal(confirmationCount, 1);
+  assert.deepEqual(output.map(row => row.candidate_id), candidates.map(row => row.id));
+  assert.deepEqual((await server.inspect()).files, {});
+
+  approve = true;
+  const result = await h.call('experience_publish', { candidates });
+  assert.equal(confirmationCount, 2);
+  assert.equal(result.status, 'published');
+  assert.deepEqual(result.published.map(row => row.candidate_id), candidates.map(row => row.id));
+  const files = (await server.inspect()).files;
+  assert.ok(result.published.every(({ receipt }) => files[receipt.uri]));
+  await handler('search python python@3.12 concurrent work queue --limit 1', ctx);
+  assert.equal(output.results[0].reference.content.lesson, 'Limit the concurrent work queue.');
+  await handler('disable', ctx);
+  assert.equal(f.evolve('experience', 'status').collecting, false);
+  assert.deepEqual((await server.inspect()).files, files);
 });

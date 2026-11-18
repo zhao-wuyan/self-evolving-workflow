@@ -69,7 +69,9 @@ omp plugin link /path/to/self-evolving-workflow
 | `evolve_wiki_reference` / `evolve_memory_get` | 只读取当前有效分支已搜索到的 ID |
 | `evolve_read_skill` / `evolve_read_artifact` | 先绑定运行中的 Evolve Run，再读取其固定 Git 版本和已绑定工件 |
 | `evolve_run_binding` | 用 `bind` 同时提供 `session`、`run`；用 `unbind` 或 `reset` 清除绑定与搜索资格 |
-| `evolve_workflow` | 调用 `session`、`run`（含 `run task`）、`skill`；个人经验仅开放 `experience status/search/get` |
+| `evolve_workflow` | 调用 `session`、`run`（含 `run task`）、`skill`；个人经验只开放 `status/search/get` |
+
+在 OMP 输入 `/evolve-experience` 查看中文帮助。你也可以直接告诉 Agent「整理待发布个人经验，给出建议后统一提交确认」，无需逐条输入命令。Agent 会用 `evolve_experience_pending` 读取候选，说明建议，再用 `evolve_experience_publish` 发起一次预览和确认；取消不会发布。手动也可以用 `/evolve-experience publish <候选 ID> [更多候选 ID]`。发布逐条校验，遇到变化或失败会停止并报告进度。两种入口均无需另装全局 `evolve`。
 
 插件不会自动安装 Skills。显式调用 `evolve_workflow`，传入 `{"argv":["skill","install","--scope","project","--yes"]}`，再将项目 `skills/` 与 `AGENTS.md` 提交到 Git。已有副本默认保留，`kept_sources` 会报告路径、版本和包内容哈希。
 

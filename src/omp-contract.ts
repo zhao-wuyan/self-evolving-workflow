@@ -32,6 +32,15 @@ export interface OmpContext {
   };
 }
 
+export interface OmpCommandContext extends OmpContext {
+  hasUI: boolean;
+  ui: {
+    notify(message: string, level: 'info' | 'error'): void;
+    editor(title: string, prefill: string): Promise<string | undefined>;
+    confirm(title: string, message: string): Promise<boolean>;
+  };
+}
+
 interface Schema {
   optional(): Schema;
 }
@@ -46,6 +55,10 @@ export interface OmpExtensionApi {
     array(item: Schema): Schema;
     object(shape: Record<string, Schema>): Schema;
   };
+  registerCommand(name: string, command: {
+    description: string;
+    handler(args: string, ctx: OmpCommandContext): Promise<void>;
+  }): void;
   registerTool(tool: {
     name: string;
     label: string;
@@ -53,7 +66,7 @@ export interface OmpExtensionApi {
     parameters: Schema;
     approval: 'read' | 'write' | 'exec';
     execute(id: string, args: Record<string, unknown>, signal: AbortSignal | undefined,
-      onUpdate: unknown, ctx: OmpContext): Promise<OmpToolResult>;
+      onUpdate: unknown, ctx: OmpCommandContext): Promise<OmpToolResult>;
   }): void;
   on(event: 'session_start' | 'session_switch' | 'session_branch' | 'session_tree' | 'session_clear' | 'session_shutdown',
     handler: (event: { type: string }, ctx: OmpContext) => void | Promise<void>): void;

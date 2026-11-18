@@ -3,6 +3,7 @@ import { realpathSync } from 'node:fs';
 import { InputError, requireText } from './common.js';
 import { KnowledgeReads } from './knowledge-reads.js';
 import { knowledgeSourceFingerprint, openKnowledgeSources, type KnowledgeSources } from './knowledge-sources.js';
+import { registerOmpExperience } from './omp-experience.js';
 import { emptyHostKnowledge, hostKnowledgeAccess, type HostKnowledgeEvent } from './workflow-host-knowledge.js';
 import { knowledgeToolDefinitions, prepareKnowledgeTool } from './workflow-knowledge-tools.js';
 import { WorkflowStore } from './workflow-runtime.js';
@@ -29,6 +30,8 @@ function latestAssociation(ctx: OmpContext, store: WorkflowStore): HostKnowledge
 }
 
 export default function ompExtension(api: OmpExtensionApi) {
+  registerOmpExperience(api);
+
   let generation = 0;
   let active: { root: string; session: string } | undefined;
   let queue: Promise<void> = Promise.resolve();
