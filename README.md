@@ -74,7 +74,7 @@ git tag -a omp-v0.2.0.1 -m 'OMP: upstream v0.2.0, revision 1'
 git push origin refs/tags/omp-v0.2.0.1
 ```
 
-Actions 会构建并发布该版本，记录上游版本和提交，并更新 `omp-latest` 的 `.tgz` 附件；安装地址不变，不占用仓库全局 Latest。普通分支推送不会发包，也不需要更改默认分支。
+Actions 会构建并发布该版本，记录上游版本和提交，并更新 `omp-latest` 的 `.tgz` 附件。安装地址不变，不依赖仓库全局 Latest。普通分支推送不会发包，也不需要更改默认分支。
 
 本地开发时才从源码构建和链接：
 
