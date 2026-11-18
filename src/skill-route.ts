@@ -17,6 +17,8 @@ export interface SkillRouteContext {
   requiresNewArtifacts?: boolean;
   requiresRouting?: boolean;
   explicitSkillIntent?: boolean;
+  /** 目标 Skill 当前 learning 清单统计；超过阈值时转为整合设计。 */
+  learnings?: { inline: number; total: number; consolidate_recommended: boolean; reasons: string[] };
 }
 
 export interface SkillRouteDecision {
@@ -59,8 +61,10 @@ export function decideSkillRoute(input: SkillRouteContext): SkillRouteDecision {
   const inferredContract = /(?:新增|设计|创建).{0,12}(?:契约|contract)|new\s+skill\s+contract/.test(normalized);
   const inferredArtifacts = /(?:新增|设计|创建).{0,12}(?:产物|artifact|output)/.test(normalized);
   const inferredRouting = /(?:跨|多).{0,8}skill|(?:新|多阶段|多步骤).{0,8}(?:路由|分支|流程链)|cross[- ]skill|multi[- ]stage/.test(normalized);
+  const consolidate = Boolean(input.skillId && input.learnings?.consolidate_recommended);
   const structural = Boolean(input.requiresNewContract || inferredContract || input.requiresNewArtifacts || inferredArtifacts ||
-    input.requiresRouting || inferredRouting || input.crossSkill || input.explicitSkillIntent || inferredSkillIntent || stepCount >= 3);
+    input.requiresRouting || inferredRouting || input.crossSkill || input.explicitSkillIntent || inferredSkillIntent || stepCount >= 3 ||
+    consolidate);
   if (structural) {
     if (input.requiresNewContract || inferredContract) reasons.push('需要新的 Skill contract 或生命周期门禁');
     if (input.requiresNewArtifacts || inferredArtifacts) reasons.push('需要新的产物类型或验证输出');
@@ -68,12 +72,13 @@ export function decideSkillRoute(input: SkillRouteContext): SkillRouteDecision {
     if (input.crossSkill) reasons.push('影响多个 Skill 或需要跨 Skill 协作');
     if (input.explicitSkillIntent || inferredSkillIntent) reasons.push('上下文明确要求设计或新增 Skill');
     if (stepCount >= 3) reasons.push('可复用流程包含至少 3 个稳定步骤');
+    if (consolidate) reasons.push(`Skill learning 已膨胀（${input.learnings!.reasons.join('；')}），需整合进正文而非继续追加`);
     return {
       route: 'skill-design', confidence: 'high', reasons,
       invoke_meta_skill: true,
       meta_skill: {
         id: 'ew-skill-design', mode: 'design',
-        instruction: `基于已验证证据设计 Skill。保留当前入口约束，声明 Markdown 链接、契约、产物、恢复路径和验收场景。证据：${sources.join(', ')}`,
+        instruction: `基于已验证证据设计 Skill。保留当前入口约束，声明 Markdown 链接、契约、产物、恢复路径和验收场景。${consolidate ? '将现有 learning 合并进正文并删除被吸收的 learning 文件，保留全部历史回归场景。' : ''}证据：${sources.join(', ')}`,
       },
     };
   }

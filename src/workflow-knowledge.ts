@@ -19,6 +19,7 @@ export interface WikiPrior {
   lookup_scope: WikiLookupScope;
   source_search_id: string;
   content_sha256: string;
+  storage_scope?: 'project' | 'global';
 }
 
 export function buildWikiPrior(

@@ -7,8 +7,8 @@
 - **`session-mode`**: `none` for standalone Skills; `run` for stateful Skills with `contract` (`contract_version: 2.1`).
 - **`required_links`**:
   - Include ONLY documents that every invocation must preload. Keep conditional/mode guides as standard body links without putting them in `required_links`.
-  - Every item in `required_links` MUST appear as a literal relative Markdown link inside `SKILL.md` (for `ew-odyssey-*`, inside `ew-odyssey/SKILL.md`), resolve to a committed regular `.md` file inside the same package (no `..` segments), and any `#heading` fragment must match an actual heading.
-- **Host portability**: Avoid hardcoding host-specific tool names (`Bash`, `AskUserQuestion`, `spawn_agent`, etc.) in shared rules; describe capabilities neutrally or isolate host mappings in a dedicated adapter reference.
+  - Every item in `required_links` MUST appear as a literal relative Markdown link inside `SKILL.md` (for `ew-odyssey-*`, inside `ew-odyssey/SKILL.md`), resolve after path normalization (`posix.join`) to a committed regular `.md` file inside the same Skill package root (must not escape the package root; cross-package `../` links are forbidden — reference other packages via `evolve skill workflows show <id>`), and any `#heading` fragment must match an actual heading.
+- **Host portability**: Use capability-neutral wording in shared workflow rules instead of hardcoding host-specific tool names (shell commands, structured user prompts, or subagent spawning). Isolate any host tool mappings in a dedicated adapter reference (or, for vendored upstream playbooks, provide an explicit host adapter mapping section in the entry document so upstream prompts translate cleanly to the active host).
 
 ## Session/Run Contract (`contract_version: 2.1`)
 

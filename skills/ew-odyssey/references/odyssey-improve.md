@@ -24,12 +24,7 @@ Back-half: `S_GENERALIZE → S_DISCOVER → S_RECORD → END` (see [shared phase
 
 ### Target Resolution
 
-| Input | Resolution |
-|-------|-----------|
-| Module/dir path | Audit that module |
-| `HEAD` / `staged` | Review changes in diff |
-| Feature area keyword | Resolve to related files |
-| `--all` | Full project scan (use with caution) |
+Target resolution, dimension defaults, and `--fix-threshold` cutoff are defined in [the selected mode preparation](prepare/odyssey-improve.md) §Input Interpretation — that is the canonical wording.
 
 ### Dimensions (6)
 
@@ -43,14 +38,14 @@ Back-half: `S_GENERALIZE → S_DISCOVER → S_RECORD → END` (see [shared phase
 ### Session Fields
 
 ```json
-{ "target": "", "dimensions": [], "baseline_metrics": {},
+{ "target": "", "dimensions": [], "diagnosis_retries": 0, "baseline_metrics": {},
   "audit_result": {}, "diagnoses": [], "confirmation": null,
   "generalization_stats": null }
 ```
 
 ### evidence.ndjson Phases
 
-`survey|audit|diagnosis|fix|discovery|decision|self-iteration`
+`survey|audit|diagnosis|fix|discovery|decision|issue|self-iteration`
 
 - `survey`: `category` (dependency|complexity|coverage|error_pattern), `detail`
 - `audit`: `dimension`, `severity`, `measurement`
@@ -64,7 +59,7 @@ Back-half: `S_GENERALIZE → S_DISCOVER → S_RECORD → END` (see [shared phase
 | G1 | Survey completed | S_SURVEY | — |
 | G2 | Audit completed | S_AUDIT | — |
 | G3 | Diagnosis completed | S_DIAGNOSE | — |
-| G4 | Zero remaining: all findings fixed and verified | S_VERIFY | skip_fix |
+| G4 | Zero remaining: all actionable findings (`>= fix_threshold`) fixed and verified | S_VERIFY | skip_fix |
 | G5 | Pattern generalized | S_GENERALIZE | skip_generalize |
 | G6 | Discoveries triaged | S_DISCOVER | skip_generalize |
 | G7 | Learnings persisted | S_RECORD | — |
@@ -89,70 +84,61 @@ Back-half: `S_GENERALIZE → S_DISCOVER → S_RECORD → END` (see [shared phase
 
 ```
 S_SURVEY   → S_AUDIT       : complete
-S_AUDIT → S_DIAGNOSE       : critical/high findings exist
-S_AUDIT → S_GENERALIZE     : no critical/high, !skip_generalize
-S_AUDIT → S_RECORD         : no findings OR skip_generalize
+S_AUDIT    → S_DIAGNOSE    : actionable findings (>= fix_threshold) exist
+S_AUDIT    → S_GENERALIZE  : no actionable findings (>= fix_threshold), !skip_generalize
+S_AUDIT    → S_RECORD      : no actionable findings (>= fix_threshold), skip_generalize
 S_DIAGNOSE → S_FIX         : root causes identified, !skip_fix
 S_DIAGNOSE → S_GENERALIZE  : root causes identified, skip_fix, !skip_generalize
 S_DIAGNOSE → S_RECORD      : root causes identified, skip_fix, skip_generalize
-S_DIAGNOSE → S_DIAGNOSE    : hypotheses failed, retries < 3 → A_ESCALATE_DIAGNOSIS
-S_DIAGNOSE → S_RECORD      : retries >= 3 → INCONCLUSIVE
+S_DIAGNOSE → S_DIAGNOSE    : all round hypotheses failed, diagnosis_retries < 3 → A_ESCALATE_DIAGNOSIS
+S_DIAGNOSE → S_RECORD      : diagnosis_retries >= 3 (Normal: user accepts escalation / INCONCLUSIVE; -y: INCONCLUSIVE)
 S_FIX      → S_VERIFY      : fix implemented
-S_VERIFY → S_GENERALIZE    : verified, !skip_generalize
-S_VERIFY → S_RECORD        : verified, skip_generalize
-S_VERIFY → S_FIX           : needs_rework
+S_VERIFY   → S_GENERALIZE  : verified, !skip_generalize
+S_VERIFY   → S_RECORD      : verified, skip_generalize
+S_VERIFY   → S_FIX         : needs_rework, fix_rounds < max_fix_rounds (`fix_rounds++`)
+S_VERIFY   → S_RECORD      : needs_rework, fix_rounds >= max_fix_rounds (escalate per [shared base](odyssey-base.md) `<fix_loop_cap>`)
 ```
 
 ### Actions
 
 **A_INTAKE extra** — Baseline capture: record current metrics (test pass rate, bundle size, dependency count, complexity hotspots) to `session.json.baseline_metrics`.
 
-**A_SURVEY** — (1) Dependency audit (package.json/lock), complexity scan (size/nesting), test coverage map, error handling scan (empty catch, unhandled promise). (2) CLI-assisted (optional): `evolve delegate "Survey dependency health, complexity hotspots, coverage gaps, and error patterns for {target}" --to codex --mode analysis`. (3) Evidence phase=survey. Update §2. Mark G1.
-
-Commit: `"odyssey-improve({slug}): SURVEY — current state survey complete"`
+**A_SURVEY** — (1) Dependency audit (package.json/lock), complexity scan (size/nesting), test coverage map, error handling scan (empty catch, unhandled promise). (2) CLI-assisted (optional): `evolve agent exec "Survey dependency health, complexity hotspots, coverage gaps, and error patterns for {target}" --to codex --mode analysis`. (3) Evidence phase=survey. Update §2. Mark G1.
 
 **A_AUDIT** — Run 6 parallel subagents (one per dimension, or `--dimensions` subset; join all before advancing — see [runtime adapters](runtime-adapters.md)). Each returns `[{title, severity, dimension, file, line, description, suggestion, measurement}]`. Merge → evidence phase=audit. Write `session.json.audit_result`. Update §3 (findings by dimension + severity matrix). Mark G2.
 
 **GATE: all-dimensions-audited** — all 6 dimensions (or `--dimensions` subset) completed with structured findings, merged into severity matrix, evidence phase=audit logged per dimension. Zero dimensions reviewed is BLOCKED (W002 partial from agent failure is a warning).
 
-Commit: `"odyssey-improve({slug}): AUDIT — dimension audit complete"`
+**A_DIAGNOSE** — Root cause analysis for actionable findings (`>= fix_threshold`, prioritizing critical → high → medium → low) — don't fix symptoms. (1) Group by dimension, prioritize by severity; for each: hypothesis → trace code path + git history → evidence phase=diagnosis. (2) Ambiguity → evidence phase=decision; Normal: structured prompt | `-y`: defer. (3) CLI-assisted for complex findings via `evolve agent exec "<prompt>" --to codex --mode analysis`. (4) Write `session.json.diagnoses[]`. Update §4. Mark G3.
 
-**A_DIAGNOSE** — Root cause analysis for critical/high findings — don't fix symptoms. (1) Group by dimension, prioritize by severity; for each: hypothesis → trace code path + git history → evidence phase=diagnosis. (2) Ambiguity → evidence phase=decision; Normal: structured prompt | `-y`: defer. (3) CLI-assisted for complex findings via `evolve delegate "<prompt>" --to codex --mode analysis`. (4) Write `session.json.diagnoses[]`. Update §4. Mark G3.
+**A_ESCALATE_DIAGNOSIS** — `diagnosis_retries++`. `< 3`: `evolve agent exec "Analyze failed hypotheses for {finding} and propose new root-cause hypotheses with file:line evidence" --to codex --mode analysis`, new hypotheses, → S_DIAGNOSE. `>= 3`: Normal → structured prompt (1 bounded user-clue extension or `INCONCLUSIVE → S_RECORD`) | `-y` → `INCONCLUSIVE → S_RECORD`.
 
-Commit: `"odyssey-improve({slug}): DIAGNOSE — root cause analysis complete"`
+**A_FIX** — (1) Exhaustive fix: ALL diagnosed issues by severity tier (critical → high → medium → low within `fix_threshold`), one dimension at a time. After each tier, re-verify **current tier's dimension only** (not all dimensions); new findings at same or higher severity append to current tier. Cross-dimension regression checks run once at S_VERIFY after all tiers. **No partial-tier advancement** — each tier fully addressed (fixed or individually classified) before advancing; blanket "pre-existing" skip forbidden. (2) For each discrete fix: implement → **run tests covering the modified area immediately** → log `evidence phase=fix` → **commit per verified fix** (`"odyssey-improve({slug}): FIX — {finding_ref} ({dimension}/{tier})"`). **Incremental verification** — each discrete fix step verified before proceeding; NEVER batch unrelated changes. **Rollback safety** — if tests fail after a fix step, revert that uncommitted change (`git checkout -- {file}` / `git diff` patch revert — safe because prior verified fixes are already committed) before attempting alternatives; NEVER proceed with failing tests. **Behavioral equivalence** — fixes MUST preserve existing behavior; no API changes, no new functionality. Beneficial changes discovered during fixing → evidence phase=decision as recommendations, NOT applied. **Scope lock** — once tier plan confirmed, no scope expansion without re-confirmation. (3) Normal: structured prompt per-fix | `-y`: auto-proceed, record `deferred`.
 
-**A_ESCALATE_DIAGNOSIS** — `retries++`. < 3: `evolve delegate "Analyze failed hypotheses for {finding} and propose new root-cause hypotheses with file:line evidence" --to codex --mode analysis`, new hypotheses, → S_DIAGNOSE. >= 3: Normal → structured prompt | `-y` → INCONCLUSIVE → S_RECORD.
+**A_VERIFY** — (1) Run tests covering modified areas. (2) Re-capture metrics, compare with `baseline_metrics`. (3) CLI-assisted: `evolve agent exec "Review fixes for {target} against quality dimensions and regressions" --to codex --mode analysis`. (4) `verified` → mark G4; `needs_rework` with `fix_rounds < max_fix_rounds` → `fix_rounds++` → `S_FIX`; `needs_rework` with `fix_rounds >= max_fix_rounds` → escalate per [shared base](odyssey-base.md) `<fix_loop_cap>` → `S_RECORD`. (5) Write `confirmation`. Update §5 (fix & verification results) and §8 (before/after metrics table).
 
-**A_FIX** — (1) Exhaustive fix: ALL diagnosed issues by severity tier (critical → high → medium → low within fix_threshold), one dimension at a time. After each tier, re-verify **current tier's dimension only** (not all dimensions); new findings at same or higher severity append to current tier. Cross-dimension regression checks run once at S_VERIFY after all tiers. **No partial-tier advancement** — each tier fully addressed (fixed or individually classified) before advancing; blanket "pre-existing" skip forbidden. (2) For each fix: implement → **run tests covering the modified area immediately** → evidence phase=fix. **Incremental verification** — each discrete fix step verified before proceeding; NEVER batch unrelated changes. **Rollback safety** — if tests fail after a fix step, revert that specific change (`git checkout -- {file}`) before attempting alternatives; NEVER proceed with failing tests. **Behavioral equivalence** — fixes MUST preserve existing behavior; no API changes, no new functionality. Beneficial changes discovered during fixing → evidence phase=decision as recommendations, NOT applied. **Scope lock** — once tier plan confirmed, no scope expansion without re-confirmation. (3) Normal: structured prompt per-fix | `-y`: auto-proceed, record `deferred`.
-
-Commit: `"odyssey-improve({slug}): FIX — {dimension} {tier} tier addressed"`
-
-**A_VERIFY** — (1) Run tests covering modified areas. (2) Re-capture metrics, compare with `baseline_metrics`. (3) CLI-assisted: `evolve delegate "Review fixes for {target} against quality dimensions and regressions" --to codex --mode analysis`. (4) `needs_rework` → S_FIX; `verified` → mark G4. (5) Write `confirmation`. Update §5 (before/after metrics table).
-
-**GATE: zero-remaining-verified** — every diagnosed finding is fixed and verified, individually classified (issue / decision), or skipped via `--skip-fix`; tests pass over modified areas; metrics re-captured and compared against `baseline_metrics`; no unaddressed actionable findings; before/after table written to understanding.md §8.
-
-Commit: `"odyssey-improve({slug}): VERIFY — fix verification complete"`
+**GATE: zero-remaining-verified** — every diagnosed finding (`>= fix_threshold`) is fixed and verified, individually classified (`issue` / `decision`), or skipped via `--skip-fix`; tests pass over modified areas; metrics re-captured and compared against `baseline_metrics`; no unaddressed actionable findings; before/after table written to understanding.md §8.
 
 ---
 
 ## Generalize Source
 
-Diagnosed root causes + applied fixes across all dimensions. **Discover routing:** `bug` → S_FIX; new critical → S_DIAGNOSE.
+Diagnosed root causes + applied fixes across all dimensions. **Discover routing:** `bug` → S_FIX; new critical → S_DIAGNOSE (`cross_phase_loops < max_loops`, re-entry per [shared base](odyssey-base.md) `A_DISCOVER`).
 
 ---
 
 ## Knowledge Persistence (§9)
 
-Include verified reusable findings in the Run summary and harvest the completed Session through `evolve workflows show knowledge` (`evolve closeout session` → `evolve wiki propose`).
+Include verified reusable findings in the Run summary and harvest the completed Session through `evolve skill workflows show ew-knowledge` (`evolve kb harvest session` → `evolve kb propose`).
 
 A_RECORD extra: §8 improvement metrics — re-capture and build before/after comparison table from `baseline_metrics` vs current.
 
 | Category | Content | Follow-up |
 |----------|---------|-----------|
-| Performance pattern | Bottleneck type + fix approach + measurement | `evolve closeout session` → `evolve wiki propose` (`category: coding`) |
-| Security rule | Vulnerability class + fix + prevention | `evolve closeout session` → `evolve wiki propose` (`category: debug`) |
-| Architecture constraint | Violation + correct boundary + check | `evolve closeout session` → `evolve wiki propose` (`category: arch`) |
-| Reliability pattern | Failure mode + handling strategy + verification | `evolve closeout session` → `evolve wiki propose` (`category: coding`) |
+| Performance pattern | Bottleneck type + fix approach + measurement | `evolve kb harvest session` → `evolve kb propose` (`category: coding`) |
+| Security rule | Vulnerability class + fix + prevention | `evolve kb harvest session` → `evolve kb propose` (`category: debug`) |
+| Architecture constraint | Violation + correct boundary + check | `evolve kb harvest session` → `evolve kb propose` (`category: arch`) |
+| Reliability pattern | Failure mode + handling strategy + verification | `evolve kb harvest session` → `evolve kb propose` (`category: coding`) |
 
 ---
 
@@ -195,17 +181,17 @@ Goals:       {done}/{total} ({skipped} skipped)
 
 - **Discovery gate** (SURVEY): evidence for the phase logged, understanding.md updated. Survey requires all scan types attempted.
 - **Audit gate** (DIAGNOSE): all dimension agents completed, findings merged with severity classification. Zero dimensions reviewed is BLOCKED (W002 partial allowed).
-- **FIX gate:** current severity tier fully addressed. Per-fix evidence phase=fix logged. **Per-change test verification** — each fix step runs tests before proceeding. **Rollback on failure** — failed fix reverted immediately. **Behavioral equivalence** — no API/behavior changes; beneficial changes logged as recommendations only. Auto-commit per tier. No partial-tier advancement.
-- **VERIFY gate:** tests pass; metrics re-captured; confirmation written, understanding.md updated, verify goal marked. needs_rework → route back to FIX.
+- **FIX gate:** current severity tier fully addressed. Per-fix evidence phase=fix logged. **Per-change test verification** — each fix step runs tests before proceeding. **Rollback on failure** — failed uncommitted fix reverted immediately. **Behavioral equivalence** — no API/behavior changes; beneficial changes logged as recommendations only. Auto-commit per verified fix. No partial-tier advancement.
+- **VERIFY gate:** tests pass; metrics re-captured; confirmation written, understanding.md updated (§5 + §8), verify goal marked. `needs_rework` routes back to FIX while `fix_rounds < max_fix_rounds` (else escalates to `S_RECORD`).
 
 ---
 
 ## Error Codes
 
+Shared `E000–E004` and `W008` errors are defined in [SKILL.md](../SKILL.md).
+
 | Code | Severity | Condition | Recovery |
 |------|----------|-----------|----------|
-| E001 | error | No target provided | Provide target or -c |
-| E002 | error | Target path not found | Check path |
 | W001 | warning | No dependency manifest / no test coverage tool | Proceed with defaults |
 | W002 | warning | Some dimension agents failed | Partial coverage accepted |
 | W004 | warning | Generalization 0 hits after full 3-layer scan | Advance to S_RECORD |
@@ -215,13 +201,13 @@ Goals:       {done}/{total} ({skipped} skipped)
 
 ## Success Criteria
 
-- [ ] Target resolved; session + output files created; baseline metrics captured
+- [ ] Target resolved; session + mode-contracted output files (`prepare/odyssey-improve.md`) created; baseline metrics captured
 - [ ] Survey completed with all scan types attempted (dependency, complexity, coverage, error handling)
 - [ ] 6-dimension audit completed with structured findings + severity matrix
 - [ ] understanding.md sections written progressively (§1–§9)
-- [ ] Fix + verify (unless --skip-fix); zero-residual — every finding has concrete action
+- [ ] Fix + verify (unless --skip-fix) bounded by `max_fix_rounds`; zero-residual — every finding has concrete action
 - [ ] Multi-layer generalization + discovery triage (unless --skip-generalize)
-- [ ] phase_goals derived, tracked, and hardened-audited; goal_mode injected via prepare goal:true
+- [ ] phase_goals derived, tracked, and audited in `outputs/session.json` (honor session `policy.goal_mode` when opened with `--goal-mode`)
 - [ ] §8 improvement metrics: before/after comparison table from baseline_metrics
 - [ ] Session resumable via -c; completion summary emitted
 

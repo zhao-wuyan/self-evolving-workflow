@@ -1,9 +1,12 @@
 /ref/
 /node_modules/
 /dist/
+/.evolve/
 /.agent-memory/
 /.codegraph/
-/index.db
-/index.db-shm
-/index.db-wal
+/.workflow/
+/.agents/hooks.json
+/.claude/settings.local.json
+/.codex/hooks.json
+/.maestroignore
 *.tgz

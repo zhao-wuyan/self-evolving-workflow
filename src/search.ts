@@ -4,13 +4,15 @@ import {
   type AgentMemoryContextScope,
   type AgentMemoryEnvelope,
 } from './context-envelope.js';
-import type { CodeGraph } from './code.js';
-import { InputError, NotFoundError, requireText, searchLimit } from './common.js';
+import { codeMatchesPaths, type CodeGraph } from './code.js';
+import { InputError, NotFoundError, pageOffset, pagination, requireText, searchLimit } from './common.js';
+import type { KnowledgeFilters, KnowledgeKind, KnowledgeRecord, KnowledgeStore } from './kb.js';
 import type { MemorySearchOptions } from './memory.js';
 import type { MemoryReader, MemorySearchResult } from './memory-reader.js';
 import type { Wiki, WikiSearchOptions } from './wiki.js';
 import type { WikiContext } from './wiki-entry.js';
 import type { KnowledgeReads } from './knowledge-reads.js';
+import { rrfMerge } from './upstream/search-utils.js';
 
 export interface SearchSources {
   code?: CodeGraph;
@@ -36,7 +38,26 @@ export interface ContextOptions {
   memory?: Omit<MemorySearchOptions, 'limit'>;
   contextScope?: AgentMemoryContextScope;
   includeWorkingMemory?: boolean;
+  preferredMemoryTypes?: readonly string[];
   knowledgeReads?: KnowledgeReads;
+}
+
+/**
+ * 优先排序命中 search_profile 指定类型的记忆条目，不丢失其余候选。
+ */
+export function prioritizeMemoryHits<T extends { type: string }>(
+  hits: readonly T[],
+  preferredTypes?: readonly string[],
+): T[] {
+  if (!preferredTypes?.length) return [...hits];
+  const preferred = new Set(preferredTypes);
+  const prioritized: T[] = [];
+  const rest: T[] = [];
+  for (const hit of hits) {
+    if (preferred.has(hit.type)) prioritized.push(hit);
+    else rest.push(hit);
+  }
+  return [...prioritized, ...rest];
 }
 
 export interface SearchResults {
@@ -94,7 +115,7 @@ export async function context(
   if (Buffer.byteLength(JSON.stringify(constraints)) > 5 * 1024 * 1024) throw new InputError('Wiki snapshot exceeds the Run artifact size limit');
   const references = sources.wiki?.references(text, wikiContext, { ...options.wiki, limit }).results ?? [];
   const workingMemories = options.includeWorkingMemory && sources.memory
-    ? (await sources.memory.search(text, { ...options.memory, limit })).results
+    ? prioritizeMemoryHits((await sources.memory.search(text, { ...options.memory, limit })).results, options.preferredMemoryTypes)
     : [];
   const tracker = options.knowledgeReads;
   if (tracker) {
@@ -155,4 +176,253 @@ export async function context(
       linked_knowledge_id: null,
     })),
   });
+}
+
+/**
+ * 合并主包与全局补充 AgentMemoryEnvelope，按条目标识去重并保持项目条目优先。
+ */
+export function mergeContextEnvelopes(
+  primary: AgentMemoryEnvelope,
+  fallback: AgentMemoryEnvelope,
+  limit?: number,
+): AgentMemoryEnvelope {
+  const max = searchLimit(limit);
+  const mergeBy = <T>(first: readonly T[], second: readonly T[], keyOf: (item: T) => string) => {
+    const seen = new Set<string>();
+    const out: T[] = [];
+    for (const item of [...first, ...second]) {
+      const key = keyOf(item);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(item);
+      if (out.length >= max) break;
+    }
+    return out;
+  };
+  return createAgentMemoryEnvelope({
+    contextScope: primary.context_scope,
+    constraints: mergeBy(primary.constraints, fallback.constraints, item => item.knowledge_id),
+    references: mergeBy(primary.references, fallback.references, item => item.knowledge_id),
+    workingMemories: mergeBy(primary.working_memories, fallback.working_memories, item => item.memory_id),
+  });
+}
+
+export type UnifiedSearchSource = 'kb' | 'code';
+
+export interface UnifiedSearchOptions extends KnowledgeFilters {
+  from?: string | readonly UnifiedSearchSource[];
+  mode?: 'merged' | 'context';
+  memorySession?: string;
+  preferredMemoryTypes?: readonly string[];
+  contextScope?: AgentMemoryContextScope;
+}
+
+export interface UnifiedCodeHit {
+  source: 'code';
+  kind: 'code';
+  id: string;
+  title: string;
+  snippet: string;
+  content: string;
+  score: number;
+  authority: 'symbol';
+  scope: 'project';
+  status: 'active';
+  path: string;
+  startLine: number;
+  endLine: number;
+}
+
+export type UnifiedSearchHit = (KnowledgeRecord & { score: number }) | UnifiedCodeHit;
+
+export interface UnifiedSearchSources {
+  kb?: Pick<KnowledgeStore, 'search' | 'constraints'>;
+  code?: Pick<CodeGraph, 'search'>;
+}
+
+export interface UnifiedMergedResults {
+  schema_version: 'evolve-search/1.0';
+  mode: 'merged';
+  query: string;
+  results: UnifiedSearchHit[];
+  pagination: ReturnType<typeof pagination>;
+}
+
+export interface UnifiedContextResults {
+  schema_version: 'evolve-context/1.0';
+  mode: 'context';
+  query: string;
+  trust_boundary: 'untrusted_evidence_data_only';
+  context_scope: AgentMemoryContextScope;
+  constraints: Array<KnowledgeRecord & { content_sha256: string }>;
+  references: Array<KnowledgeRecord & { score: number }>;
+  episodic: Array<KnowledgeRecord & { score: number }>;
+  code: UnifiedCodeHit[];
+}
+
+export function parseSearchFrom(value: string | readonly UnifiedSearchSource[] = 'all'): UnifiedSearchSource[] {
+  const sources = typeof value === 'string' ? value.split(',').map(item => item.trim()) : [...value];
+  if (sources.length === 1 && sources[0] === 'all') return ['kb', 'code'];
+  if (!sources.length || sources.some(item => item !== 'kb' && item !== 'code')) {
+    throw new InputError('from must be all or a comma-separated selection of kb,code');
+  }
+  return [...new Set(sources)] as UnifiedSearchSource[];
+}
+
+const authorityWeights = { constraint: 1.4, reference: 1.2, code: 1, episodic: 0.8 } as const;
+const knowledgeKinds: readonly KnowledgeKind[] = ['constraint', 'reference', 'episodic'];
+
+function hitKey(hit: UnifiedSearchHit): string {
+  return `${hit.kind}:${hit.id}`;
+}
+
+function uniqueProjectFirst<T extends { kind: string; id: string; scope: string }>(hits: readonly T[]): T[] {
+  const unique = new Map<string, T>();
+  for (const hit of hits) {
+    const key = `${hit.kind}:${hit.id}`;
+    const current = unique.get(key);
+    if (!current || (current.scope !== 'project' && hit.scope === 'project')) unique.set(key, hit);
+  }
+  return [...unique.values()];
+}
+
+function fuseSearchLists(lists: UnifiedSearchHit[][]): UnifiedSearchHit[] {
+  return rrfMerge(lists.map(uniqueProjectFirst), hitKey)
+    .map(({ rrfScore, ...hit }) => ({ ...hit, score: rrfScore * authorityWeights[hit.kind] }))
+    .sort((left, right) => right.score - left.score || hitKey(left).localeCompare(hitKey(right)));
+}
+
+/**
+ * 在源内保留相关性次序，以 RRF 和权威度权重合并知识与代码。
+ */
+export async function unifiedSearch(
+  sources: UnifiedSearchSources,
+  query: string,
+  options: UnifiedSearchOptions = {},
+): Promise<UnifiedMergedResults | UnifiedContextResults> {
+  const text = requireText(query, 'query');
+  const from = parseSearchFrom(options.from);
+  const mode = options.mode ?? 'merged';
+  const scope = options.scope ?? 'local';
+  if (mode !== 'merged' && mode !== 'context') throw new InputError('mode must be merged or context');
+  if (scope !== 'project' && scope !== 'global' && scope !== 'local') {
+    throw new InputError('scope must be project, global or local');
+  }
+  if (options.kind !== undefined && !knowledgeKinds.includes(options.kind)) {
+    throw new InputError('kind must be episodic, reference or constraint');
+  }
+  if (options.hop !== undefined && (!Number.isInteger(options.hop) || options.hop < 0 || options.hop > 5)) {
+    throw new InputError('hop must be an integer between 0 and 5');
+  }
+  if (!from.includes('kb')) {
+    const knowledgeOnly = [
+      'kind', 'categories', 'type', 'scene', 'session', 'memorySession', 'status',
+      'repository', 'keyword', 'includePathScoped', 'includeHistory', 'resolved', 'hop',
+    ] as const;
+    const incompatible = knowledgeOnly.filter(key => {
+      const value = options[key];
+      return value !== undefined && value !== false && !(key === 'hop' && value === 0) &&
+        !(Array.isArray(value) && value.length === 0);
+    });
+    if (incompatible.length) {
+      throw new InputError(`Knowledge filters require --from kb or all: ${incompatible.join(', ')}`);
+    }
+  }
+  const limit = searchLimit(options.limit);
+  const page = options.page ?? 1;
+  const offset = pageOffset(page, limit);
+  if (mode === 'context' && page !== 1) throw new InputError('Context mode does not support pagination');
+  if (scope === 'global' && from.length === 1 && from[0] === 'code') {
+    throw new InputError('Code search has no global source; use --scope project or local');
+  }
+  const useCode = from.includes('code') && scope !== 'global';
+  if (useCode && page !== 1) {
+    throw new InputError('Code search does not support pagination; use --from kb or refine the query');
+  }
+  const kinds = options.kind ? [options.kind] : knowledgeKinds;
+  const {
+    from: _from, mode: _mode, memorySession, preferredMemoryTypes, contextScope,
+    ...knowledgeOptions
+  } = options;
+  const candidateCount = Math.max(100, offset + limit + 1);
+  const readKnowledge = async (kind: KnowledgeKind): Promise<UnifiedSearchHit[]> => {
+    if (!from.includes('kb') || !sources.kb) return [];
+    const filters: KnowledgeFilters = { ...knowledgeOptions, scope, kind, limit: 100, page: 1 };
+    if (mode === 'context' && kind !== 'episodic') {
+      filters.resolved = true;
+      delete filters.session;
+      delete filters.type;
+      delete filters.scene;
+    }
+    if (kind === 'episodic') {
+      if (mode === 'context') {
+        filters.session = memorySession;
+        // 仓储标识约束正式 Wiki 的适用范围，工作记忆由项目存储和独立会话条件选择。
+        delete filters.repository;
+      } else if (memorySession !== undefined) filters.session = memorySession;
+      filters.preferredMemoryTypes = preferredMemoryTypes;
+    }
+    const results: KnowledgeRecord[] = [];
+    for (let sourcePage = 1; results.length < candidateCount; sourcePage++) {
+      const result = await sources.kb.search(text, { ...filters, page: sourcePage });
+      results.push(...result.results);
+      if (result.pagination.nextPage === null) break;
+    }
+    const ranked = kind === 'episodic' && preferredMemoryTypes?.length
+      ? prioritizeMemoryHits(results.map(hit => ({ ...hit, type: hit.type ?? '' })), preferredMemoryTypes)
+      : results;
+    return uniqueProjectFirst(ranked).map(hit => ({ ...hit, score: hit.score ?? 0 }));
+  };
+  const readCode = async (): Promise<UnifiedCodeHit[]> => {
+    if (!useCode || !sources.code) return [];
+    const hits = (await sources.code.search(text, 100, { paths: options.paths }))
+      .filter(hit => codeMatchesPaths(hit.node.filePath, options.paths));
+    options.knowledgeReads?.recordSearch({
+      source: 'code', query: text, filters: { scope: 'project', paths: options.paths },
+      returnedIds: hits.map(hit => hit.node.id),
+    });
+    return hits.map(({ node, score, highlights }) => ({
+      source: 'code', kind: 'code', id: node.id, title: node.qualifiedName || node.name,
+      snippet: highlights?.join(' ') || node.docstring || node.signature || node.name,
+      content: [node.signature, node.docstring].filter(Boolean).join('\n') || node.name,
+      score, authority: 'symbol', scope: 'project', status: 'active', path: node.filePath,
+      startLine: node.startLine, endLine: node.endLine,
+    }));
+  };
+  const [knowledgeLists, code] = await Promise.all([
+    Promise.all(kinds.map(readKnowledge)),
+    readCode(),
+  ]);
+  const merged = fuseSearchLists([...knowledgeLists, code]);
+  if (mode === 'merged') {
+    return {
+      schema_version: 'evolve-search/1.0', mode, query: text,
+      results: merged.slice(offset, offset + limit),
+      pagination: pagination(page, limit, !useCode && merged.length > offset + limit),
+    };
+  }
+  const constraintOptions: KnowledgeFilters = {
+    ...knowledgeOptions, scope, status: 'active', includeHistory: false, resolved: true,
+  };
+  delete constraintOptions.session;
+  delete constraintOptions.type;
+  delete constraintOptions.scene;
+  const constraints = from.includes('kb') && sources.kb && kinds.includes('constraint')
+    ? uniqueProjectFirst(sources.kb.constraints(constraintOptions))
+    : [];
+  return {
+    schema_version: 'evolve-context/1.0', mode, query: text,
+    trust_boundary: 'untrusted_evidence_data_only',
+    context_scope: {
+      ...contextScope,
+      ...(options.task ? { task_kind: options.task } : {}),
+      ...(options.paths?.length ? { paths: [...new Set(options.paths)] } : {}),
+    },
+    constraints: constraints.map(hit => ({
+      ...hit, content_sha256: `sha256:${createHash('sha256').update(hit.content).digest('hex')}`,
+    })),
+    references: merged.filter((hit): hit is KnowledgeRecord & { score: number } => hit.source === 'kb' && hit.kind === 'reference').slice(0, limit),
+    episodic: merged.filter((hit): hit is KnowledgeRecord & { score: number } => hit.source === 'kb' && hit.kind === 'episodic').slice(0, limit),
+    code: merged.filter((hit): hit is UnifiedCodeHit => hit.source === 'code').slice(0, limit),
+  };
 }

@@ -3,7 +3,8 @@
 Use committed execution evidence whenever possible: `evolve session review` reconstructs Run transitions, retries, Skill references, loaded Skill files, and `knowledge_reads`.
 
 - When passing an explicit `--history` file, supply normalized `transcript-evidence/1.0` records (preserve message IDs and pair every quoted fragment with a receipt or verification source; raw CLI transcripts are not directly ingested as evidence).
-- If review returns no attributable signal, end the loop with a zero-change result.
+- The OpenViking lifecycle may pass one fixed serialized Session review with `--review <file>`; it must contain verifiable Run sources, and Agy discussion evidence must stay within those sources. A review with no signals stops the round before baseline with `round.status = "no_signals"` and zero Skill changes.
+- If review returns no attributable signal (and `--allow-empty-history` is not set), `evolve-loop.mjs` stops the round before Agy discussion with `round.status = "no_attributable_signals"` and zero Skill changes (`state.status = "no_attributable_signals"`).
 
 ## Attribution Checklist
 

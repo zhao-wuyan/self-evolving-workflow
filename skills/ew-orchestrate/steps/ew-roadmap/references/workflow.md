@@ -4,16 +4,16 @@ Session DAG decomposition: `Parse & Context -> Codebase Mapping -> Decompose / R
 
 ## Step 1: Load Context & Upstream
 
-1. Complete the Knowledge Gate (`session-priors` / `wiki_context` / CLI `--reads`) and inspect existing `evolve session list` state so already-completed work is excluded.
-2. Read bound `current-blueprint` / `upstream-context` when provided (`read_artifact` / `evolve run artifact-read`).
-3. If architectural boundaries are unclear, run a read-only exploration subagent (`invoke_subagent` / host equivalent, joined before Step 2) and optional `search_web` for external API constraints -> save summary to `{run_dir}/evidence/roadmap-context.json`.
+1. Complete the Run Knowledge Gate (`evolve skill workflows show session-run`) and inspect existing `evolve session list` state so already-completed work is excluded. Under `-c`, inspect prior Run evidence/partial `outputs/roadmap.json` via `evolve run get` (or bound `current-roadmap`) before continuing.
+2. Read bound `current-blueprint` / `current-brainstorm` / `upstream-context` when provided (`read_artifact` / `evolve run read artifact`).
+3. If architectural boundaries are unclear, run a read-only exploration subagent (`cli-explore-agent` / `cli_explore_agent`, joined before Step 2) and optional `search_web` for external API constraints -> save summary to `{run_dir}/evidence/roadmap-context.json`. Dispatch `workflow-roadmapper` (`workflow_roadmapper`, or inline role instructions when absent; joined before Step 3) when delegating Session DAG decomposition/review.
 
 ## Step 2: Execute Selected Mode
 
 - **Create mode**:
   1. Parse requirement into goals, hard constraints, and acceptance criteria.
   2. Group requirements into cohesive Sessions using the **default 1-session / 3-hard-condition split rule** (`>= 5` estimated tasks per Session). Map every active requirement to one owning Session and assign `depends_on` edges.
-  3. Confirm scope/mode (`progressive` / `direct` / `auto`) and Session boundaries via structured user prompt (`ask_question` or host equivalent; auto-accept defaults under `-y`).
+  3. Apply `-m` mode (`progressive`: prompt via `ask_question`/host equivalent to confirm Session splits and criteria; `direct`: finalize directly without step-by-step confirmation; `auto`: `direct` when boundaries are clear, else `progressive`; `-y` skips prompts).
   4. Re-audit splits if `> 3` Sessions exist and merge unjustified splits.
 - **Revise mode (`--revise`)**:
   1. Load `current-roadmap` (`E004` if missing). Check which Sessions are already sealed/completed; refuse (`E005`) or confirm adjustment if a change alters completed scope.
@@ -23,6 +23,6 @@ Session DAG decomposition: `Parse & Context -> Codebase Mapping -> Decompose / R
 
 ## Step 3: Write Outputs & Seal (`dag-valid`, `sessions-registered`)
 
-1. Write `{run_dir}/outputs/roadmap.json` (`roadmap/1.0`: `sessions[]` with `id`, `title`, `intent`, `scope`, `requirement_refs[]`, `acceptance_criteria[]`, `depends_on[]`, `status`) and `{run_dir}/outputs/roadmap.md` (including `## Roadmap Decisions` and dependency graph).
-2. Verify acyclicity (topological sort), zero dangling `depends_on`, and complete requirement mapping.
-3. Write `{run_dir}/report.md` (`next` proposing `ew-analyze` or `ew-plan` for the first ready Session) and seal via fenced `evolve run complete <run_id> --session <session> --actor <actor> --expected-orchestration-revision <rev> --expected-run-revision <rev> --gate dag-valid --gate sessions-registered --summary "<summary>" --verdict done|done_with_concerns`. Stage reusable architecture learnings through `ew-knowledge`.
+1. Write `{run_dir}/outputs/roadmap.json` (`_meta: { kind: "roadmap", schema: "roadmap/1.0", role: "primary", alias: "current-roadmap" }`, `sessions[]` with `id`, `title`, `intent`, `scope`, `requirement_refs[]`, `acceptance_criteria[]`, `depends_on[]`, `status: ready|pending|completed`) and `{run_dir}/outputs/roadmap.md` (including `## Roadmap Decisions` and dependency graph).
+2. Verify acyclicity (topological sort), zero dangling `depends_on`, complete requirement mapping, and clean alignment with `evolve session list` (do NOT call `evolve session create` here; the orchestrator opens downstream execution Sessions from `sessions[]`).
+3. Write `{run_dir}/report.md` (`verdict: ready|ready_with_concerns|blocked|failed`; `next` proposing the orchestrator open the first `ready` Session in `sessions[]` via `ew-analyze` or `ew-plan`) and seal or transition the Run per `evolve skill workflows show session-run` (`--gate dag-valid --gate sessions-registered`). Stage reusable architecture learnings through `ew-knowledge` (`evolve skill workflows show ew-knowledge`).

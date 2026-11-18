@@ -8,6 +8,7 @@ import extension from '../dist/omp-extension.js';
 import { runBundledWorkflow } from '../dist/omp-cli-bridge.js';
 import { contentSha256 } from '../dist/knowledge-reads.js';
 import { publishRelease, readProjectHead } from '../dist/openviking/assets.js';
+import { workflowDbPath } from '../dist/workflow-runtime.js';
 import { fixture } from './evolve-workflow-support.mjs';
 import { protocol, projectFixture, seed, releaseFromProject } from './openviking-support.mjs';
 import { setImmediate as nextTurn } from 'node:timers/promises';
@@ -51,14 +52,14 @@ function harness(root, session = randomUUID(), history = []) {
   return h;
 }
 function events(root, session) {
-  const db = new DatabaseSync(join(root, '.agent-memory', 'workflow.db'), { readOnly: true });
+  const db = new DatabaseSync(workflowDbPath(root), { readOnly: true });
   try {
     return db.prepare('SELECT body FROM host_knowledge WHERE host_session = ? ORDER BY rowid').all(session)
       .map(row => JSON.parse(row.body));
   } finally { db.close(); }
 }
 function trigger(root, enabled) {
-  const db = new DatabaseSync(join(root, '.agent-memory', 'workflow.db'));
+  const db = new DatabaseSync(workflowDbPath(root));
   try {
     db.exec(enabled ? "CREATE TRIGGER fail_host BEFORE INSERT ON host_knowledge BEGIN SELECT RAISE(ABORT, 'host write failed'); END;"
       : 'DROP TRIGGER fail_host');
@@ -66,7 +67,7 @@ function trigger(root, enabled) {
 }
 function addWiki(f, id, mode, body) {
   f.write('wiki-draft.json', JSON.stringify({ operation: 'create', entry: id, title: id, mode, body }));
-  f.agent('wiki', 'apply', f.agent('wiki', 'propose', 'wiki-draft.json', '--evidence', 'fixture:omp-plugin').id);
+  f.agent('kb', 'apply', f.agent('kb', 'propose', 'wiki-draft.json', '--evidence', 'fixture:omp-plugin').id);
 }
 function readBound(f, session, run) {
   f.evolve('run', 'skill-read', run.run_id, '--session', session);
@@ -78,7 +79,7 @@ function readBound(f, session, run) {
 test('OMP host scopes isolate real IDs, restore active branches, reject stale exact reads and replay original results', async t => {
   const f = fixture('evolve-omp-host-');
   t.after(async () => { await closeHarnesses(f.root); f.cleanup(); });
-  f.agent('memory', 'put', 'Traceable needle release procedure.', '--id', 'needle', '--type', 'work_method', '--session', 'seed');
+  f.agent('kb', 'add', 'Traceable needle release procedure.', '--kind', 'episodic', '--id', 'needle', '--type', 'work_method', '--session', 'seed');
   const a = harness(f.root, 'same-title-A');
   await a.event('session_start');
   t.after(() => a.event('session_shutdown'));
@@ -115,7 +116,7 @@ test('OMP host scopes isolate real IDs, restore active branches, reject stale ex
 test('OMP concurrent calls preserve both searches; append failure replays committed evidence without duplicate reads', async t => {
   const f = fixture('evolve-omp-concurrency-');
   t.after(async () => { await closeHarnesses(f.root); f.cleanup(); });
-  f.agent('memory', 'put', 'alpha beta exact record', '--id', 'record', '--session', 'seed');
+  f.agent('kb', 'add', 'alpha beta exact record', '--kind', 'episodic', '--id', 'record', '--session', 'seed');
   const h = harness(f.root);
   await h.event('session_start');
   t.after(() => h.event('session_shutdown'));
@@ -156,7 +157,7 @@ test('OMP host and all three Run evidence paths roll back together; unbind never
   const search = await h.call('wiki_context', { query: 'atomic' });
   assert.ok(search.references.some(item => item.id === 'entries/atomic-reference'));
   const page = await h.call('wiki_reference', { id: 'entries/atomic-reference' });
-  assert.equal(page.body, f.agent('wiki', 'get', 'entries/atomic-reference', '--resolved').body);
+  assert.equal(page.body, f.agent('kb', 'get', 'entries/atomic-reference', '--kind', 'wiki', '--resolved').content);
   const selectedPath = join(f.root, 'wiki/entries/atomic-reference.md');
   writeFileSync(selectedPath, readFileSync(selectedPath, 'utf8').replace('Atomic reference body.', 'Changed atomic body.'));
   const beforeChanged = snapshot();
@@ -206,7 +207,7 @@ test('OMP OpenViking release survives head updates and restart; concurrent remot
   const server = await protocol(t);
   const f = projectFixture(t, server);
   f.dispose(() => closeHarnesses(f.root));
-  f.agent('memory', 'put', 'Remote account 00123 exact identifier.', '--id', 'account', '--session', 'seed');
+  f.agent('kb', 'add', 'Remote account 00123 exact identifier.', '--kind', 'episodic', '--id', 'account', '--session', 'seed');
   f.evolve('openviking', 'memory', 'share', 'account');
   const r1 = await seed(f);
   const h = harness(f.root);
@@ -265,22 +266,24 @@ test('OMP workflow control uses the bundled CLI, rejects root escape and reports
   const h = harness(f.root);
   await h.event('session_start');
   t.after(() => h.event('session_shutdown'));
-  const capabilities = await h.call('workflow', { argv: ['capabilities'] });
-  assert.equal(capabilities.exit_code, 0);
-  assert.equal(JSON.parse(capabilities.stdout).schema_version, 'evolve-workflow/1.0');
-  const installed = await runBundledWorkflow(f.root, ['install', '--scope', 'project', '--skill', 'ew-orchestrate', '--yes']);
+  const status = await h.call('workflow', { argv: ['skill', 'status', '--scope', 'project'] });
+  assert.equal(status.exit_code, 0);
+  assert.equal(JSON.parse(status.stdout).schema_version, 'evolve-install-status/1.0');
+  const installed = await runBundledWorkflow(f.root, ['skill', 'install', '--scope', 'project', '--skill', 'ew-orchestrate', '--yes']);
   const kept = JSON.parse(installed.stdout).kept_sources[0];
   assert.equal(kept.name, 'ew-orchestrate');
   assert.equal(kept.path, join(f.root, 'skills/ew-orchestrate/SKILL.md'));
   assert.equal(kept.differs, false);
   const customized = '---\nversion: [unfinished\n---\n用户修改的 Skill，保留原样。\n';
   writeFileSync(kept.path, customized);
-  const repeated = await runBundledWorkflow(f.root, ['install', '--scope', 'project', '--skill', 'ew-orchestrate', '--yes']);
+  const repeated = await runBundledWorkflow(f.root, ['skill', 'install', '--scope', 'project', '--skill', 'ew-orchestrate', '--yes']);
   assert.equal(repeated.exit_code, 0);
   assert.equal(readFileSync(kept.path, 'utf8'), customized);
   assert.equal(JSON.parse(repeated.stdout).kept_sources[0].differs, true);
-  await assert.rejects(runBundledWorkflow(f.root, ['capabilities', '--root', '..']), /root is fixed/);
-  await assert.rejects(runBundledWorkflow(f.root, ['memory', 'get', 'anything']), /workflow control argv/);
+  await assert.rejects(runBundledWorkflow(f.root, ['skill', 'status', '--root', '..']), /root is fixed/);
+  await assert.rejects(runBundledWorkflow(f.root, ['kb', 'get', 'anything']), /workflow control argv/);
+  await assert.rejects(runBundledWorkflow(f.root, ['experience', 'publish', 'x']), /only read personal experience/);
+  await assert.rejects(runBundledWorkflow(f.root, ['experience', 'review', 'x']), /only read personal experience/);
   const failure = await h.call('workflow', { argv: ['session', 'status', '--session', 'missing'] });
   assert.equal(failure.isError, true);
   assert.match(failure.content[0].text, /Session not found/);

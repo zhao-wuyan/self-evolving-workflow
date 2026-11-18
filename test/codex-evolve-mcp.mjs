@@ -73,7 +73,7 @@ function call(name, args) {
         !['high', 'normal', 'low'].includes(args.priority) ||
         (args.when !== undefined && (typeof args.when !== 'string' || !args.when.trim() || args.when.trimStart().startsWith('-'))) ||
         (args.priority === 'normal' && !args.when)) throw new Error('Provide a valid instruction, priority and any required trigger.');
-    return agent('evolve', 'draft', join(root, entry), args.instruction, '--priority', args.priority,
+    return agent('skill', 'draft', join(root, entry), args.instruction, '--priority', args.priority,
       ...(args.when ? ['--when', args.when] : []), ...args.sources.flatMap(source => ['--evidence', source]));
   }
   throw new Error('Unknown retrospective tool.');

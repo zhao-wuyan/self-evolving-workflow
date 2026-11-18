@@ -24,6 +24,12 @@ contract:
     schema: context-package/1.0
     role: attachment
     accepts_negative_evidence: true
+  - kind: blueprint
+    alias: current-blueprint
+    required: false
+    schema: blueprint/1.0
+    role: primary
+    accepts_negative_evidence: true
   - kind: priors
     alias: session-priors
     required: false

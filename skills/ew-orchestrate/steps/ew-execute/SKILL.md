@@ -13,6 +13,7 @@ contract:
     required: false
     schema: plan/1.0
     role: primary
+    accepts_negative_evidence: true
   - kind: review-findings
     alias: latest-review
     required: false

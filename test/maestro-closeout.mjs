@@ -344,7 +344,7 @@ try {
   const constraints = await agent('wiki', 'constraints', '--skill', skill, '--category', 'arch');
   assert.deepEqual(constraints.map(item => item.id), [constraintId]);
 
-  await rm(join(root, 'index.db'));
+  await rm(join(root, '.evolve', 'index.db'));
   await agent('wiki', 'build');
   assert.deepEqual(await agent('wiki', 'constraints', '--skill', skill, '--category', 'arch'), constraints);
   assert.deepEqual(await agent('wiki', 'get', published.id), reference);
@@ -373,7 +373,7 @@ try {
   await addReference(referenceSource, 'preflight-retired', 'Retired preflight');
   await agent('wiki', 'build', '--wiki-root', referenceSource);
   await writeFile(retiredFile, (await readFile(retiredFile, 'utf8')).replace('status: active', 'status: deprecated'));
-  const sourceIndex = join(referenceSource, 'index.db');
+  const sourceIndex = join(referenceSource, '.evolve', 'index.db');
   const sourceIndexBytes = await readFile(sourceIndex);
   await configureLinks(links);
   const searchReferences = (...options) => flow('wiki', 'references', 'preflight', '--hop', '1', ...options);

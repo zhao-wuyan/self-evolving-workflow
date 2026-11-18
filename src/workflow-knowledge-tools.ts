@@ -4,7 +4,6 @@ import type { KnowledgeReads, KnowledgeReadsReceipt } from './knowledge-reads.js
 import type { KnowledgeSources } from './knowledge-sources.js';
 import type { OpenVikingReadEvidence } from './openviking/types.js';
 import type { WorkflowStore } from './workflow-runtime.js';
-import type { RunBinding } from './omp-contract.js';
 
 const text = { type: 'string' };
 const textList = { type: 'array', items: text };
@@ -28,7 +27,7 @@ export interface KnowledgeToolAccess {
   readSkill(from?: string, destination?: string): unknown;
   readArtifact(id: string, scope: WikiLookupScope): unknown;
 }
-export function runKnowledgeAccess(store: WorkflowStore, binding: RunBinding): KnowledgeToolAccess {
+export function runKnowledgeAccess(store: WorkflowStore, binding: { session: string; run: string }): KnowledgeToolAccess {
   const { session, run } = binding;
   return {
     receipt: () => store.brief(session, run).knowledge_reads,

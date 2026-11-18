@@ -1,7 +1,7 @@
 // Adapts TencentDB Agent Memory's MemoryKnowledge code graph bridge (MIT).
 import { mkdirSync, realpathSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import type { CodeGraph as Graph, Edge } from '@colbymchenry/codegraph';
 import { InputError, NotFoundError, requireText, searchLimit } from './common.js';
 
@@ -10,6 +10,15 @@ const writes = new Map<string, Promise<unknown>>();
 
 function sdk(): typeof import('@colbymchenry/codegraph') {
   return require('@colbymchenry/codegraph');
+}
+
+export function codeMatchesPaths(path: string, paths?: readonly string[]): boolean {
+  if (!paths?.length) return true;
+  const normalized = path.replaceAll('\\', '/').replace(/^\.\//, '');
+  return paths.some(value => {
+    const pattern = requireText(value, 'path').replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/$/, '');
+    return normalized === pattern || normalized.startsWith(`${pattern}/`) || posix.matchesGlob(normalized, pattern);
+  });
 }
 
 export class CodeGraph {
@@ -43,10 +52,15 @@ export class CodeGraph {
     await this.withFreshGraph(() => undefined);
   }
 
-  async search(query: string, limit?: number) {
+  async search(query: string, limit?: number, options: { paths?: readonly string[] } = {}) {
     const text = requireText(query, 'query');
     const maxResults = searchLimit(limit);
-    return this.read(graph => graph.searchNodes(text, { limit: maxResults }));
+    return this.read(graph => {
+      if (!options.paths?.length) return graph.searchNodes(text, { limit: maxResults });
+      // SDK 在候选截断后才筛路径，需召回完整候选后再应用路径与数量限制。
+      const candidates = graph.searchNodes(text, { limit: Math.max(1, graph.getStats().nodeCount) });
+      return candidates.filter(hit => codeMatchesPaths(hit.node.filePath, options.paths)).slice(0, maxResults);
+    });
   }
 
   async neighbors(id: string, direction: 'callers' | 'callees', depth = 1) {

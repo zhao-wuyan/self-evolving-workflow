@@ -1,12 +1,14 @@
 // Adapts the TencentDB Agent Memory Wiki manager and per-wiki index (MIT).
-import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 import { UndirectedGraph } from 'graphology';
-import { InputError, NotFoundError, openDb, requireText, searchLimit, transaction } from './common.js';
+import { InputError, NotFoundError, evolvePath, openDb, requireText, searchLimit, transaction } from './common.js';
 import { parseFrontmatter, readSources } from './upstream/frontmatter.js';
 import { graphMultiHopSearch } from './upstream/graph-search.js';
 import { slugify } from './upstream/slug.js';
+import { DEFAULT_PURPOSE, DEFAULT_SCHEMA } from './upstream/template.js';
 import { tokenizeWiki } from './wiki-tokens.js';
 import { appliesToContext, contextSpecificity, readWikiEntryMetadata, type WikiContext, type WikiEntryMetadata } from './wiki-entry.js';
 import type { WikiIngestOptions } from './wiki-ingest.js';
@@ -24,6 +26,7 @@ interface Page {
 
 interface PageFile extends Page {
   body: string;
+  tags: string[];
   links: string[];
 }
 
@@ -66,10 +69,13 @@ export function readWikiPages(root: string, entriesOnly = false): PageFile[] {
       const snippet = typeof frontmatter.description === 'string' && frontmatter.description.trim()
         ? frontmatter.description.trim()
         : [...body.replace(/^#+\s+.*$/gm, '').trim()].slice(0, 160).join('').replace(/\s+/g, ' ');
+      const entryMeta = path.startsWith('wiki/entries/') ? readWikiEntryMetadata(path, frontmatter, body) : undefined;
+      const rawTags = Array.isArray(frontmatter.tags) ? frontmatter.tags.filter((item): item is string => typeof item === 'string') : [];
+      const tags = [...new Set([...rawTags, ...(entryMeta?.keywords ?? []), ...(entryMeta?.categories ?? [])])];
       pages.push({
         id: path.slice(5, -3), title, type: frontmatter.type.toLowerCase(), path, snippet,
-        sources: readSources(content), body,
-        ...(path.startsWith('wiki/entries/') ? { entry: readWikiEntryMetadata(path, frontmatter, body) } : {}),
+        sources: readSources(content), body, tags,
+        ...(entryMeta ? { entry: entryMeta } : {}),
         links: [...body.matchAll(/\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]/g)].map(link => link[1].trim()),
       });
     }
@@ -88,15 +94,58 @@ export function readWikiPages(root: string, entriesOnly = false): PageFile[] {
 
 function findEntry(pages: PageFile[], id: string) {
   const key = requireText(id, 'wiki entry ID').toLowerCase();
-  const matches = pages.filter(page => page.entry && (
+  const managedMatches = pages.filter(page => page.entry && (
     page.id.toLowerCase() === key || page.id.toLowerCase() === `entries/${key}` ||
     page.entry.aliases.some(alias => alias.toLowerCase() === key)
   ));
-  if (matches.length > 1) throw new InputError(`Ambiguous Wiki entry ID: ${id}`);
-  const page = matches[0];
+  if (managedMatches.length > 1) throw new InputError(`Ambiguous Wiki entry ID: ${id}`);
+  const page = managedMatches[0] ?? pages.find(item => !item.entry && item.id.toLowerCase() === key);
   if (!page) return null;
-  const { links: _links, ...entry } = page;
+  const { links: _links, tags: _tags, ...entry } = page;
   return entry;
+}
+
+function wikiFingerprint(root: string): string {
+  const wikiRoot = join(root, 'wiki');
+  if (!existsSync(wikiRoot)) return '';
+  const entries: string[] = [];
+  const walk = (dir: string, prefix: string) => {
+    for (const item of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const full = join(dir, item.name);
+      const rel = `${prefix}/${item.name}`;
+      if (item.isDirectory() && item.name !== 'media') walk(full, rel);
+      else if (item.isFile() && /\.md$/i.test(item.name)) {
+        const stat = statSync(full);
+        entries.push(`${rel}:${Math.floor(stat.mtimeMs)}:${stat.size}`);
+      }
+    }
+  };
+  walk(wikiRoot, 'wiki');
+  return createHash('sha256').update(entries.join('\n')).digest('hex');
+}
+
+export function initWiki(root: string, options: { purpose?: string; schema?: string; force?: boolean } = {}) {
+  const resolvedRoot = resolve(root);
+  const wikiDir = join(resolvedRoot, 'wiki');
+  const entriesDir = join(wikiDir, 'entries');
+  mkdirSync(entriesDir, { recursive: true });
+  const files: Array<{ rel: string; path: string; content: string }> = [
+    { rel: 'wiki/purpose.md', path: join(wikiDir, 'purpose.md'), content: `# Wiki Purpose\n\n${options.purpose?.trim() || DEFAULT_PURPOSE}\n` },
+    { rel: 'wiki/schema.md', path: join(wikiDir, 'schema.md'), content: `# Wiki Schema\n\n${options.schema?.trim() || DEFAULT_SCHEMA}\n` },
+  ];
+  const created: string[] = [];
+  const kept: string[] = [];
+  for (const file of files) {
+    if (existsSync(file.path) && !options.force) {
+      kept.push(file.rel);
+      continue;
+    }
+    writeFileSync(file.path, file.content, 'utf8');
+    created.push(file.rel);
+  }
+  const wiki = new Wiki(resolvedRoot);
+  const stats = readWikiPages(resolvedRoot).length > 0 ? wiki.build() : { pages: 0, edges: 0 };
+  return { root: resolvedRoot, created, kept, ...stats };
 }
 
 function resolveEdges(pages: PageFile[]) {
@@ -129,10 +178,62 @@ function resolveEdges(pages: PageFile[]) {
 export class Wiki {
   readonly root: string;
   readonly indexPath: string;
+  private readonly legacyIndexPath: string;
 
   constructor(root: string) {
     this.root = resolve(root);
-    this.indexPath = join(this.root, 'index.db');
+    this.indexPath = evolvePath(this.root, 'index.db');
+    this.legacyIndexPath = join(this.root, 'index.db');
+  }
+
+  hasWiki(): boolean {
+    return lstatSync(join(this.root, 'wiki'), { throwIfNoEntry: false })?.isDirectory() ?? false;
+  }
+
+  /**
+   * 返回当前可读的 Wiki 索引路径，优先 `.evolve/index.db`，兼容旧版根目录 `index.db`。
+   */
+  readableIndexPath(): string | undefined {
+    if (lstatSync(this.indexPath, { throwIfNoEntry: false })?.isFile()) return this.indexPath;
+    if (lstatSync(this.legacyIndexPath, { throwIfNoEntry: false })?.isFile()) return this.legacyIndexPath;
+    return undefined;
+  }
+
+  private isIndexStale(indexPath: string): boolean {
+    const expected = wikiFingerprint(this.root);
+    const db = openDb(indexPath, true);
+    try {
+      const hasState = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'wiki_state'").get();
+      if (!hasState) return true;
+      const row = db.prepare("SELECT value FROM wiki_state WHERE key = 'fingerprint'").get() as { value?: string } | undefined;
+      return row?.value !== expected;
+    } catch {
+      return true;
+    } finally {
+      db.close();
+    }
+  }
+
+  private ensureIndexPath(): string | undefined {
+    const existing = this.readableIndexPath();
+    if (!existing) {
+      if (!this.hasWiki()) return undefined;
+      try {
+        this.build();
+        return this.indexPath;
+      } catch {
+        return undefined;
+      }
+    }
+    // 仅自动刷新 .evolve/index.db，保留旧版根目录 index.db 兼容读取直到显式 wiki build。
+    if (existing === this.indexPath && this.hasWiki() && this.isIndexStale(existing)) {
+      try {
+        this.build();
+      } catch {
+        // 只读环境保留现有可读索引。
+      }
+    }
+    return existing;
   }
 
   async ingest(source: string, options: WikiIngestOptions) {
@@ -145,7 +246,7 @@ export class Wiki {
     return readWikiPages(this.root).filter(page =>
       page.entry?.mode === 'constraint' && page.entry.status === 'active' && appliesToContext(page.entry, context, page.body)
     ).sort((left, right) => contextSpecificity(right.entry!, context) - contextSpecificity(left.entry!, context))
-      .map(({ links: _links, ...page }) => page);
+      .map(({ links: _links, tags: _tags, ...page }) => page);
   }
 
   getEntry(id: string, options: WikiReadOptions = {}) {
@@ -161,8 +262,10 @@ export class Wiki {
   }
 
   private visibleReferences(context: WikiContext) {
-    return readWikiPages(this.root, true).filter(page => page.entry?.mode === 'reference' &&
-      page.entry.status === 'active' && appliesToContext(page.entry, context, page.body));
+    if (!existsSync(join(this.root, 'wiki'))) return [];
+    return readWikiPages(this.root, false).filter(page => page.entry
+      ? page.entry.mode === 'reference' && page.entry.status === 'active' && appliesToContext(page.entry, context, page.body)
+      : true);
   }
 
   getReference(id: string, context: WikiContext = {}, options: WikiReadOptions = {}) {
@@ -177,9 +280,10 @@ export class Wiki {
   }
 
   references(query: string, context: WikiContext = {}, options: WikiSearchOptions = {}) {
-    if (existsSync(this.indexPath)) {
-      const pages = new Map(readWikiPages(this.root, true).map(page => [page.id, page]));
-      const db = openDb(this.indexPath, true);
+    const indexPath = this.ensureIndexPath();
+    if (indexPath) {
+      const pages = new Map(readWikiPages(this.root, false).map(page => [page.id, page]));
+      const db = openDb(indexPath, true);
       try {
         db.exec('BEGIN');
         const result = searchIndex(db, query, {
@@ -190,13 +294,25 @@ export class Wiki {
         });
         const filtered = result.results.filter(hit => {
           const page = pages.get(hit.id);
-          return page?.entry?.mode === 'reference' && page.entry.status === 'active' &&
+          if (!page) return false;
+          if (!page.entry) return true;
+          return page.entry.mode === 'reference' && page.entry.status === 'active' &&
             appliesToContext(page.entry, context, page.body);
         });
         const limit = searchLimit(options.limit);
         const results = filtered
-          .map(hit => ({ ...hit, score: hit.score + contextSpecificity(pages.get(hit.id)!.entry!, context) / 100 }))
-          .sort((left, right) => right.score - left.score || left.id.localeCompare(right.id))
+          .map(hit => {
+            const page = pages.get(hit.id)!;
+            return {
+              ...hit,
+              score: hit.score + (page.entry ? contextSpecificity(page.entry, context) / 100 : 0),
+            };
+          })
+          .sort((left, right) => {
+            const leftManaged = Boolean(pages.get(left.id)?.entry);
+            const rightManaged = Boolean(pages.get(right.id)?.entry);
+            return Number(rightManaged) - Number(leftManaged) || right.score - left.score || left.id.localeCompare(right.id);
+          })
           .slice(0, limit);
         const included = new Set(results.map(result => result.id));
         return {
@@ -213,8 +329,15 @@ export class Wiki {
     }
     const db = openDb(':memory:');
     try {
-      transaction(db, () => indexPages(db, this.visibleReferences(context)));
-      return searchIndex(db, query, options);
+      const visible = this.visibleReferences(context);
+      const managedIds = new Set(visible.filter(page => page.entry).map(page => page.id));
+      transaction(db, () => indexPages(db, visible));
+      const limit = searchLimit(options.limit);
+      const raw = searchIndex(db, query, { ...options, limit: 100 });
+      const results = raw.results
+        .sort((left, right) => Number(managedIds.has(right.id)) - Number(managedIds.has(left.id)) || right.score - left.score || left.id.localeCompare(right.id))
+        .slice(0, limit);
+      return { results, links: raw.links };
     } finally {
       db.close();
     }
@@ -235,31 +358,43 @@ export class Wiki {
 
   build() {
     if (!existsSync(join(this.root, 'wiki'))) throw new NotFoundError('Missing wiki/ directory');
+    mkdirSync(dirname(this.indexPath), { recursive: true });
+    const fingerprint = wikiFingerprint(this.root);
     const db = openDb(this.indexPath);
     try {
-      return transaction(db, () => indexPages(db, readWikiPages(this.root)));
+      return transaction(db, () => indexPages(db, readWikiPages(this.root), fingerprint));
     } finally {
       db.close();
     }
   }
 
   search(query: string, options: WikiSearchOptions = {}) {
-    if (!existsSync(this.indexPath)) throw new NotFoundError('Wiki index missing. Run wiki build first.');
-    const db = openDb(this.indexPath, true);
+    return this.searchWithLimit(query, options, false);
+  }
+
+  searchAll(query: string, options: Omit<WikiSearchOptions, 'limit'> = {}) {
+    return this.searchWithLimit(query, options, true);
+  }
+
+  private searchWithLimit(query: string, options: WikiSearchOptions, all: boolean) {
+    const indexPath = this.ensureIndexPath();
+    if (!indexPath) throw new NotFoundError('Wiki index missing. Run wiki build first.');
+    const db = openDb(indexPath, true);
     try {
       db.exec('BEGIN');
-      return searchIndex(db, query, options);
+      return searchIndex(db, query, options, all);
     } finally {
       db.close();
     }
   }
 }
 
-function indexPages(db: DatabaseSync, pages: PageFile[]) {
+function indexPages(db: DatabaseSync, pages: PageFile[], fingerprint?: string) {
   const edges = resolveEdges(pages);
   db.exec(`
-    CREATE VIRTUAL TABLE IF NOT EXISTS wiki_fts USING fts5(
-      page_id UNINDEXED, title_tok, content_tok, tokenize='unicode61 remove_diacritics 0'
+    DROP TABLE IF EXISTS wiki_fts;
+    CREATE VIRTUAL TABLE wiki_fts USING fts5(
+      page_id UNINDEXED, title_tok, tags_tok, content_tok, tokenize='unicode61 remove_diacritics 0'
     );
     CREATE TABLE IF NOT EXISTS page_meta (
       page_id TEXT PRIMARY KEY, title TEXT, type TEXT, rel_path TEXT, snippet TEXT
@@ -271,19 +406,29 @@ function indexPages(db: DatabaseSync, pages: PageFile[]) {
     CREATE TABLE IF NOT EXISTS graph_edge (
       source_id TEXT NOT NULL, target_id TEXT NOT NULL, PRIMARY KEY (source_id, target_id)
     );
-    DELETE FROM wiki_fts;
+    CREATE TABLE IF NOT EXISTS wiki_state (
+      key TEXT PRIMARY KEY, value TEXT NOT NULL
+    );
     DELETE FROM page_meta;
     DELETE FROM page_sources;
     DELETE FROM wiki_entries;
     DELETE FROM graph_edge;
   `);
-  const fts = db.prepare('INSERT INTO wiki_fts(page_id, title_tok, content_tok) VALUES (?, ?, ?)');
+  if (fingerprint !== undefined) {
+    db.prepare("INSERT OR REPLACE INTO wiki_state (key, value) VALUES ('fingerprint', ?)").run(fingerprint);
+  }
+  const fts = db.prepare('INSERT INTO wiki_fts(page_id, title_tok, tags_tok, content_tok) VALUES (?, ?, ?, ?)');
   const meta = db.prepare('INSERT INTO page_meta(page_id, title, type, rel_path, snippet) VALUES (?, ?, ?, ?, ?)');
   const source = db.prepare('INSERT INTO page_sources(page_id, sources) VALUES (?, ?)');
   const edge = db.prepare('INSERT INTO graph_edge(source_id, target_id) VALUES (?, ?)');
   const entry = db.prepare('INSERT INTO wiki_entries(page_id, status, metadata) VALUES (?, ?, ?)');
   for (const page of pages) {
-    fts.run(page.id, tokenizeWiki(page.title).join(' '), tokenizeWiki(page.body).join(' '));
+    fts.run(
+      page.id,
+      tokenizeWiki(page.title).join(' '),
+      tokenizeWiki(page.tags.join(' ')).join(' '),
+      tokenizeWiki(page.body).join(' '),
+    );
     meta.run(page.id, page.title, page.type, page.path, page.snippet);
     source.run(page.id, JSON.stringify(page.sources));
     if (page.entry) entry.run(page.id, page.entry.status, JSON.stringify(page.entry));
@@ -292,7 +437,7 @@ function indexPages(db: DatabaseSync, pages: PageFile[]) {
   return { pages: pages.length, edges: edges.length };
 }
 
-function searchIndex(db: DatabaseSync, query: string, options: WikiSearchOptions): {
+function searchIndex(db: DatabaseSync, query: string, options: WikiSearchOptions, all = false): {
   results: WikiHit[];
   links: Array<{ source: string; target: string }>;
 } {
@@ -312,15 +457,21 @@ function searchIndex(db: DatabaseSync, query: string, options: WikiSearchOptions
     ? "AND page_id NOT IN (SELECT page_id FROM wiki_entries WHERE status <> 'active')"
     : '';
   const modeVisibility = entries && options.entryMode
-    ? "AND page_id IN (SELECT page_id FROM wiki_entries WHERE json_extract(metadata, '$.mode') = ?)"
+    ? (options.entryMode === 'reference'
+      ? "AND (page_id NOT IN (SELECT page_id FROM wiki_entries) OR page_id IN (SELECT page_id FROM wiki_entries WHERE json_extract(metadata, '$.mode') = ?))"
+      : "AND page_id IN (SELECT page_id FROM wiki_entries WHERE json_extract(metadata, '$.mode') = ?)")
     : '';
-  const seedArgs = options.entryMode ? [expression, options.entryMode, hop ? limit * 2 : limit] : [expression, hop ? limit * 2 : limit];
+  const hasTagsColumn = (db.prepare('PRAGMA table_info(wiki_fts)').all() as Array<{ name: string }>)
+    .some(column => column.name === 'tags_tok');
+  const scoreExpr = hasTagsColumn ? '-bm25(wiki_fts, 0.0, 5.0, 3.0, 1.0)' : '-bm25(wiki_fts, 0.0, 5.0, 1.0)';
+  const candidateLimit = all ? -1 : hop ? limit * 2 : limit;
+  const seedArgs = entries && options.entryMode ? [expression, options.entryMode, candidateLimit] : [expression, candidateLimit];
   const seeds = db.prepare(`
-    SELECT page_id AS id, -bm25(wiki_fts, 0.0, 5.0, 1.0) AS score
+    SELECT page_id AS id, ${scoreExpr} AS score
     FROM wiki_fts WHERE wiki_fts MATCH ? ${visibility} ${modeVisibility} ORDER BY score DESC, page_id LIMIT ?
   `).all(...seedArgs) as Array<{ id: string; score: number }>;
   if (!seeds.length) return { results: [], links: [] };
-  return readHits(db, seeds, limit, hop, decay, Boolean(entries), Boolean(options.includeHistory), options.entryMode);
+  return readHits(db, seeds, all ? Number.MAX_SAFE_INTEGER : limit, hop, decay, Boolean(entries), Boolean(options.includeHistory), options.entryMode, all);
 }
 
 function readHits(
@@ -332,12 +483,15 @@ function readHits(
   hasEntries: boolean,
   includeHistory: boolean,
   entryMode?: 'constraint' | 'reference',
+  all = false,
 ) {
   const hasSources = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='page_sources'").get();
   const modeVisibility = hasEntries && entryMode
-    ? "AND json_extract(e.metadata, '$.mode') = ?"
+    ? (entryMode === 'reference'
+      ? "AND (e.page_id IS NULL OR json_extract(e.metadata, '$.mode') = ?)"
+      : "AND json_extract(e.metadata, '$.mode') = ?")
     : '';
-  const pageArgs = entryMode ? [entryMode] : [];
+  const pageArgs = hasEntries && entryMode ? [entryMode] : [];
   const rows = db.prepare(`SELECT m.page_id AS id, m.title, m.type, m.rel_path AS path, m.snippet,
     ${hasSources ? "COALESCE(s.sources, '[]')" : "'[]'"} AS sources,
     ${hasEntries ? 'e.metadata' : 'NULL'} AS metadata
@@ -362,7 +516,9 @@ function readHits(
     graph.mergeUndirectedEdge(source, target);
     outgoing.get(source)!.add(target);
   }
-  const expanded = graphMultiHopSearch(graph, seeds, { hop, decay, minScore: 0 }).slice(0, limit);
+  const expanded = graphMultiHopSearch(graph, seeds, { hop, decay, minScore: 0,
+    ...(all ? { maxNodes: pages.size } : {}),
+  }).slice(0, limit);
   const results: WikiHit[] = expanded.map(({ id, score, hop, via }) => ({
     ...pages.get(id)!, score, hop, via,
     related: graph.neighbors(id).sort((a, b) => graph.degree(b) - graph.degree(a) || a.localeCompare(b)).slice(0, 10)

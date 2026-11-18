@@ -2,10 +2,11 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { InputError, requireText } from './common.js';
+import { InputError, LEGACY_AGENT_MEMORY_DIR, requireText, resolveEvolveStorage } from './common.js';
 import type { SkillRouteDecision } from './skill-route.js';
 import { draftSkillAddition } from './skill-addition.js';
 import { changeSkillVersion, replaySkillAddition, replaySkillPackage } from './skill-replay.js';
+import { projectSkillRoots } from './workflow-skills.js';
 
 export const SKILL_DESIGN_TASK_VERSION = 'skill-design-task/1.0';
 export const SKILL_DESIGN_RECEIPT_VERSION = 'skill-design-receipt/1.0';
@@ -49,7 +50,7 @@ function hash(value: string | Buffer): string {
 }
 
 function designRoot(root: string): string {
-  return join(resolve(root), '.agent-memory', 'skill-design');
+  return resolveEvolveStorage(root, ['skill-design'], join(resolve(root), LEGACY_AGENT_MEMORY_DIR, 'skill-design'));
 }
 
 function taskPath(root: string, id: string): string {
@@ -72,6 +73,15 @@ function stringList(value: unknown, field: string): string[] {
     throw new InputError(`Invalid ${field}`);
   }
   return [...new Set(value.map(item => item.trim()))];
+}
+
+export function resolveSkillEntry(root: string, skillId: string): string {
+  for (const skillRoot of projectSkillRoots) {
+    const entry = `${skillRoot}/${skillId}/SKILL.md`;
+    if (existsSync(resolve(root, entry))) return entry;
+  }
+  const existingRoot = projectSkillRoots.find(skillRoot => existsSync(resolve(root, skillRoot)));
+  return `${existingRoot ?? 'skills'}/${skillId}/SKILL.md`;
 }
 
 function writeOnce(path: string, content: string): boolean {
@@ -139,7 +149,7 @@ export function createSkillDesignTask(root: string, input: {
     target: {
       ...(skillId ? { skill_id: skillId } : {}),
       ...(input.skillVersion ? { skill_version: requireText(input.skillVersion, 'Skill version') } : {}),
-      ...(skillId ? { entry: `skills/${skillId}/SKILL.md` } : {}),
+      ...(skillId ? { entry: resolveSkillEntry(root, skillId) } : {}),
     },
     design_request: {
       reasons: input.decision.reasons,
@@ -196,7 +206,7 @@ export function reviewSkillDesign(root: string, designId: string) {
   const draft = receipt.design.draft;
   if (draft.mode === 'package') {
     const skillId = requireText(draft.skill_id, 'Skill package ID');
-    const packagePath = `skills/${skillId}`;
+    const packagePath = task.target.entry ? dirname(task.target.entry).replaceAll('\\', '/') : `skills/${skillId}`;
     const entry = `${packagePath}/SKILL.md`;
     if (task.target.skill_id !== skillId || task.target.entry !== entry || draft.package_path !== packagePath || draft.entry !== entry) {
       throw new InputError('Skill package target does not match its task');
@@ -205,8 +215,9 @@ export function reviewSkillDesign(root: string, designId: string) {
     const paths = draft.changes.map((value, index) => {
       const change = object(value, `Skill package file ${index}`);
       const path = requireText(change.path, `Skill package file ${index} path`).replaceAll('\\', '/');
+      // content 为 null 表示删除包内文件，但入口 SKILL.md 必须保留。
       if (!path.startsWith(`${packagePath}/`) || path.split('/').some(part => !part || part === '.' || part === '..') ||
-          typeof change.content !== 'string') {
+          (typeof change.content !== 'string' && (change.content !== null || path === entry))) {
         throw new InputError(`Invalid Skill package file: ${path}`);
       }
       return path;
@@ -237,6 +248,7 @@ export function reviewSkillDesign(root: string, designId: string) {
     instruction: requireText(draft.instruction, 'Skill design instruction'),
     sources: stringList(draft.sources, 'Skill design sources'),
     when: draft.when === undefined ? undefined : requireText(draft.when, 'Skill design trigger'),
+    supersedes: draft.supersedes === undefined ? undefined : stringList(draft.supersedes, 'Skill design superseded learnings'),
   });
   if (regenerated.id !== draft.id || regenerated.baseline.sha256 !== baseline.sha256 ||
       JSON.stringify(regenerated.changes) !== JSON.stringify(draft.changes)) {

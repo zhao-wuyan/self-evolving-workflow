@@ -6,13 +6,26 @@ Mode workflows describe host-neutral capabilities (parallel agents, structured u
 
 | Capability | Antigravity | Codex | OMP |
 |---|---|---|---|
-| Parallel review / audit / archaeology / generalization scan | `invoke_subagent` (parallel), `swarm`, or `run_workflow` | `spawn_agent` / `spawn_agents_on_csv` + `wait_agent` | Native `task` (`context` + `tasks[]`) or eval `agent()`; `scout` research / `reviewer` review / `task` implementation |
-| Lifecycle rule | Join or cancel every spawned child before advancing or ending | Collect all batch/agent outputs before merging; join/cancel children | Results auto-deliver; join at barriers or cancel before ending; never poll; use host `wait` only when fully blocked |
-| Cross-angle CLI verification | `evolve delegate "<prompt>" --to codex\|agy\|omp --mode analysis\|write` | Bound Run supported for Codex | Bound Run supported for OMP; strict analysis uses the separate CLI process, not native children |
+| Parallel review / audit / archaeology / generalization scan | `invoke_subagent` (parallel), `swarm`, or `run_workflow` | `spawn_agent` (`agent_type`) / `spawn_agents_on_csv` + `wait_agent` | Native `task` (`context` + `tasks[]`) or eval `agent()`; `scout` research / `reviewer` review / `task` implementation |
+| Lifecycle rule | **Always join, complete, or cancel every spawned subagent before advancing or ending scope** | Collect all batch CSV/agent outputs before merging; join/cancel children | Results auto-deliver; join at barriers or cancel before ending; never poll; use host `wait` only when fully blocked |
+| Cross-angle CLI verification | `evolve agent exec "<prompt>" --to codex\|agy\|claude\|omp --mode analysis\|write` (pass `--session <id> --run <run>` only with `--to codex` or `--to omp`) | Same (bound Session/Run identifiers and CLI read instructions are passed to the Agent) | Bound Run supported for Codex and OMP; OMP strict analysis uses the one-shot restricted worker, not native children |
 
-The [OMP host contract](../../ew-orchestrate/SKILL.md#omp-native-delegation-and-strict-cli-analysis) applies to every mode, including examples that retain Codex as their default. OMP CLI contract: `evolve delegate <prompt> --to omp --mode analysis|write [--role <name>] [--model <selector>] [--timeout <seconds>] [--session <id> --run <id>]`. Defaults: analysis, `analysis=@plan` / `write=@task`, 600 seconds; model overrides role, roles only select models (not Plan mode or authorization). `OMP_EXECUTABLE` overrides the executable; `--trusted-extension` loads the bundled SDK bridge without an extra OMP npm dependency, community sandbox, or container.
+### Recommended Installed `agent_type` Mapping
 
-Analysis exposes only `read`/`grep`/`glob` plus six bound Run knowledge tools, with no `bash`/`eval`/`write`/`task` or ambient MCP. Write exposes read/write tools, `bash`/`lsp`, and bound knowledge tools; never bypasses user approval or enables yolo. Agent duties and native `tools` lists are not OS permissions or proof of excluding additional MCP. Strict read-only security/defensive delegation must use `evolve delegate --to omp --mode analysis` on OMP.
+When `evolve skill install` provisions `agents/` for the active host, dispatch Odyssey roles using these named definitions (falling back to inline role instructions when absent):
+- **Archaeology / exploration**: `cli-explore-agent` (`cli_explore_agent` in Codex)
+- **Debug hypothesis / fix**: `workflow-debugger` (`workflow_debugger`)
+- **Audit / review dimensions** (`improve`, `review`, `security`, `defensive`, `ui`): `workflow-reviewer` (`workflow_reviewer`)
+- **Planex planning & checking**: `workflow-planner` (`workflow_planner`), `workflow-plan-checker` (`workflow_plan_checker`)
+- **Fix / execution**: `workflow-executor` (`workflow_executor`) or `impeccable-agent` (`impeccable_agent` for non-interactive `ew-impeccable` passes in `ui` mode)
+- **Verification**: `workflow-verifier` (`workflow_verifier`), `workflow-integration-checker` (`workflow_integration_checker`)
+- **OMP hosts**: map the same roles to native `scout`, `reviewer`, and `task` (or eval `agent()` with the same role instructions).
+
+The [OMP host contract](../../ew-orchestrate/SKILL.md#omp-native-delegation-and-strict-cli-analysis) applies to every mode, including examples that retain Codex as their default. OMP CLI contract: `evolve agent exec <prompt> --to omp --mode analysis|write [--role <name>] [--model <selector>] [--timeout <milliseconds>] [--session <id> --run <id>]`. Defaults: analysis, `analysis=@plan` / `write=@task`, 600000 ms; model overrides role, roles only select models (not Plan mode or authorization). `OMP_EXECUTABLE` overrides the executable; `--trusted-extension` loads the bundled SDK bridge without an extra OMP npm dependency, community sandbox, or container. This is a one-shot restricted worker, not a managed OMP `start`/`send` session, and it does not support worktrees or `--stream`.
+
+Analysis exposes only `read`/`grep`/`glob` plus six bound Run knowledge tools, with no `bash`/`eval`/`write`/`task` or ambient MCP. The six bound tools use shared in-process execution, not an MCP child process. Write exposes read/write tools, `bash`/`lsp`, and bound knowledge tools; never bypasses user approval or enables yolo. Agent duties and native `tools` lists are not OS permissions or proof of excluding additional MCP. Strict read-only security/defensive delegation must use `evolve agent exec --to omp --mode analysis` on OMP.
+
+This CLI delegation is distinct from the OMP installable plugin: it does not load plugin tools and does not require the plugin to be installed. Plugin packaging and its in-process knowledge tools are a separate distribution surface owned by the OMP plugin branch.
 
 Pass `--session` and `--run` together for Codex/OMP Run binding; Agy stays standalone. For an independent second opinion explicitly choose an authorized model (OMP `--model <selector>`), different from the original model for a cross-model claim. Same-model children are not independent-model verification. Do not create agent definitions or user configuration to obtain model access.
 
@@ -25,12 +38,12 @@ Pass `--session` and `--run` together for Codex/OMP Run binding; Agy stays stand
 
 - **`phase_goals[]` in `outputs/session.json`** is the single authoritative campaign progress record.
 - Mirror `phase_goals[]` updates via the host's native progress tracker when available (`update_plan` in Codex, `todo` in OMP; Antigravity hosts respect native `/goal` state and never re-emit `/goal` prose or recreate cleared UI state). OMP batches share background via `context` with one `tasks[]` item per independent slice; eval `agent()` handles follow the same join/cancel rule.
-- **Optional `--heartbeat`**: update `session.json.updated_at` on each phase transition (if >15 min stalls occur, increment `stale_count`; Antigravity `schedule` is used only when the user explicitly requests a recurring timer).
+- **Optional `--heartbeat`**: update `session.json.updated_at` on each phase transition (if >15 min stalls occur, increment `progress_metrics.heartbeat_stalls` rather than `stale_count`; Antigravity `schedule` is used only when the user explicitly requests a recurring timer).
 
 ## 4. Run Artifact Metadata & Sealing
 
-- Every mode stores artifacts exclusively under `{run_dir}/outputs/` (or workspace source files in mutable fix phases).
-- Attach matching `kind`, `schema`, `role`, and `alias` from `references/prepare/odyssey-<mode>.md` to:
+- Every mode stores artifacts exclusively under `{run_dir}/outputs/` (or workspace source files in mutable `FIX`/`EXECUTE` phases). `outputs/session.json` is `required: true` in all modes; `evidence.ndjson`, `understanding.md`, `explore.json` (`debug`/`review`), and `anchors.json` (`defensive`) follow each mode's `contract.produces` in `references/prepare/odyssey-<mode>.md` (`evidence.ndjson` and `understanding.md` are `required: true` in `debug`/`security`/`defensive`, and produced during full campaigns while `required: false` in `improve`/`planex`/`review`/`ui`).
+- Attach matching `kind`, `schema`, `role`, and `alias` from `references/prepare/odyssey-<mode>.md` `contract.produces` to:
   - Top-level `_meta` in JSON outputs (`session.json`, plus `explore.json` or `anchors.json`)
   - First record's `_meta` in `evidence.ndjson` (append-only NDJSON lines thereafter)
   - YAML frontmatter in `understanding.md`

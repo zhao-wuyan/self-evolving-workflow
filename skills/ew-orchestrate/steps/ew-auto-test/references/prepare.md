@@ -8,11 +8,11 @@ Confirm scenario source routing, Knowledge Gate test conventions, and RED-GREEN 
 - **`--max-iter N`**: outer convergence iteration cap (`5` default; `1` = single-pass generation).
 - **`--layer L0|L1|L2|L3`**: start from or restrict execution to one test layer (`L0` unit/pure -> `L1` integration -> `L2` CLI/API -> `L3` E2E).
 - **`--dry-run`**: generate scenario plan and traceability matrix without writing or running test files.
-- **`--re-run`** / **`-c`**: resume or re-run only previously failed scenarios from `.tests/auto-test/state.json`.
+- **`--re-run`** / **`-c`**: resume or re-run previously failed scenarios from `.tests/auto-test/state.json` (falling back to prior Run `run get` / sealed `latest-auto-test` if `.tests/auto-test/state.json` is absent).
 
 ## Knowledge Gate
 
-Reuse bound `session-priors` (`test`/`coding`); otherwise query `wiki_context` + `wiki_reference` (or CLI `evolve context "<module> test conventions" --task auto-test --session <session> --include-memory --reads "<run_dir>/knowledge-reads.json"` + `--from-search <search-id>`).
+Complete the Run Knowledge Gate (`evolve skill workflows show session-run`, using `--task auto-test` in CLI `--reads`) for `test`/`coding` conventions.
 
 ## Pipeline Invariants
 

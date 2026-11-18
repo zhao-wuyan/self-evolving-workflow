@@ -8,7 +8,7 @@
     },
     "baseline": false,
     "knowledge_reads": {
-      "searched_sources": ["wiki_references", "memory"],
+      "searched_sources": ["wiki", "memory"],
       "loaded_ids": ["entries/prod-freeze-protocol", "mem-prod-freeze-01"]
     }
   },
@@ -21,7 +21,7 @@
     },
     "baseline": true,
     "knowledge_reads": {
-      "searched_sources": ["wiki_references"],
+      "searched_sources": ["wiki"],
       "loaded_ids": ["entries/release-checksum"]
     }
   }

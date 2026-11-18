@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
+const cli = fileURLToPath(new URL('../dist/workflow-cli.js', import.meta.url));
 const runner = fileURLToPath(new URL('../skills/workflow-evolve/scripts/codex-replay.mjs', import.meta.url));
 const fixture = mkdtempSync(join(tmpdir(), 'evolve-codex-replay-'));
 const repo = join(fixture, 'repo');
@@ -36,12 +36,12 @@ try {
   git('config', 'core.autocrlf', 'false');
   git('add', entry);
   git('commit', '-qm', 'Migration preflight fixture');
-  agent('memory', 'put', 'Staging migration checks record schema and row counts before applying changes.',
+  agent('kb', 'add', 'Staging migration checks record schema and row counts before applying changes.',
     '--db', env.AGENT_MEMORY_DB, '--id', 'staging-checks');
 
   const draft = join(fixture, 'draft.json');
   const cases = join(fixture, 'cases.json');
-  writeFileSync(draft, JSON.stringify(agent('evolve', 'draft', entry,
+  writeFileSync(draft, JSON.stringify(agent('skill', 'draft', entry,
     'For migration requests targeting staging, return exactly `migrate staging --dry-run`.',
     '--priority', 'normal', '--when', 'handling a migration request for staging',
     '--evidence', 'fixture:staging-preflight-correction')));
@@ -49,7 +49,7 @@ try {
     { id: 'staging-preflight', input: migration, baseline: false },
     { id: 'status-regression', input: status, baseline: true },
   ]));
-  const receipt = agent('evolve', 'replay', draft, '--runner', runner, '--scenarios', cases);
+  const receipt = agent('skill', 'replay', draft, '--runner', runner, '--scenarios', cases);
   assert.deepEqual(receipt.scenarios.map(item => [item.baseline.passed, item.candidate.passed]), [[false, true], [true, true]]);
   assert.ok(receipt.scenarios.every(item => item.candidate.knowledgeReads.searches.some(search => search.source === 'memory')));
   const learning = receipt.files.find(path => path.includes('/references/learnings/'));
@@ -58,13 +58,13 @@ try {
   assert.ok(!receipt.scenarios[1].candidate.loaded.some(file => file.path === learning));
   console.log('Codex replay passed the staging regression and preserved the status case.');
 
-  assert.equal(agent('evolve', 'apply', receipt.id).commit, receipt.candidate);
+  assert.equal(agent('skill', 'apply', receipt.id).commit, receipt.candidate);
   const applied = JSON.parse(invoke(process.execPath, [runner], JSON.stringify({
     id: 'verify-applied', input: migration, entry, commit: git('rev-parse', 'HEAD'),
   })));
   assert.equal(applied.passed, true);
   assert.deepEqual(applied.loaded, receipt.scenarios[0].candidate.loaded);
-  agent('evolve', 'rollback', receipt.id);
+  agent('skill', 'rollback', receipt.id);
   assert.equal(readFileSync(join(repo, entry), 'utf8'), baseline);
   const rolledBack = JSON.parse(invoke(process.execPath, [runner], JSON.stringify({
     id: 'verify-rollback', input: migration, entry, commit: git('rev-parse', 'HEAD'),
@@ -78,7 +78,7 @@ try {
     task: 'Explicitly consult the optional Skill references for the staging timeout troubleshooting example. Return the documented command if present. If there is no optional reference, return exactly `no example`.',
     expected: 'migrate status --timeout 45',
   };
-  const lowDraft = agent('evolve', 'draft', entry,
+  const lowDraft = agent('skill', 'draft', entry,
     'For the staging timeout example, return exactly `migrate status --timeout 45`.',
     '--priority', 'low', '--when', 'staging timeout troubleshooting', '--evidence', 'fixture:timeout-case');
   const lowDocument = `${packagePath}/references/learnings/${lowDraft.id}.md`;
@@ -90,20 +90,20 @@ try {
     { id: 'look-up-timeout', input: reference, baseline: false },
     { id: 'status-without-lookup', input: status, baseline: true },
   ]));
-  const lowReceipt = agent('evolve', 'replay', draft, '--runner', runner, '--scenarios', cases);
+  const lowReceipt = agent('skill', 'replay', draft, '--runner', runner, '--scenarios', cases);
   assert.ok(lowReceipt.scenarios[0].candidate.loaded.some(file => file.path === index));
   assert.ok(lowReceipt.scenarios[0].candidate.loaded.some(file => file.path === lowDocument));
   assert.deepEqual(lowReceipt.scenarios[1].candidate.loaded.map(file => file.path), [entry]);
   console.log('Codex followed the optional reference index only for the explicit lookup.');
 
-  writeFileSync(draft, JSON.stringify(agent('evolve', 'draft', entry,
+  writeFileSync(draft, JSON.stringify(agent('skill', 'draft', entry,
     'For any staging migration request, include `--dry-run` in the returned command.',
     '--priority', 'high', '--evidence', 'fixture:staging-preflight-gate')));
   writeFileSync(cases, JSON.stringify([
     { id: 'required-staging-gate', input: migration, baseline: false },
     { id: 'status-with-gate', input: status, baseline: true },
   ]));
-  const highReceipt = agent('evolve', 'replay', draft, '--runner', runner, '--scenarios', cases);
+  const highReceipt = agent('skill', 'replay', draft, '--runner', runner, '--scenarios', cases);
   assert.deepEqual(highReceipt.files, [entry]);
   assert.deepEqual(highReceipt.scenarios.map(item => item.candidate.loaded.map(file => file.path)), [[entry], [entry]]);
   console.log('Codex applied the required staging gate after reading the entry.');

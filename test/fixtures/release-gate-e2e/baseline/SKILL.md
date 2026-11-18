@@ -19,6 +19,6 @@ contract:
 
 # Release Gate
 
-1. Resolve active Wiki constraints with `agent-memory wiki constraints --task release --category review --trace`.
+1. Resolve active knowledge constraints with `evolve search "release gate" --from kb --mode context --kind constraint --task release --category review --trace`.
 2. Follow [the checksum verification guide](references/check-checksum.md) to validate `artifact_sha256`.
 3. Write `outputs/release-gate.json` with `schema_version: "release-gate/1.0"`, `environment`, `artifact_sha256`, `decision`, `reasons`, `consulted_knowledge_ids`, and `consulted_memory_ids`.

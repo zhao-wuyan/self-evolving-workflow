@@ -122,7 +122,7 @@ export async function verifyEvolveHost({
       task: 'Return the migration tracker status command.', expected: 'migrate status',
     }, baseline: true },
   ]));
-  const receipt = await agent('evolve', 'replay', draftPath, '--runner', replayRunner, '--scenarios', casesPath);
+  const receipt = await agent('skill', 'replay', draftPath, '--runner', replayRunner, '--scenarios', casesPath);
   assert.deepEqual(receipt.sources, draft.sources);
   assert.deepEqual(receipt.scenarios.map(item => [item.baseline.passed, item.candidate.passed]), [[false, true], [true, true]]);
   const entry = `skills/${skill}/SKILL.md`;
@@ -132,13 +132,13 @@ export async function verifyEvolveHost({
   for (const read of receipt.scenarios[0].candidate.loaded) {
     assert.equal(read.sha256, createHash('sha256').update(await git('show', `${receipt.candidate}:${read.path}`)).digest('hex'));
   }
-  assert.equal((await agent('evolve', 'apply', receipt.id)).commit, receipt.candidate);
+  assert.equal((await agent('skill', 'apply', receipt.id)).commit, receipt.candidate);
   const replay = async commit => JSON.parse(await invoke(process.execPath, [replayRunner], env,
     JSON.stringify({ id: 'evolve-published', input: staging, entry, commit })));
   const applied = await replay(receipt.candidate);
   assert.equal(applied.passed, true);
   assert.deepEqual(applied.loaded, receipt.scenarios[0].candidate.loaded);
-  const rollback = await agent('evolve', 'rollback', receipt.id);
+  const rollback = await agent('skill', 'rollback', receipt.id);
   const reverted = await replay(rollback.commit);
   assert.equal(reverted.passed, false);
   assert.deepEqual(reverted.loaded, receipt.scenarios[0].baseline.loaded);

@@ -5,13 +5,19 @@ search_profile:
   wiki: [constraints, references]
   memory: [work_method, error, retry]
 description: Decompose confirmed analysis or requirements into an executable DAG, waves, and collision-free tasks
-argument-hint: '[scope] [--gaps] [--tdd] [--revise [instructions]] [--check <plan-dir>] [-y]'
+argument-hint: '[scope] [--from <alias>] [--gaps] [--tdd] [--revise [instructions]] [--dir <plan-dir>] [--check <plan-dir>] [-y]'
 contract:
   consumes:
   - kind: findings
     alias: current-analysis
     required: false
     schema: findings/1.0
+    role: primary
+    accepts_negative_evidence: true
+  - kind: brainstorm
+    alias: current-brainstorm
+    required: false
+    schema: brainstorm/1.0
     role: primary
     accepts_negative_evidence: true
   - kind: diagnosis
@@ -127,5 +133,5 @@ session-mode: run
 
 Read [preparation](references/prepare.md), then follow the [workflow](references/workflow.md).
 
-- Follow `skills/ew-orchestrate/references/boundary-grill.md` when task boundaries or file writes conflict (write findings into `plan.json#boundary_grill[]` + `report.md`; never append raw Markdown into `.json`).
+- Follow the Boundary Grill protocol (`evolve skill workflows show boundary-grill`) when task boundaries or file writes conflict (write findings into `plan.json#boundary_grill[]` + `report.md`; never append raw Markdown into `.json`).
 - Read [test-first planning](references/tdd.md) when invoked with `--tdd`.

@@ -3,11 +3,16 @@ import { basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { InputError } from './common.js';
 
-const commands: Record<string, true> = { session: true, run: true, team: true, skills: true, install: true, workflows: true, capabilities: true, '--help': true, experience: true };
+const commands: Record<string, true> = { session: true, run: true, skill: true, experience: true };
+const skillActions: Record<string, true> = { list: true, install: true, status: true, validate: true, inspect: true, workflows: true };
 
 export async function runBundledWorkflow(root: string, argv: unknown, signal?: AbortSignal) {
-  if (!Array.isArray(argv) || !argv.length || argv.some(arg => typeof arg !== 'string' || arg.includes('\0')) || !Object.hasOwn(commands, argv[0])) {
-    throw new InputError('Supply a workflow control argv array (session/run/team/skills/install/workflows/capabilities/--help)');
+  if (!Array.isArray(argv) || !argv.length || argv.some(arg => typeof arg !== 'string' || arg.includes('\0')) ||
+      !(Object.hasOwn(commands, argv[0]) || argv.length === 1 && argv[0] === '--help')) {
+    throw new InputError('Supply a workflow control argv array (session/run/skill/experience/--help)');
+  }
+  if (argv[0] === 'skill' && !Object.hasOwn(skillActions, argv[1] ?? 'list')) {
+    throw new InputError('OMP supports Skill list/install/status/validate/inspect/workflows');
   }
   if (argv[0] === 'experience' && !['status', 'search', 'get'].includes(argv[1])) {
     throw new InputError('OMP may only read personal experience (status/search/get)');
@@ -17,7 +22,7 @@ export async function runBundledWorkflow(root: string, argv: unknown, signal?: A
   // OMP 的 process.execPath 是 omp.exe；只依赖 Node，不依赖全局 evolve。
   const node = /^node(?:\.exe)?$/i.test(basename(process.execPath)) ? process.execPath : 'node';
   const cli = fileURLToPath(new URL('./workflow-cli.js', import.meta.url));
-  const child = spawn(node, [cli, ...argv, '--root', root], {
+  const child = spawn(node, [cli, '--root', root, ...argv], {
     cwd: root, shell: false, windowsHide: true, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stdout = '';

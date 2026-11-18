@@ -1,5 +1,6 @@
-import { spawn } from 'node:child_process';
-import { createInterface } from 'node:readline';
+import { openKnowledgeSources } from './knowledge-sources.js';
+import { knowledgeToolDefinitions, prepareKnowledgeTool, runKnowledgeAccess } from './workflow-knowledge-tools.js';
+import { WorkflowStore } from './workflow-runtime.js';
 
 export interface OmpWorkerRequest {
   request_id: string;
@@ -7,15 +8,10 @@ export interface OmpWorkerRequest {
   prompt: string;
   mode: 'analysis' | 'write';
   model: string;
-  binding?: { node: string; cli: string; root: string; session: string; run: string };
+  binding?: { root: string; session: string; run: string };
 }
 
 interface ToolResult { content: Array<{ type: string; text: string }>; isError?: boolean }
-interface RunTool {
-  name: string;
-  description: string;
-  inputSchema: Record<string, unknown>;
-}
 interface WorkerTool {
   name: string;
   label: string;
@@ -54,75 +50,41 @@ interface RunConnection {
   close(): Promise<void>;
 }
 
-const runToolNames = new Set(['read_skill', 'read_artifact', 'wiki_context', 'wiki_reference', 'memory_search', 'memory_get']);
-
-async function connectRun(binding: NonNullable<OmpWorkerRequest['binding']>) {
-  const child = spawn(binding.node, [binding.cli, 'mcp', '--root', binding.root,
-    '--session', binding.session, '--run', binding.run], { windowsHide: true, stdio: ['pipe', 'pipe', 'inherit'] });
-  const lines = createInterface({ input: child.stdout });
-  const closed = Promise.withResolvers<void>();
-  const pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void }>();
-  let nextId = 0;
-  let unavailable: Error | undefined;
-  const fail = (error: Error) => {
-    unavailable = error;
-    for (const item of pending.values()) item.reject(error);
-    pending.clear();
-  };
-  child.once('error', fail);
-  child.stdin.on('error', fail);
-  child.once('close', () => {
-    fail(new Error('Bound Evolve Run MCP closed'));
-    lines.close();
-    closed.resolve();
-  });
-  lines.on('line', line => {
-    try {
-      const response = JSON.parse(line);
-      const item = pending.get(response.id);
-      if (!item) return;
-      pending.delete(response.id);
-      if (response.error) item.reject(new Error(response.error.message));
-      else item.resolve(response.result);
-    } catch (error) { fail(error instanceof Error ? error : new Error(String(error))); }
-  });
-  const request = (method: string, params: object, signal?: AbortSignal) => {
-    if (unavailable) return Promise.reject(unavailable);
-    if (signal?.aborted) return Promise.reject(new Error('Run tool cancelled'));
-    const id = ++nextId;
-    const response = Promise.withResolvers<unknown>();
-    const cancel = () => {
-      pending.delete(id);
-      response.reject(new Error('Run tool cancelled'));
-    };
-    signal?.addEventListener('abort', cancel, { once: true });
-    pending.set(id, response);
-    child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
-    return response.promise.finally(() => signal?.removeEventListener('abort', cancel));
-  };
-  const close = async () => {
-    child.stdin.end();
-    await closed.promise;
-  };
+async function connectRun(binding: NonNullable<OmpWorkerRequest['binding']>): Promise<RunConnection> {
+  const store = new WorkflowStore(binding.root);
   try {
-    await request('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'evolve-omp', version: '1.0.0' } });
-    child.stdin.write(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n');
-    const listed = await request('tools/list', {}) as { tools: RunTool[] };
-    if (!Array.isArray(listed.tools) || listed.tools.length !== runToolNames.size ||
-        listed.tools.some(tool => !runToolNames.has(tool.name)) || new Set(listed.tools.map(tool => tool.name)).size !== runToolNames.size) {
-      throw new Error('Bound Evolve Run MCP returned an unexpected tool set');
-    }
-    const tools: WorkerTool[] = listed.tools.map(tool => ({
+    if (store.brief(binding.session, binding.run).status !== 'running') throw new Error('Select a running Evolve Run');
+    const access = runKnowledgeAccess(store, binding);
+    const sources = await openKnowledgeSources(binding.root, { session: binding.session, includeMemory: true });
+    let queue = Promise.resolve();
+    const tools: WorkerTool[] = knowledgeToolDefinitions.map(tool => ({
       name: 'evolve_' + tool.name,
       label: tool.name,
       description: tool.description,
       parameters: tool.inputSchema,
       approval: 'read',
-      execute: async (_id, args, _onUpdate, _context, signal) => await request('tools/call', { name: tool.name, arguments: args }, signal) as ToolResult,
+      execute: (_id, args, _onUpdate, _context, signal) => {
+        const result = queue.then(async (): Promise<ToolResult> => {
+          try {
+            signal?.throwIfAborted();
+            const apply = await prepareKnowledgeTool(sources, tool.name, args, access);
+            signal?.throwIfAborted();
+            return { content: [{ type: 'text', text: JSON.stringify(apply(access)) }] };
+          } catch (error) {
+            return { isError: true, content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }] };
+          }
+        });
+        queue = result.then(() => undefined);
+        return result;
+      },
     }));
-    return { tools, close };
+    return { tools, close: async () => {
+      await queue;
+      try { sources.memory?.close?.(); }
+      finally { store.close(); }
+    } };
   } catch (error) {
-    await close();
+    store.close();
     throw error;
   }
 }

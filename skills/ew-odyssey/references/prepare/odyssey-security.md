@@ -39,7 +39,7 @@ Target resolution determines what gets audited:
 | Input | Resolution |
 |-------|-----------|
 | Module/dir path | Audit that module |
-| Project root (default) | Full project scan |
+| Project root (`.` / `--all`) | Full project scan (explicit target/scope required; omitted target emits `E001`) |
 | `HEAD` / `staged` | Review changes in diff for security issues |
 
 Tier selection (default: `standard`):
@@ -52,14 +52,11 @@ Tier selection (default: `standard`):
 
 ## Required Context
 
-Satisfy the Knowledge Gate (`AGENTS.md`) before searching code:
-
-- Wiki & Memory (first): Run MCP `wiki_context` / `memory_search` + `wiki_reference` / `memory_get`, or CLI `evolve context "<target keywords>" --session <session> --include-memory --reads "<run_dir>/knowledge-reads.json"` (plus `evolve wiki get <id> --resolved --reads ... --from-search ...`) for `debug` and `coding` scope.
-- Code graph (after Knowledge Gate): `evolve code search "<target keywords>"` → module boundaries, trust zones.
+Satisfy the Knowledge Gate per [shared base](../odyssey-base.md) §Phase Initialization & Pre-load (`evolve skill workflows show session-run` — `session-priors` when scope matches → `evolve search "<query>" --mode context` / `evolve kb get <id>` with CLI `--reads`) for `debug` and `coding` scope before searching code (`evolve code search "<target keywords>"` → module boundaries, trust zones).
 
 When prior security audit sessions of the same target exist, check their findings first to avoid re-reporting already-documented issues.
 
-Use [read-only audit artifacts](../audit-artifacts.md) for the checkpoint and output metadata.
+Use [read-only audit artifacts](../audit-artifacts.md) for the checkpoint (`intake_hashes`), output metadata (`_meta` per [runtime adapters](../runtime-adapters.md) §4), and sealing.
 
 ## Boundaries and Invariants
 

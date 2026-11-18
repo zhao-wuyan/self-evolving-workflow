@@ -15,19 +15,20 @@
 先消费已提交回执并查看现有候选与对照关系，不把人类用户直接打发去运行 CLI：
 
 ```text
-evolve --root <project> closeout session <session-id> --project <source-project-id> --receipt <receipt-id>
-evolve --root <project> closeout skill <execution-id> --skill <skill-id> --skill-version <version> --status <status> --transcript <messages.json> --project <source-project-id>
-evolve --root <project> closeout scan <source-project-root> --project <source-project-id>
-evolve --root <project> closeout show <receipt-id> --project <source-project-id>
+evolve kb harvest session --root <project> <session-id> --project <source-project-id> --receipt <receipt-id>
+evolve kb harvest skill --root <project> <execution-id> --skill <skill-id> --skill-version <version> --status <status> --transcript <messages.json> [--knowledge-receipt <knowledge-reads.json>] [--session <session-id>] [--record-only] --project <source-project-id>
+evolve kb harvest receipt --root <project> <receipt-id> --project <source-project-id>   # 模型抽取失败或 --record-only 后沿用同一回执重试
+evolve kb harvest scan --root <project> <source-project-root> --project <source-project-id>
+evolve kb candidates show --root <project> <receipt-id> --project <source-project-id>
 ```
 
-- 重复投递按回执身份幂等处理；模型抽取失败时沿用同一回执重试，不重构或扩大证据范围。
-- 先用 `evolve wiki search` / `evolve wiki get` 核对每条候选与现有活跃 Wiki 的重复、重叠或冲突，保留双方证据并先于发布生成预览：
+- 重复投递按回执身份幂等处理；模型抽取失败时沿用同一回执运行 `kb harvest receipt <receipt-id> --project <source-project-id>`（Session 回执则用相同 `--receipt` 重跑 `kb harvest session`），不重构或扩大证据范围。若候选与唯一活跃、未锁定的 project `reference` 正文完全一致，收尾会经 `propose`/`apply` 自动合并 `sources` 并在 `wiki_changes` 留存审计记录，其余候选保留待审。
+- 先用 `evolve kb search` / `evolve kb get` 核对每条候选与现有活跃 Wiki 的重复、重叠或冲突，保留双方证据并可在授权前用 `evolve kb propose` 生成待审变更预览（`kb propose` 仅写入 `<root>/.evolve/closeout.db` 暂存区，不修改 `wiki/entries/`；真正修改 `wiki/` 需在授权后执行 `kb apply` 或 `kb candidates publish`）：
 
 ```text
-evolve --root <project> wiki propose <change.json> --closeout <closeout-id> --candidate <candidate-id>
-evolve --root <project> wiki propose <change.json> --evidence <receipt-id>
-evolve --root <project> wiki changes [<change-id>]
+evolve kb --root <project> propose <change.json> --closeout <closeout-id> --candidate <candidate-id>
+evolve kb --root <project> propose <change.json> --evidence <receipt-id>
+evolve kb --root <project> changes [<change-id>]
 ```
 
 - 没有合格候选时直接记录零候选回执并正常结束。
@@ -41,7 +42,7 @@ evolve --root <project> wiki changes [<change-id>]
 
 ### 3. Ask（人类审查与固定授权）
 
-通过宿主结构化提问工具（Antigravity 使用 `ask_question`，或宿主等效工具）一次性收集**固定候选 ID 列表、关系裁决与发布/分流动作**的明确授权：
+通过宿主提供的结构化用户提问能力一次性收集**固定候选 ID 列表、关系裁决与发布/分流动作**的明确授权：
 - 必须提供选择、拒绝与延期选项；群组确认仅对本次展示的固定 ID 列表生效。
 - `-y`、高重要性标记或机器建议**不能**替代人类发布确认；无提问工具且无先前针对同批固定 ID 的显式授权时，直接延期保留待审查清单，不要输出裸命令敷衍了事。
 - 不得为清空待办而伪造 `duplicate` 等裁决。
@@ -52,20 +53,29 @@ evolve --root <project> wiki changes [<change-id>]
 
 ```text
 # 路径 A：对审核通过的变更执行 Wiki 应用或直接发布
-evolve --root <project> wiki apply <change-id>
-evolve --root <project> closeout publish <closeout-id> <candidate-id> "<title>"
+evolve kb --root <project> apply <change-id>
+# kb candidates publish 仅适用于创建无 matched_entry 与 related_entries 的全新 mode: reference 条目；
+# 创建 constraint、存在关联条目或执行 update/promote/retire 时，必须走 kb propose → kb apply
+evolve kb candidates publish --root <project> <closeout-id> <candidate-id> "<title>" [--entry entries/<slug>]
 
-# 路径 B：问题可归因于具体 Skill 或需要新流程包时进行分流
-evolve --root <project> closeout route <closeout-id> <candidate-id> --skill <skill-id> --skill-version <version>
+# 路径 B：问题可归因于具体 Skill 或需要新流程包时按序分流
+# 1) 先用 kb candidates route 判定路线（wiki | skill-addition | skill-design）
+evolve kb candidates route --root <project> <closeout-id> <candidate-id> --skill <skill-id> [--skill-version <version>]
+# 2) 可按来源补采信号（Session 用 session review；独立 Skill 用 skill review）
 evolve --root <project> session review <session-id>
-evolve --root <project> skills review <execution-id> --project <source-project-id>
+evolve --root <project> skill review <execution-id> --project <source-project-id>
 ```
 
-若候选在 `closeout route` 后达到元 Skill 设计条件，再显式转交 `ew-skill-design`（`skill-design task|run|review|replay|apply`）；若仅是既有 Skill 指令或边界缺陷，则转交 `workflow-evolve`。
+根据 `kb candidates route` 返回的 `route` 执行交接：
+- **`skill-design`**（满足 [knowledge-route.md](knowledge-route.md) 规则 8 结构化条件）：`kb candidates route` 同时创建 `design_task`。直接或自动路由转交 `ew-skill-design`，按 `evolve skill design task <task-id>` → `run <task-id> --runner <script>` → `review <design-id>` → `replay <design-id> --runner <script> --scenarios <json>` 执行；通过明确确认门禁后再运行 `evolve skill design apply <design-id>`，失败时用 `evolve skill design rollback <design-id>` 回滚。
+- **`skill-addition`**：转交 `workflow-evolve`（可运行 `skills/workflow-evolve/scripts/evolve-loop.mjs`），从 `evolve kb candidates show <receipt-id> --project <source-project-id>` 与原候选构造参数：
+  - 目标入口：`--skill skills/<skill-id>/SKILL.md`（若安装在宿主目录则为 `<skill-root>/<skill-id>/SKILL.md`，需先对齐已提交版本）。
+  - 归因证据来源（三选一）：Session 来源传 `--session <session_id>`；独立 Skill 来源传 `--execution <execution_id> --project <source-project-id>`（`<execution_id>` 取自 `kb candidates show` 的 `session_id` / 执行 ID）；或传归一化 `--history <transcript-evidence/1.0 JSON>`。
+  - `--scenarios <scenarios.json>` 构造要求：JSON 数组至少含 2 条场景——至少 1 条 `"baseline": false`（基于 `candidate.content` 与 `candidate.sources` 复现当前 Skill 失效行为并给出期望输出）与至少 1 条 `"baseline": true`（验证既有正常路径保持通过）。
 
 ### 5. Verify（回读确认）
 
-执行后回读 `evolve wiki get <id>` / `evolve wiki changes <change-id>` / `evolve closeout show <receipt-id>`，如实报告成功发布的条目 ID 与仍处于待审查/延期/阻塞状态的候选项。
+执行后回读 `evolve kb get <id>` / `evolve kb changes <change-id>` / `evolve kb candidates show <receipt-id>`，如实报告成功发布的条目 ID 与仍处于待审查/延期/阻塞状态的候选项。
 
 ## 个人跨项目经验审阅
 

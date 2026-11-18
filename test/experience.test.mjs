@@ -4,7 +4,6 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { fixture } from './evolve-workflow-support.mjs';
 import { protocol } from './openviking-support.mjs';
-import { runBundledWorkflow } from '../dist/omp-cli-bridge.js';
 
 const report = '---\nverdict: ready\nsummary: Verified controlled comparison\nconstraints: []\ndecisions: []\nconcerns: []\nnext: []\n---\n\n# Summary\n\nVerified controlled comparison.\n';
 const recipe = { domain: 'python', stack: 'python@3.12', title: 'Keep blocking calls out of the event loop',
@@ -29,7 +28,7 @@ function seal(f, session, experiences, tests) {
   }
   f.saveArtifact(run, 'test-results.json', { summary: { passed: tests.filter(row => row.status === 'passed').length, failed: 0 }, tests,
     experiences, private_log: 'FIXTURE-PRIVATE-RAW-LOG' });
-  f.write(join('.agent-memory', 'workflow', 'runs', session, run.run_id, 'report.md'), report);
+  writeFileSync(join(run.run_dir, 'report.md'), report);
   f.finish(session, run, 'Verified controlled comparison', gates);
   return run;
 }
@@ -49,7 +48,6 @@ test('sealed opt-in lessons remain local until approval, then another project ca
   Object.assign(b.env, { EVOLVE_EXPERIENCE_CONFIG: a.env.EVOLVE_EXPERIENCE_CONFIG, EVOLVE_OPENVIKING_CONFIG: a.env.EVOLVE_OPENVIKING_CONFIG });
   assert.deepEqual(a.evolve('experience', 'status'), { configured: true, collecting: true });
   assert.deepEqual(b.evolve('experience', 'status'), { configured: true, collecting: false });
-  await assert.rejects(runBundledWorkflow(b.root, ['experience', 'publish', 'x']), /only read personal experience/);
   const other = draft('T1', 'Verification in unlisted project.', { lesson: 'UNLISTED-PROJECT-ONLY' });
   seal(b, 'unlisted', [other], [testCase('T1')]);
   assert.equal(b.sealSession('unlisted').personal_experience, undefined);
@@ -72,7 +70,6 @@ test('sealed opt-in lessons remain local until approval, then another project ca
   assert.equal(pending.some(row => row.content.lesson === other.lesson), false);
   assert.deepEqual((await server.inspect()).calls, []);
 
-  await assert.rejects(runBundledWorkflow(b.root, ['experience', 'review', firstId]), /only read personal experience/);
   assert.throws(() => a.evolve('experience', 'publish', firstId, '--relation', 'new', '--yes'), rejection(/exact experience SHA-256 ID/));
   const preview = a.evolve('experience', 'review', firstId);
   assert.equal(preview.reference.mode, 'reference');

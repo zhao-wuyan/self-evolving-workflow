@@ -4,14 +4,14 @@ Confirm verification sources, Knowledge Gate constraints, and the Iron Law befor
 
 ## Input & Flags
 
-- **Bound sources (required)**: `current-plan` (criteria contract; for `pi-markdown` plans preserve every prose criterion without requiring `task_ids`) and `current-execution` (changed files & self-check claims).
+- **Bound sources (required)**: `current-plan` (criteria contract; for `pi-markdown` plans preserve every prose criterion without requiring `task_ids`) and `current-execution` (changed files & self-check claims). When re-verifying after a review-triggered fix cycle, also inspect bound `latest-review` to confirm prior findings are resolved.
 - **`--strict`**: elevate bar so any `UNCERTAIN` item blocks pass and all error/boundary paths must carry explicit proof.
 - **`--skip-tests`**: skip automated test coverage matrix and perform goal-backward structural + wiring verification only.
 - **`--skip-antipattern`**: omit static anti-pattern scanning.
 
 ## Knowledge Gate
 
-Reuse bound `session-priors` (`review`/`coding`); query `wiki_context` + `wiki_reference` (or CLI `--reads` + `--from-search`) when verifying files or tech-stack constraints outside `session-priors`.
+Complete the Run Knowledge Gate (`evolve skill workflows show session-run`): reuse bound `session-priors` (`review`/`coding`); query `evolve search "<query>" --mode context` + `evolve kb get <id>` (with CLI `--reads` + `--from-search`) when verifying files or tech-stack constraints outside `session-priors`.
 
 ## Iron Law & Boundaries
 

@@ -24,6 +24,12 @@ contract:
     schema: context-package/1.0
     role: attachment
     accepts_negative_evidence: true
+  - kind: brainstorm
+    alias: current-brainstorm
+    required: false
+    schema: brainstorm/1.0
+    role: primary
+    accepts_negative_evidence: true
   - kind: priors
     alias: session-priors
     required: false
@@ -54,7 +60,7 @@ contract:
   - path: outputs/glossary.json
     kind: glossary
     role: attachment
-    required: false
+    required: true
     schema: glossary/1.0
   - path: outputs/requirements/_index.md
     kind: requirements-spec

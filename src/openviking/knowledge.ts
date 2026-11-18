@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { InputError } from '../common.js';
-import { MemoryStore } from '../memory.js';
+import { MemoryStore, defaultMemoryDbPath } from '../memory.js';
 import { exactMemoryValues } from '../memory-evidence.js';
 import { applyWikiChange, listWikiChanges, proposeWikiSnapshot } from '../wiki-change.js';
 import { Wiki, readWikiPages } from '../wiki.js';
@@ -27,7 +27,7 @@ export function selectMemory(root: string, id: string, operation: 'share' | 'uns
   if (selection.schema_version !== 'openviking-memory-selection/1.0') throw new InputError('OPENVIKING_MEMORY_SELECTION_INVALID');
   if (operation === 'unshare') selection.changes[id] = { operation };
   else {
-    const store = new MemoryStore(join(root, '.agent-memory', 'memory.db'));
+    const store = new MemoryStore(defaultMemoryDbPath(root));
     try {
       const record = store.get(id);
       if (!record) throw new InputError('Memory not found');
@@ -88,7 +88,7 @@ export function exportMemory(root: string, base?: ProjectManifest) {
   const memory = new Map((base?.memory ?? []).map(item => [item.origin_id, item]));
   const bodies = new Map<string, Buffer>();
   if (Object.keys(selection.changes).length) {
-    const store = new MemoryStore(join(root, '.agent-memory', 'memory.db'));
+    const store = new MemoryStore(defaultMemoryDbPath(root));
     try {
       for (const [id, choice] of Object.entries(selection.changes)) {
         if (choice.operation === 'unshare') { memory.delete(id); continue; }

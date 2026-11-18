@@ -4,18 +4,15 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { cli, fixture } from './evolve-workflow-support.mjs';
 import { protocol, projectFixture, releaseFromProject, seed, fakeAgy, completeSample } from './openviking-support.mjs';
-import { OpenVikingClient } from '../dist/openviking/client.js';
 import { readProject, validateProject } from '../dist/openviking/config.js';
 import { loadRelease, manifestBytes, publishRelease, readProjectHead, sha256, stableJson, validateManifest } from '../dist/openviking/assets.js';
 import { cacheRelease, selectMemory, exportMemory, exportWiki, fileRecord } from '../dist/openviking/knowledge.js';
 import { createAssetCommit, gitBytes, skillAssets } from '../dist/openviking/git.js';
 import { mergeProjectAssets } from '../dist/openviking/merge.js';
 import { freezeKnowledge, frozenKnowledgeHash } from '../dist/openviking/frozen.js';
-import { MemoryStore } from '../dist/memory.js';
+import { MemoryStore, defaultMemoryDbPath } from '../dist/memory.js';
 import { openKnowledgeSources } from '../dist/knowledge-sources.js';
-import { KnowledgeReads } from '../dist/knowledge-reads.js';
 import { createSearchServer } from '../dist/http.js';
 import { Wiki } from '../dist/wiki.js';
 import { applyWikiChange, proposeWikiChange } from '../dist/wiki-change.js';
@@ -32,7 +29,6 @@ function approve(wiki, entry, body, metadata = {}) {
   applyWikiChange(wiki, change.id);
   return change;
 }
-function request(id, name, args = {}) { return { jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: args } }; }
 
 async function evolved(f, base, instruction = 'Require migration_approval before creating a release.') {
   const draft = draftSkillAddition({ entry: join(f.root, f.entry), instruction, priority: 'high', sources: ['fixture:reviewed-run'] });
@@ -209,7 +205,7 @@ test('remote Session retries bind one commit; the next Session receives the new 
   assert.match(f.evolve('run', 'skill-read', run.run_id, '--session', 'new-session').markdown, /migration_approval/);
 });
 
-test('CLI, HTTP and Run MCP read the same full Memory bytes and all repository-scoped constraints', async t => {
+test('CLI and HTTP read the same full Memory bytes and all repository-scoped constraints', async t => {
   const server = await protocol(t);
   const f = projectFixture(t, server);
   const wiki = new Wiki(f.root);
@@ -220,20 +216,20 @@ test('CLI, HTTP and Run MCP read the same full Memory bytes and all repository-s
   approve(wiki, 'entries/reference', 'Deployment reference text', { mode: 'reference' });
   f.git('add', 'wiki'); f.git('commit', '-qm', '测试: 已审批知识');
   const content = 'Deployment build 00123 uses Token-AbC_007.\n' + 'Exact source body. '.repeat(5000) + '\nEnd of original record.';
-  const memory = new MemoryStore(join(f.root, '.agent-memory', 'memory.db'));
+  const memory = new MemoryStore(defaultMemoryDbPath(f.root));
   const record = await memory.put({ id: 'original-memory', content, sourceMessageIds: ['source:actual-message-00123'], type: 'verified_fix', session: 'history-1' }); memory.close();
   selectMemory(f.root, record.id, 'share');
   const release = await seed(f);
   const reads = join(f.root, '.agent-memory', 'query-reads.json');
-  const envelope = f.evolve('context', 'Deployment', '--include-memory', '--limit', '1', '--reads', reads);
+  const envelope = f.evolve('search', 'Deployment', '--mode', 'context', '--include-memory', '--limit', '1', '--reads', reads);
   assert.equal(envelope.constraints.length, 12);
   assert.ok(envelope.constraints.every(item => !/Retired|Not applicable/.test(item.content)));
-  const found = f.evolve('memory', 'search', '00123', '--json', '--reads', reads);
+  const found = f.evolve('kb', 'search', '00123', '--kind', 'episodic', '--reads', reads);
   assert.equal(found.results.length, 1);
   const id = found.results[0].id;
   assert.match(id, /^ov:[a-f0-9]{64}:/);
   assert.equal(found.results[0].version, record.version);
-  const loaded = f.evolve('memory', 'get', id, '--reads', reads, '--from-search', found.knowledge_reads.searches.at(-1).search_id);
+  const loaded = f.evolve('kb', 'get', id, '--kind', 'episodic', '--reads', reads, '--from-search', found.knowledge_reads.searches.at(-1).search_id);
   assert.equal(loaded.content, content); assert.deepEqual(loaded.sourceMessageIds, record.sourceMessageIds);
   assert.equal(loaded.openviking_reads[0].content_sha256, sha256(content));
   assert.equal(loaded.openviking_reads[0].via, 'cache');
@@ -245,23 +241,21 @@ test('CLI, HTTP and Run MCP read the same full Memory bytes and all repository-s
   assert.equal(httpResult.memory.results[0].content, content);
   const httpContext = await (await fetch(`http://127.0.0.1:${http.address().port}/context?q=Deployment&limit=1`)).json();
   assert.equal(httpContext.constraints.length, 12);
-  f.open('reader', 'sample'); const run = f.next('reader');
-  const calls = [request(1, 'read_skill'), request(2, 'memory_search', { query: 'Deployment' }), request(3, 'memory_get', { id }), request(4, 'wiki_context', { query: 'Deployment' })];
-  const output = f.run(process.execPath, [cli, 'mcp', '--session', 'reader', '--run', run.run_id], calls.map(call => JSON.stringify(call)).join('\n') + '\n');
-  const results = output.split(/\r?\n/).map(line => JSON.parse(line).result);
-  assert.ok(results.every(result => !result.isError));
-  assert.equal(JSON.parse(results[2].content[0].text).content, content);
-  assert.equal(JSON.parse(results[3].content[0].text).constraints.length, 12);
-  const sealed = f.finish('reader', run, 'Remote knowledge inspected');
-  assert.equal(sealed.knowledge_reads.schema_version, 'knowledge-reads/1.0');
-  assert.ok(sealed.openviking_reads.some(item => item.record_id === id && item.content_sha256 === sha256(content)));
+  const cliReads = join(f.root, '.agent-memory', 'run-reads.json');
+  const cliFound = f.evolve('kb', 'search', 'Deployment', '--kind', 'episodic', '--reads', cliReads);
+  const cliLoaded = f.evolve('kb', 'get', id, '--kind', 'episodic', '--reads', cliReads,
+    '--from-search', cliFound.knowledge_reads.searches.at(-1).search_id);
+  assert.equal(cliLoaded.content, content);
+  assert.ok(cliLoaded.openviking_reads.some(item => item.record_id === id && item.content_sha256 === sha256(content)));
+  const cliContext = f.evolve('search', 'Deployment', '--mode', 'context', '--limit', '1');
+  assert.equal(cliContext.constraints.length, 12);
   assert.ok((await server.inspect()).calls.filter(call => call.path === '/api/v1/search/find').every(call => call.input.target_uri === `${f.project.root_uri}/releases/${release.head.release_id}/memory`));
 });
 
 test('Memory sharing freezes approval, unshare keeps a tombstone and index failure cannot publish', async t => {
   const server = await protocol(t);
   const f = projectFixture(t, server);
-  const local = new MemoryStore(join(f.root, '.agent-memory', 'memory.db'));
+  const local = new MemoryStore(defaultMemoryDbPath(f.root));
   f.dispose(() => local.close());
   await local.put({ id: 'm', content: 'Deployment code 00123' }); selectMemory(f.root, 'm', 'share');
   const first = await seed(f);
@@ -275,7 +269,7 @@ test('Memory sharing freezes approval, unshare keeps a tombstone and index failu
   await server.update({ queueError: false });
   const published = await publishRelease(f.client, f.project, next.manifest, next.bytes, (await readProjectHead(f.client, f.project)).raw);
   const oldId = `ov:${first.head.release_id}:${Buffer.from('m').toString('base64url')}`;
-  assert.equal(f.evolve('memory', 'get', oldId).content, 'Deployment code 00123');
+  assert.equal(f.evolve('kb', 'get', oldId, '--kind', 'episodic').content, 'Deployment code 00123');
   selectMemory(f.root, 'm', 'unshare');
   assert.deepEqual(JSON.parse(readFileSync(join(f.root, '.agent-memory/openviking/share.json'))).changes.m, { operation: 'unshare' });
   assert.equal(exportMemory(f.root, next.manifest).memory.length, 0);
@@ -353,20 +347,20 @@ test('three-way merge combines nonoverlapping text and rejects binary or deletio
 
 test('configuration can unplug OpenViking; outages fall back visibly without bypassing pinned IDs or integrity errors', async t => {
   const server = await protocol(t); const f = projectFixture(t, server); const release = await seed(f);
-  const local = new MemoryStore(join(f.root, '.agent-memory', 'memory.db')); await local.put({ id: 'local-only', content: 'Local deployment guidance' }); local.close();
+  const local = new MemoryStore(defaultMemoryDbPath(f.root)); await local.put({ id: 'local-only', content: 'Local deployment guidance' }); local.close();
   f.evolve('openviking', 'config', '--enabled', 'false');
   await server.update({ unavailable: true });
   assert.equal(f.evolve('openviking', 'status').backend, 'local');
-  assert.equal(f.evolve('memory', 'search', 'deployment', '--json').results[0].id, 'local-only');
+  assert.equal(f.evolve('kb', 'search', 'deployment', '--kind', 'episodic').results[0].id, 'local-only');
   const disabled = f.open('disabled', 'sample'); assert.equal(disabled.openviking, undefined);
   f.evolve('openviking', 'config', '--enabled', 'true', '--failure-policy', 'local');
-  const fallback = f.evolve('context', 'deployment', '--include-memory');
+  const fallback = f.evolve('search', 'deployment', '--mode', 'context', '--include-memory');
   assert.equal(fallback.knowledge_backend.active, 'local'); assert.match(fallback.knowledge_backend.fallback_reason, /503|UNKNOWN/);
   assert.equal(f.open('offline', 'sample').knowledge_backend.active, 'local');
   const id = `ov:${release.head.release_id}:${Buffer.from('local-only').toString('base64url')}`;
-  assert.throws(() => f.evolve('memory', 'get', id));
+  assert.throws(() => f.evolve('kb', 'get', id, '--kind', 'episodic'));
   f.evolve('openviking', 'config', '--failure-policy', 'fail');
-  assert.throws(() => f.evolve('context', 'deployment', '--include-memory'), /503/);
+  assert.throws(() => f.evolve('search', 'deployment', '--mode', 'context', '--include-memory'), /503/);
 });
 
 test('frozen Memory rejects writes before calling a model and retains identical logical bytes', async t => {
@@ -380,7 +374,7 @@ test('frozen Memory rejects writes before calling a model and retains identical 
   assert.equal(called, false); reader.close();
   assert.equal(frozenKnowledgeHash(snapshot.path), snapshot.hash);
   f.env.EVOLVE_KNOWLEDGE_SNAPSHOT = snapshot.path; f.env.AGENT_MEMORY_DB = join(snapshot.path, 'memory.db');
-  assert.throws(() => f.evolve('memory', 'put', 'must not persist'), /read-only/);
+  assert.throws(() => f.evolve('kb', 'add', 'must not persist', '--kind', 'episodic'), /read-only/);
   assert.equal(frozenKnowledgeHash(snapshot.path), snapshot.hash);
 });
 
@@ -424,18 +418,18 @@ test('merged Skill trees are replayed on the frozen knowledge before their relea
 test('unplugging a pinned Session uses verified cache and local Memory without any new HTTP request', async t => {
   const server = await protocol(t); const f = projectFixture(t, server);
   approve(new Wiki(f.root), 'entries/pinned-rule', 'Pinned deployment rule', { repositories: [f.project.project_id] });
-  const store = new MemoryStore(join(f.root, '.agent-memory', 'memory.db'));
+  const store = new MemoryStore(defaultMemoryDbPath(f.root));
   await store.put({ id: 'remote', content: 'Remote deployment record 00123' });
   await store.put({ id: 'local', content: 'Local deployment fallback guidance' }); store.close();
   selectMemory(f.root, 'remote', 'share'); const release = await seed(f);
   f.open('unplugged', 'sample');
   const id = `ov:${release.head.release_id}:${Buffer.from('remote').toString('base64url')}`;
-  assert.equal(f.evolve('memory', 'get', id, '--workflow-session', 'unplugged').content, 'Remote deployment record 00123');
+  assert.equal(f.evolve('kb', 'get', id, '--kind', 'episodic', '--workflow-session', 'unplugged').content, 'Remote deployment record 00123');
   f.evolve('openviking', 'config', '--enabled', 'false'); await server.update({ unavailable: true });
   const before = (await server.inspect()).calls.length;
-  assert.equal(f.evolve('memory', 'get', id, '--workflow-session', 'unplugged').content, 'Remote deployment record 00123');
-  assert.equal(f.evolve('context', 'deployment', '--session', 'unplugged').constraints[0].content.trim(), 'Pinned deployment rule');
-  const fallback = f.evolve('memory', 'search', 'deployment', '--workflow-session', 'unplugged', '--json');
+  assert.equal(f.evolve('kb', 'get', id, '--kind', 'episodic', '--workflow-session', 'unplugged').content, 'Remote deployment record 00123');
+  assert.equal(f.evolve('search', 'deployment', '--mode', 'context', '--session', 'unplugged').constraints[0].content.trim(), 'Pinned deployment rule');
+  const fallback = f.evolve('kb', 'search', 'deployment', '--kind', 'episodic', '--workflow-session', 'unplugged');
   assert.equal(fallback.knowledge_backend.active, 'local'); assert.match(fallback.knowledge_backend.fallback_reason, /DISABLED/);
   assert.ok(fallback.results.some(item => item.id === 'local'));
   assert.equal((await server.inspect()).calls.length, before);
@@ -443,7 +437,7 @@ test('unplugging a pinned Session uses verified cache and local Memory without a
 
 test('frozen readers retain composite IDs and original versions after a newer remote knowledge release', async t => {
   const server = await protocol(t); const f = projectFixture(t, server);
-  const local = new MemoryStore(join(f.root, '.agent-memory', 'memory.db')); f.dispose(() => local.close());
+  const local = new MemoryStore(defaultMemoryDbPath(f.root)); f.dispose(() => local.close());
   await local.put({ id: 'versioned', content: 'Original deployment version 00123' });
   const record = await local.put({ id: 'versioned', content: 'Approved deployment version 00123', sourceMessageIds: ['source:reviewed-message-00123'] });
   selectMemory(f.root, 'versioned', 'share'); const first = await seed(f);
@@ -454,8 +448,10 @@ test('frozen readers retain composite IDs and original versions after a newer re
   await publishRelease(f.client, f.project, second.manifest, second.bytes, (await readProjectHead(f.client, f.project)).raw);
   f.env.EVOLVE_KNOWLEDGE_SNAPSHOT = snapshot.path; f.env.AGENT_MEMORY_DB = join(snapshot.path, 'memory.db');
   const id = `ov:${first.head.release_id}:${Buffer.from('versioned').toString('base64url')}`;
-  const loaded = f.evolve('memory', 'get', id);
-  assert.deepEqual(loaded, { ...record, id });
-  assert.equal(f.evolve('memory', 'search', '00123', '--json').results[0].id, id);
+  const loaded = f.evolve('kb', 'get', id, '--kind', 'episodic');
+  assert.equal(loaded.content, record.content);
+  assert.equal(loaded.version, record.version);
+  assert.deepEqual(loaded.sources, record.sourceMessageIds);
+  assert.equal(f.evolve('kb', 'search', '00123', '--kind', 'episodic').results[0].id, id);
   assert.equal(frozenKnowledgeHash(snapshot.path), snapshot.hash);
 });

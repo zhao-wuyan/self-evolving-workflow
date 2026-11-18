@@ -20,25 +20,24 @@ async function codex(f, session, run, task, data, { extraLinks = [], knowledge =
   const entry = run.skill_ref.entry;
   const links = [...run.skill_ref.required_links.filter(path => path !== entry)
     .map(path => ({ from: entry, destination: path })), ...extraLinks];
+  const cliPrefix = `${JSON.stringify(process.execPath)} ${JSON.stringify(cli)} --root ${JSON.stringify(f.root)}`;
+  const readsPath = join(run.run_dir, 'knowledge-reads.json');
   const args = ['-a', 'never', 'exec', '--ephemeral', '--ignore-user-config', '--skip-git-repo-check',
-    '--json', '--sandbox', 'read-only', '-c', 'model_reasoning_effort="low"',
-    '-c', 'mcp_servers.evolve_run.command=' + JSON.stringify(process.execPath),
-    '-c', 'mcp_servers.evolve_run.args=' + JSON.stringify([cli, 'mcp', '--root', f.root, '--session', session, '--run', run.run_id]),
-    '-c', 'mcp_servers.evolve_run.required=true',
-    '-c', 'mcp_servers.evolve_run.default_tools_approval_mode="writes"', '-'];
+    '--json', '--sandbox', 'workspace-write', '-c', 'model_reasoning_effort="low"', '-'];
   const prompt = [
-    'Open the bound Skill via evolve_run read_skill with no arguments.',
-    'Read each of these links via evolve_run read_skill: ' + JSON.stringify(links),
+    `Open the bound Skill via CLI: ${cliPrefix} run read skill ${run.run_id} --session ${session}`,
+    `Read each of these links via CLI (${cliPrefix} run read skill ${run.run_id} <destination> --from <from> --session ${session}): ${JSON.stringify(links)}`,
     {
-      memory: 'Use evolve_run memory_search with query "limits acceptance" and memory_get for the matching ID.',
-      wiki: 'Use evolve_run wiki_context with query "limits acceptance" and wiki_reference for the returned policy ID. Record the numeric limit from the exact Wiki body.',
-      priors: 'Call evolve_run read_artifact with id="session-priors". Use its frozen Wiki bodies as the project knowledge. The lookup scope is unchanged in this fixture, so reuse those bodies as-is.',
+      memory: `Search memory via CLI (${cliPrefix} kb search "limits acceptance" --kind episodic --reads ${JSON.stringify(readsPath)}) and read the matching ID (${cliPrefix} kb get <id> --kind episodic --reads ${JSON.stringify(readsPath)} --from-search <search_id>).`,
+      wiki: `Resolve context via CLI (${cliPrefix} search "limits acceptance" --mode context --session ${session} --reads ${JSON.stringify(readsPath)}) and read the returned reference ID (${cliPrefix} kb get <id> --kind reference --resolved --reads ${JSON.stringify(readsPath)} --from-search <search_id>). Record the numeric limit from the exact Wiki body.`,
+      priors: `Read session-priors via CLI: ${cliPrefix} run read artifact ${run.run_id} session-priors --session ${session}. Use its frozen Wiki bodies as the project knowledge. The lookup scope is unchanged in this fixture, so reuse those bodies as-is without calling search or kb.`,
     }[knowledge],
-    'Return only a JSON object. The coordinator writes fixture artifacts and owns the lifecycle.',
+    `When task text mentions reading an upstream artifact (e.g., current-analysis, current-plan, current-execution), run: ${cliPrefix} run read artifact ${run.run_id} <alias> --session ${session}`,
+    'Return only a JSON object. Do not edit repository source files; the coordinator writes fixture artifacts and owns the lifecycle.',
     'Task: ' + task, 'Task data: ' + JSON.stringify(data),
   ].join('\n');
   const exe = process.env.CODEX_REPLAY_EXECUTABLE || (process.platform === 'win32' ? 'codex.exe' : 'codex');
-  const child = spawn(exe, args, { cwd: tmpdir(), env: f.env, windowsHide: true });
+  const child = spawn(exe, args, { cwd: f.root, env: f.env, windowsHide: true });
   let stdout = '', stderr = '';
   child.stdout.setEncoding('utf8').on('data', chunk => stdout += chunk);
   child.stderr.setEncoding('utf8').on('data', chunk => stderr += chunk);
@@ -60,12 +59,11 @@ async function codex(f, session, run, task, data, { extraLinks = [], knowledge =
   const events = stdout.trim().split(/\r?\n/).map(line => JSON.parse(line));
   const answer = events.findLast(event => event.type === 'item.completed' && event.item?.type === 'agent_message')?.item.text;
   assert.ok(events.some(event => event.type === 'turn.completed') && answer, run.task.command);
-  const calls = events.filter(event => event.type === 'item.completed' && event.item?.type === 'mcp_tool_call' &&
-    event.item.server === 'evolve_run' && event.item.status === 'completed' && !event.item.result?.isError);
-  const used = calls.map(event => event.item.tool);
-  const expected = { memory: ['memory_search', 'memory_get'], wiki: ['wiki_context', 'wiki_reference'], priors: ['read_artifact'] };
-  for (const tool of ['read_skill', ...expected[knowledge]]) assert.ok(used.includes(tool), tool);
-  if (knowledge === 'priors') assert.ok(used.every(tool => !/^(wiki_|memory_)/.test(tool)), JSON.stringify(used));
+  if (knowledge === 'priors') {
+    const commands = events.filter(event => event.type === 'item.completed' && event.item?.type === 'command_execution')
+      .map(event => String(event.item.command ?? ''));
+    assert.ok(commands.every(cmd => !/\b(?:search|kb)\b/.test(cmd)), JSON.stringify(commands));
+  }
   return JSON.parse(answer.trim().replace(/^\x60{3}(?:json)?\s*([\s\S]+?)\s*\x60{3}$/i, '$1'));
 }
 
@@ -83,8 +81,8 @@ async function chain(f) {
   const session = 'ew-chain';
   f.write('wiki-draft.json', JSON.stringify({ operation: 'create', entry: wikiId, title: 'Limits acceptance policy',
     mode: 'reference', body: 'Set the item limit in limits.mjs to 3 and preserve the existing export.' }));
-  const draft = f.agent('wiki', 'propose', 'wiki-draft.json', '--evidence', 'fixture:limits-policy');
-  f.agent('wiki', 'apply', draft.id);
+  const draft = f.agent('kb', 'propose', 'wiki-draft.json', '--evidence', 'fixture:limits-policy');
+  f.agent('kb', 'apply', draft.id);
   const opened = f.open(session, 'ew-analyze,ew-plan,ew-execute,ew-review', 'Update the fixture item limit from project acceptance evidence');
   const analyze = f.next(session, opened.orchestration_revision);
   const input = await codex(f, session, analyze,
@@ -107,7 +105,7 @@ async function chain(f) {
     content_sha256: analysis.artifact_publication.artifacts[priorsId].sha256 }];
 
   const plan = f.next(session, analysis.orchestration_revision);
-  const proposal = await codex(f, session, plan, 'Call read_artifact for current-analysis. Return {file, change, verify} for one planned task.',
+  const proposal = await codex(f, session, plan, 'Read current-analysis via CLI artifact-read. Return {file, change, verify} for one planned task.',
     {}, { knowledge: 'priors' });
   assert.equal(proposal.file, file);
   assert.match(proposal.change, /3/);
@@ -117,7 +115,7 @@ async function chain(f) {
   assert.ok(Object.values(planned.artifact_publication.artifacts)[0].derived_from.includes(analysis.artifact_publication.aliases['current-analysis']));
 
   const execute = f.next(session, planned.orchestration_revision);
-  const change = await codex(f, session, execute, 'Read current-plan via read_artifact. Return {file,text} with the exact resulting JavaScript, including a terminal newline.',
+  const change = await codex(f, session, execute, 'Read current-plan via CLI artifact-read. Return {file,text} with the exact resulting JavaScript, including a terminal newline.',
     { source: original }, { knowledge: 'priors' });
   assert.deepEqual(change, { file, text: revised });
   f.write(file, change.text);
@@ -129,7 +127,7 @@ async function chain(f) {
 
   const review = f.next(session, executed.orchestration_revision);
   const evaluated = await codex(f, session, review,
-    'Read current-execution via read_artifact. Review correctness, security, performance and architecture for this one-line diff. Return {dimensions: [string], findings: []} when acceptance passes.',
+    'Read current-execution via CLI artifact-read. Review correctness, security, performance and architecture for this one-line diff. Return {dimensions: [string], findings: []} when acceptance passes.',
     { diff: f.git('diff', '--', file) }, { knowledge: 'priors' });
   assert.equal(evaluated.dimensions.length, 4);
   assert.deepEqual(evaluated.findings, []);
@@ -155,7 +153,7 @@ async function chain(f) {
 async function odyssey(f) {
   const session = 'ew-odyssey-review';
   f.open(session, '');
-  const step = f.evolve('session', 'chain', 'insert', ...f.fence(session), '--step-id', 'audit', '--command', 'ew-odyssey-review',
+  const step = f.evolve('session', 'step', 'add', ...f.fence(session), '--step-id', 'audit', '--command', 'ew-odyssey-review',
     '--arg=--skip-fix', '--arg=' + file, '--decision-ref', 'accept-audit');
   const run = f.next(session, step.orchestration_revision);
   const resumed = f.evolve('run', 'brief', run.run_id, '--session', session);
@@ -181,10 +179,10 @@ async function odyssey(f) {
 
 async function swarm(f) {
   const session = 'swarm-scoring';
-  f.open(session, 'team-swarm');
+  f.open(session, 'ew-swarm');
   const run = f.next(session);
   const base = ['--session', session, '--run', run.run_id];
-  const assets = f.evolve('team', 'controller', ...base);
+  const assets = f.evolve('run', 'task', 'controller', ...base);
   const teamDir = join(run.run_dir, 'work', 'team');
   mkdirSync(teamDir, { recursive: true });
   const config = JSON.parse(readFileSync(assets.config_template, 'utf8'));
@@ -206,9 +204,9 @@ async function swarm(f) {
     mkdirSync(dirname(absolute), { recursive: true });
     writeFileSync(absolute, JSON.stringify(result));
   };
-  const assign = (id, path) => f.evolve('team', 'assign', ...base, ...f.fence(session),
+  const assign = (id, path) => f.evolve('run', 'task', 'add', ...base, ...f.fence(session),
     '--id', id, '--role', id, '--path', path);
-  const report = (id, revision) => f.evolve('team', 'report', ...base, ...f.fence(session, revision, id),
+  const report = (id, revision) => f.evolve('run', 'task', 'update', ...base, ...f.fence(session, revision, id),
     '--id', id, '--summary', 'Artifact checked against the assignment');
   const work = selection.assignments.map(assignment => {
     const id = assignment.ant_id;
@@ -236,7 +234,7 @@ async function swarm(f) {
   }));
 
   const contention = f.status(session).revision;
-  const reports = await Promise.allSettled(work.map(item => promisify(execFile)(process.execPath, [cli, 'team', 'report',
+  const reports = await Promise.allSettled(work.map(item => promisify(execFile)(process.execPath, [cli, 'run', 'task', 'update',
     ...base, ...f.fence(session, contention, item.id), '--id', item.id, '--summary', 'Verified candidate'], { cwd: f.root, env: f.env })));
   assert.equal(reports.filter(result => result.status === 'fulfilled').length, 1);
   const stale = reports.findIndex(result => result.status === 'rejected');
@@ -252,7 +250,7 @@ async function swarm(f) {
   assert.ok(Object.values(scores.scores).every(score => score.verified_score === 0.8));
   writeResult(scoresPath, { ...scores, iteration: 1, scorer_type: 'llm', computed_at: new Date().toISOString() });
   report('SCORE-1');
-  assert.equal(f.evolve('team', 'list', ...base).filter(item => item.result).length, 3);
+  assert.equal(f.evolve('run', 'task', 'list', ...base).filter(item => item.result).length, 3);
   const updated = aco('update', '--iter', '1');
   assert.deepEqual(aco('update', '--iter', '1'), updated);
   assert.equal(aco('converged').converged, true);
@@ -274,7 +272,7 @@ const result = await Promise.allSettled(selections.map(async name => {
     f.write(file, original);
     f.git('add', file);
     f.git('commit', '-qm', 'Add acceptance fixture');
-    f.agent('memory', 'put', 'Limits acceptance: the desired item limit is 3. Compare both source declarations when ranking.', '--id', memoryId);
+    f.agent('kb', 'add', 'Limits acceptance: the desired item limit is 3. Compare both source declarations when ranking.', '--id', memoryId);
     await { chain, odyssey, swarm }[name](f);
     assert.equal(existsSync(f.sentinel), false, 'The old executable was invoked');
   } finally {

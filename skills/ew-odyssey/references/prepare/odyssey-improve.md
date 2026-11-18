@@ -30,7 +30,7 @@ goal: true
 
 ## Purpose
 
-Odyssey improve performs a systematic 6-dimension quality audit of a target module or changeset, diagnoses root causes for critical/high findings, applies exhaustive fixes by severity tier, and verifies improvements against a captured baseline. Before starting, establish the target scope, dimension coverage, and baseline metrics.
+Odyssey improve performs a systematic 6-dimension quality audit of a target module or changeset, diagnoses root causes for actionable findings (`>= fix_threshold`, default `all`), applies exhaustive fixes by severity tier, and verifies improvements against a captured baseline. Before starting, establish the target scope, dimension coverage, and baseline metrics.
 
 ## Input Interpretation
 
@@ -47,17 +47,15 @@ The six dimensions (default all, overridable via `--dimensions`): performance, s
 
 ## Required Context
 
-Satisfy the Knowledge Gate (`AGENTS.md`) before searching code:
+Satisfy the Knowledge Gate per [shared base](../odyssey-base.md) §Phase Initialization & Pre-load (`evolve skill workflows show session-run` — `session-priors` when scope matches → `evolve search "<query>" --mode context` / `evolve kb get <id>` with CLI `--reads`) for `coding` and `debug` scope before searching code (`evolve code search "<target keywords>"` → module boundaries, layering rules).
 
-- Wiki & Memory (first): Run MCP `wiki_context` / `memory_search` + `wiki_reference` / `memory_get`, or CLI `evolve context "<target keywords>" --session <session> --include-memory --reads "<run_dir>/knowledge-reads.json"` (plus `evolve wiki get <id> --resolved --reads ... --from-search ...`) for `coding` and `debug` scope.
-- Code graph (after Knowledge Gate): `evolve code search "<target keywords>"` → module boundaries, layering rules.
 - Baseline metrics: capture current test pass rate, bundle size, dependency count, complexity hotspots before any changes — these form `session.json.baseline_metrics` for before/after comparison.
 
 When prior improve sessions of the same target exist, check their audit results and fixes first to avoid re-diagnosing already-resolved issues.
 
 ## Run Artifact Metadata
 
-Attach `kind`, `schema`, `role`, and `alias` from `produces` to top-level `_meta` in `outputs/session.json`, the first JSON record in `outputs/evidence.ndjson`, and YAML frontmatter in `outputs/understanding.md` (`current_state: "END"` before `evolve run complete`).
+Follow [runtime adapters](../runtime-adapters.md) §4 for `_meta` attachment (`outputs/session.json`, first record of `outputs/evidence.ndjson`, YAML frontmatter of `outputs/understanding.md`), `current_state: "END"`, and `evolve run complete` sealing.
 
 ## Boundaries and Invariants
 
@@ -73,7 +71,7 @@ Attach `kind`, `schema`, `role`, and `alias` from `produces` to top-level `_meta
 - **Scope locked after confirmation** — once the fix plan is confirmed (or auto-proceeded via `-y`), no scope expansion to additional files without re-confirmation.
 - **Incremental verification** — each discrete fix step MUST be verified (tests run) before proceeding. NEVER batch multiple unrelated changes into a single verification.
 - **No feature creep** — fixes MUST NOT add new functionality, change APIs, or alter public interfaces. Beneficial changes discovered → evidence phase=decision as recommendations, NOT applied.
-- **Rollback safety** — if any test fails after a fix step, revert that specific change before attempting alternatives. NEVER proceed with failing tests.
+- **Rollback safety & fix loop cap** — commit per verified fix immediately on test pass so that if any test fails after a subsequent fix step, reverting that uncommitted change (`git checkout -- {file}` / patch revert) never discards earlier verified fixes; NEVER proceed with failing tests. `S_VERIFY → S_FIX` rework loops are bounded by `fix_rounds < max_fix_rounds` (default `5`).
 
 ## Risk Checklist
 

@@ -7,7 +7,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repository = fileURLToPath(new URL('..', import.meta.url));
-const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url));
+const cli = fileURLToPath(new URL('../dist/workflow-cli.js', import.meta.url));
 const baselineSkillSource = fileURLToPath(new URL('./fixtures/release-gate-e2e/baseline', import.meta.url));
 const task = JSON.parse(readFileSync(new URL('./fixtures/release-gate-e2e/task.json', import.meta.url), 'utf8'));
 const scenariosPath = fileURLToPath(new URL('./fixtures/release-gate-e2e/scenarios.json', import.meta.url));
@@ -16,6 +16,7 @@ const root = join(fixture, 'project');
 const support = join(fixture, 'support');
 mkdirSync(root, { recursive: true });
 mkdirSync(support, { recursive: true });
+mkdirSync(join(fixture, 'home'), { recursive: true });
 
 const run = (command, args, options = {}) => execFileSync(command, args, {
   cwd: options.cwd ?? root, env: options.env ?? process.env,
@@ -43,15 +44,15 @@ function seedWiki() {
   for (const [index, change] of changes.entries()) {
     const path = join(support, `wiki-change-${index}.json`);
     writeFileSync(path, JSON.stringify(change));
-    const proposed = agent('wiki', 'propose', path, '--evidence', task.seed_knowledge.wiki_entries[index].evidence);
-    agent('wiki', 'apply', proposed.id);
+    const proposed = agent('kb', 'propose', path, '--evidence', task.seed_knowledge.wiki_entries[index].evidence);
+    agent('kb', 'apply', proposed.id);
   }
-  agent('wiki', 'build');
+  agent('kb', 'build');
 }
 
 function seedMemory(db) {
   for (const memory of task.seed_knowledge.memories) {
-    agent('memory', 'put', memory.content, '--db', db, '--id', memory.id, '--type', memory.type,
+    agent('kb', 'add', memory.content, '--db', db, '--id', memory.id, '--type', memory.type,
       '--scene', memory.scene, '--session', memory.session, '--priority', String(memory.priority));
   }
 }
@@ -68,35 +69,35 @@ const cli = process.env.AGENT_MEMORY_CLI;
 const db = process.env.RELEASE_GATE_DB;
 const body = readFileSync(entry, 'utf8');
 const normalizedBody = body.toLowerCase();
-const traceFile = root + '/.agent-memory/release-trace-' + input.id + '.json';
+const traceFile = root + '/.evolve/release-trace-' + input.id + '.json';
 const call = (...args) => JSON.parse(execFileSync(process.execPath, [cli, '--root', root, ...args, '--trace-file', traceFile], {
   env: process.env, encoding: 'utf8', windowsHide: true,
 }));
 const query = input.query;
 let references;
-if (normalizedBody.includes('wiki constraints')) {
-  call('wiki', 'constraints', '--task', 'release', '--category', 'review');
+if (normalizedBody.includes('--kind constraint')) {
+  call('search', query, '--from', 'kb', '--mode', 'context', '--kind', 'constraint', '--task', 'release', '--category', 'review');
 }
-if (normalizedBody.includes('wiki references')) {
-  references = call('wiki', 'references', query, '--task', 'release');
+if (normalizedBody.includes('--kind reference')) {
+  references = call('kb', 'search', query, '--kind', 'reference', '--task', 'release');
 }
 let memories;
-if (input.environment === 'production' && normalizedBody.includes('--include-memory')) {
-  memories = call('memory', 'search', query, '--db', db, '--scene', 'release');
+if (input.environment === 'production' && normalizedBody.includes('--kind episodic')) {
+  memories = call('kb', 'search', query, '--db', db, '--kind', 'episodic', '--scene', 'release');
 }
-if (references?.results?.length && normalizedBody.includes('read')) {
+if (references?.results?.length && normalizedBody.includes('kb get')) {
   const preferred = input.environment === 'production' ? 'entries/prod-freeze-protocol' : 'entries/release-checksum';
-  const selected = references.results.find(item => item.id === preferred) ?? references.results[0];
-  const searchId = references.knowledge_reads?.searches.at(-1)?.search_id;
-  if (selected) call('wiki', 'reference', selected.id, '--task', 'release', ...(searchId ? ['--from-search', searchId] : []));
+  const selected = references.results.find(item => item.rawId === preferred || item.id === preferred) ?? references.results[0];
+  const searchId = selected?.search_id ?? references.knowledge_reads?.searches.at(-1)?.search_id;
+  if (selected) call('kb', 'get', selected.id, '--kind', 'reference', '--task', 'release', ...(searchId ? ['--from-search', searchId] : []));
 }
-if (input.environment !== 'production' && normalizedBody.includes('read')) {
-  call('wiki', 'get', 'entries/release-checksum');
+if (input.environment !== 'production' && normalizedBody.includes('kb get')) {
+  call('kb', 'get', 'entries/release-checksum');
 }
-if (memories?.results?.length && normalizedBody.includes('read')) {
-  const searchId = memories.knowledge_reads?.searches.at(-1)?.search_id;
+if (memories?.results?.length && normalizedBody.includes('kb get')) {
   for (const memory of memories.results.filter(item => item.id === 'mem-prod-freeze-01')) {
-    call('memory', 'get', memory.id, '--db', db, ...(searchId ? ['--from-search', searchId] : []));
+    const searchId = memory.search_id ?? memories.knowledge_reads?.searches.at(-1)?.search_id;
+    call('kb', 'get', memory.id, '--db', db, '--kind', 'episodic', ...(searchId ? ['--from-search', searchId] : []));
   }
 }
 const trace = JSON.parse(readFileSync(traceFile, 'utf8'));
@@ -134,7 +135,8 @@ try {
   git('commit', '-qm', 'Release gate baseline');
   const base = git('rev-parse', 'HEAD');
   const runner = writeRunner();
-  const env = { ...process.env, RELEASE_GATE_ROOT: root, RELEASE_GATE_DB: db, AGENT_MEMORY_CLI: cli };
+  const env = { ...process.env, HOME: join(fixture, 'home'), USERPROFILE: join(fixture, 'home'),
+    RELEASE_GATE_ROOT: root, RELEASE_GATE_DB: db, AGENT_MEMORY_CLI: cli };
   Object.assign(process.env, env);
   const baseline = JSON.parse(run(process.execPath, [runner], {
     cwd: root, env, input: JSON.stringify({
@@ -145,10 +147,10 @@ try {
   assert.equal(baseline.passed, false);
   assert.deepEqual(baseline.artifact.consulted_memory_ids, []);
 
-  const memory = agent('memory', 'search', 'production release freeze', '--db', db, '--scene', 'release');
+  const memory = agent('kb', 'search', 'production release freeze', '--db', db, '--scene', 'release');
   assert.equal(memory.results[0].id, 'mem-prod-freeze-01');
-  const instruction = 'Before release gates, search Wiki references for "<query>" with --task release --trace; for production include --include-memory, read freeze IDs, and block before writing outputs/release-gate.json.';
-  const draft = agent('evolve', 'draft', entry, instruction, '--priority', 'high', '--when', 'every release gate invocation', '--evidence', 'e2e:release-gate:baseline-production');
+  const instruction = 'Before release gates, run evolve kb search "<query>" --kind reference --task release --trace; for production also search --kind episodic, run evolve kb get on freeze IDs, and block before writing outputs/release-gate.json.';
+  const draft = agent('skill', 'draft', entry, instruction, '--priority', 'high', '--when', 'every release gate invocation', '--evidence', 'e2e:release-gate:baseline-production');
   const draftPath = join(support, 'release-gate-draft.json');
   writeFileSync(draftPath, JSON.stringify(draft));
   const scenarios = JSON.parse(readFileSync(scenariosPath, 'utf8'));
@@ -158,12 +160,12 @@ try {
   }));
   const scenariosWithInputPath = join(support, 'scenarios.json');
   writeFileSync(scenariosWithInputPath, JSON.stringify(scenariosWithInput));
-  const replay = agent('evolve', 'replay', draftPath, '--runner', runner, '--scenarios', scenariosWithInputPath);
+  const replay = agent('skill', 'replay', draftPath, '--runner', runner, '--scenarios', scenariosWithInputPath);
   assert.equal(replay.scenarios[0].baseline.passed, false);
   assert.equal(replay.scenarios[0].candidate.passed, true);
   assert.ok(replay.scenarios[0].candidate.knowledgeReads.reads.some(read => read.id === 'mem-prod-freeze-01'));
   assert.ok(replay.scenarios[0].candidate.knowledgeReads.reads.some(read => read.id === 'entries/prod-freeze-protocol'));
-  const applied = agent('evolve', 'apply', replay.id);
+  const applied = agent('skill', 'apply', replay.id);
   assert.equal(applied.replayed, false);
   const after = JSON.parse(run(process.execPath, [runner], {
     cwd: root, env, input: JSON.stringify({
@@ -173,7 +175,7 @@ try {
   }));
   assert.equal(after.passed, true);
   assert.equal(after.artifact.decision, 'blocked');
-  agent('evolve', 'rollback', replay.id);
+  agent('skill', 'rollback', replay.id);
   assert.equal(readFileSync(entry, 'utf8'), readFileSync(join(baselineSkillSource, 'SKILL.md'), 'utf8'));
   console.log(JSON.stringify({
     task: task.test_id, baseline: baseline.artifact, memory_hit: memory.results[0],

@@ -1,7 +1,7 @@
 ---
 name: ew-init
 description: Initialize and onboard a greenfield, brownfield, or legacy Maestro project into Evolve (CodeGraph, Wiki, and context packaging)
-argument-hint: '[-y] [--from <alias>] [<idea|@file>]'
+argument-hint: '[-y] [--refresh] [--from <alias>] [<idea|@file>]'
 wiki_categories: [arch, coding]
 search_profile:
   wiki: [constraints, references]

@@ -15,19 +15,13 @@ Back-half: `S_GENERALIZE → S_DISCOVER → S_RECORD → END` (see [shared phase
 ## Boundary
 
 **In scope:** Multi-iteration bug-hunt and generalization campaigns — symptom → root cause → fix → confirm → generalize → discover adjacent defects.
-**Out of scope:** Bounded orchestration-chain diagnosis or simple <=2-file fixes → `ew-orchestrate` (`ew-debug` / `ew-companion`) | Features → `--mode planex` | Quality review → `--mode review` | UI → `--mode ui`
+**Out of scope:** Single-concern small edit (`<=2` files, no chain) → `ew-orchestrate` (`ew-companion`) | Bounded single-pass diagnosis inside an Evolve chain (`<=2–3` modules, producing `diagnosis.json` + `fix-directions.json` for `ew-plan --gaps` → `ew-execute`) → `ew-orchestrate` (`ew-debug`) | Features → `--mode planex` | Quality review → `--mode review` | UI → `--mode ui`
 
 ---
 
 ## `--template <name>`
 
-Template strategies are defined in [the selected mode preparation](prepare/odyssey-debug.md) §Input Interpretation — that is the canonical wording.
-
----
-
-## Target Resolution
-
-Issue description parsed from `<intent>`.
+Template strategies and target resolution are defined in [the selected mode preparation](prepare/odyssey-debug.md) §Input Interpretation — that is the canonical wording.
 
 ---
 
@@ -42,11 +36,12 @@ Issue description parsed from `<intent>`.
 
 ## evidence.ndjson Phases
 
-`archaeology|explore|diagnosis|discovery|decision|self-iteration`
+`archaeology|explore|diagnosis|fix|discovery|decision|issue|self-iteration`
 
 - `archaeology`: `sha`, `author`, `date`, `message`, `relevance`
 - `explore`: `category` (call_chain|recent_change|error_gap|similar_pattern), `detail`
 - `diagnosis`: `hypothesis`, `result` (confirmed|disproved|inconclusive)
+- `fix`: `file`, `summary`, `verification`
 - `discovery`: `file`, `line`, `classification` (safe|risk|bug), `action` (fix|issue|decision|skip)
 - `decision`: `question`, `options`, `context`, `status` (pending|resolved|deferred), `resolution`
 - `self-iteration`: `stage`, `round`, `assessment`, `expansion`
@@ -66,11 +61,11 @@ Issue description parsed from `<intent>`.
 | ID | Goal | done_when | phase | skip_when |
 |----|------|-----------|-------|-----------|
 | G1 | Root cause identified | phase=diagnosis result=confirmed | S_DIAGNOSE | — |
-| G2 | Explore context gathered | explore.json ≥1 category | S_EXPLORE | — |
+| G2 | Explore context gathered | explore.json ≥1 category (or W006 gap logged) | S_EXPLORE | — |
 | G3 | Fix applied and confirmed | confirmation.overall == confirmed | S_CONFIRM | skip_fix |
 | G4 | Pattern generalized | patterns[] ≥1 entry | S_GENERALIZE | skip_generalize |
 | G5 | Discoveries triaged | all scan hits classified | S_DISCOVER | skip_generalize |
-| G6 | Learnings persisted | spec entries created OR none actionable | S_RECORD | — |
+| G6 | Learnings persisted | reusable Wiki candidates staged/proposed (or none actionable) | S_RECORD | — |
 
 ---
 
@@ -96,41 +91,22 @@ S_EXPLORE     → S_DIAGNOSE  : complete
 S_DIAGNOSE → S_FIX          : confirmed, !skip_fix
 S_DIAGNOSE → S_GENERALIZE   : confirmed, skip_fix, !skip_generalize
 S_DIAGNOSE → S_RECORD       : confirmed, skip_fix, skip_generalize
-S_DIAGNOSE → S_DIAGNOSE     : all hypotheses failed, retries < 3 → A_ESCALATE_DIAGNOSIS
-S_DIAGNOSE → S_RECORD       : retries >= 3 → INCONCLUSIVE
-S_FIX     → S_CONFIRM       : fix implemented
-S_CONFIRM → S_GENERALIZE    : confirmed, !skip_generalize
-S_CONFIRM → S_RECORD        : confirmed, skip_generalize
-S_CONFIRM → S_FIX           : needs_rework
+S_DIAGNOSE → S_DIAGNOSE     : all hypotheses in round failed, diagnosis_retries < 3 → A_ESCALATE_DIAGNOSIS
+S_DIAGNOSE → S_RECORD       : diagnosis_retries >= 3 (Normal: user accepts escalation / INCONCLUSIVE; -y: INCONCLUSIVE)
+S_FIX      → S_CONFIRM      : fix implemented
+S_CONFIRM  → S_GENERALIZE   : confirmed, !skip_generalize
+S_CONFIRM  → S_RECORD       : confirmed, skip_generalize
+S_CONFIRM  → S_FIX          : needs_rework, fix_rounds < max_fix_rounds (`fix_rounds++`)
+S_CONFIRM  → S_RECORD       : needs_rework, fix_rounds >= max_fix_rounds (escalate per [shared base](odyssey-base.md) `<fix_loop_cap>`)
 ```
 
 ---
 
 ## Actions
 
-### A_ARCHAEOLOGY
+### A_ARCHAEOLOGY & A_EXPLORE
 
-Run 2 parallel subagents (always join before advancing — see [runtime adapters](runtime-adapters.md)):
-- **Timeline**: `git log --oneline -20 -- {files}`
-- **Blame**: top 3 files `git blame -L {region}`
-
-Evidence phase=archaeology.
-
-`evolve delegate "PURPOSE: review recent modifications related to {issue}. EXPECTED: JSON [{commit_sha, risk_level, analysis, could_cause_issue, explanation}]" --to codex --mode analysis`
-
-Update §2 (Archaeology).
-
-If an archaeology agent fails, log W003 and proceed with available results.
-
-### A_EXPLORE
-
-Skip if no CLI tools (W006).
-
-`evolve delegate "PURPOSE: trace call chains, recent changes, error gaps, and similar patterns for {issue}. EXPECTED: JSON {call_chains, recent_changes, error_gaps, similar_patterns}" --to codex --mode analysis`
-
-Write `explore.json` + evidence phase=explore. Update §3 (Exploration). Mark G2.
-
-**GATE: discovery-complete** — archaeology/explore evidence logged, understanding.md §2-§3 updated, G2 marked (W003 partial / W006 skip acceptable).
+Follow [shared base](odyssey-base.md) §Shared Discovery Phases with `target_or_issue = {issue}` (archaeology subagents + `explore.json` + `understanding.md` §2–§3 + `G2` + `W003`/`W006` probe).
 
 ### A_DIAGNOSE
 
@@ -141,37 +117,38 @@ Write `explore.json` + evidence phase=explore. Update §3 (Exploration). Mark G2
    - `-y`: defer
 4. Confirmed → `session.json.root_cause` + §5 (Root Cause). Mark G1.
 
-**GATE: diagnosis-confirmed** — all hypotheses tested with evidence, root cause confirmed with reproduction or code/log evidence (or INCONCLUSIVE after 3-strike), understanding.md §4-§5 written. Zero hypotheses tested is BLOCKED.
+**GATE: diagnosis-confirmed** — all hypotheses tested with evidence, root cause confirmed with reproduction or code/log evidence (or INCONCLUSIVE after 3-strike round escalation), understanding.md §4-§5 written. Zero hypotheses tested is BLOCKED.
 
 ### A_ESCALATE_DIAGNOSIS
 
-`diagnosis_retries++`.
+`diagnosis_retries++` (tracks failed diagnosis rounds where all round hypotheses are disproved/inconclusive).
 
-- **retries < 3**: `evolve delegate "Analyze failed hypotheses for {issue} and propose new root-cause hypotheses with file:line evidence" --to codex --mode analysis`, generate new hypotheses, → S_DIAGNOSE.
-- **retries >= 3**:
-  - Normal: structured prompt
-  - `-y`: INCONCLUSIVE → S_RECORD
+- **`diagnosis_retries < 3`**: `evolve agent exec "Analyze failed hypotheses for {issue} and propose new root-cause hypotheses with file:line evidence" --to codex|agy|claude --mode analysis` (or architecture inspection if no CLI executor), generate new hypotheses → `S_DIAGNOSE`.
+- **`diagnosis_retries >= 3`**:
+  - **Normal**: structured prompt — either (a) user provides a new scope/clue (at most 1 user-assisted extension, reset `diagnosis_retries` once → `S_DIAGNOSE`), or (b) user stops → record unresolved hypotheses as `INCONCLUSIVE` → `S_RECORD`.
+  - **`-y`**: `INCONCLUSIVE` → `S_RECORD`.
 
 ### A_FIX
 
 1. Present root cause + proposed fix.
-   - Normal: structured prompt
-   - `-y`: auto proceed
-2. Implement fix, evidence phase=decision.
+   - Normal: structured prompt (`evidence phase=decision`)
+   - `-y`: auto proceed (`evidence phase=decision`, `status: "deferred"`)
+2. Implement targeted fix, log `evidence phase=fix` (`file, summary, verification`), commit per verified fix (`"odyssey-debug({slug}): FIX — {summary}"`).
 
 ### A_CONFIRM
 
 1. Run covering tests.
-2. `evolve delegate "PURPOSE: review the fix for {issue} against covering tests and diff. EXPECTED: JSON {verdict, findings [{severity, description, suggestion}], regression_risk}" --to codex --mode analysis`
+2. `evolve agent exec "PURPOSE: review the fix for {issue} against covering tests and diff. EXPECTED: JSON {verdict, findings [{severity, description, suggestion}], regression_risk}" --to codex --mode analysis`
 3. `session.json.confirmation`:
    ```json
    {"test_result": "", "cli_review": {}, "overall": "confirmed|needs_rework"}
    ```
 4. Update §6 (Fix & Confirmation).
-   - `needs_rework` → S_FIX
    - `confirmed` → mark G3
+   - `needs_rework` with `fix_rounds < max_fix_rounds` → `fix_rounds++` → `S_FIX`
+   - `needs_rework` with `fix_rounds >= max_fix_rounds` → escalate per [shared base](odyssey-base.md) `<fix_loop_cap>` → `S_RECORD`
 
-**GATE: fix-confirmed** — fix implemented and tests pass, CLI review done, `confirmation.overall` set, understanding.md §6 written, G3 marked. `needs_rework` routes back to FIX; skippable only when `skip_fix == true`.
+**GATE: fix-confirmed** — fix implemented and tests pass, CLI review done, `confirmation.overall` set, understanding.md §6 written, G3 marked. `needs_rework` routes back to FIX while `fix_rounds < max_fix_rounds` (else escalates to `S_RECORD`); skippable only when `skip_fix == true`.
 
 ---
 
@@ -181,20 +158,20 @@ Confirmed root cause + applied fix.
 
 **Thoroughness floor:** ALL 3 layers (syntax/semantic/structural) must be attempted and logged.
 
-**Discover routing:** `bug` → back to S_FIX; new bug → S_DIAGNOSE.
+**Discover routing:** `bug` → back to S_FIX; new bug → S_DIAGNOSE (`cross_phase_loops < max_loops`, re-entry per [shared base](odyssey-base.md) `A_DISCOVER`).
 
 ---
 
 ## Knowledge Persistence (§9)
 
-Include verified reusable findings in the Run summary and harvest the completed Session through `evolve workflows show knowledge` (`evolve closeout session` → `evolve wiki propose`).
+Include verified reusable findings in the Run summary and harvest the completed Session through `evolve skill workflows show ew-knowledge` (`evolve kb harvest session` → `evolve kb propose`).
 
 | Category | Content | Follow-up |
 |----------|---------|-----------|
-| Recurring root cause pattern | Type + triggers + fix + detection | `evolve closeout session` → `evolve wiki propose` (`category: debug`) |
-| Non-obvious workaround | Problem + steps + why obvious fix fails | `evolve closeout session` → `evolve wiki propose` (`category: debug`) |
-| Architecture boundary violation | Violation + correct boundary + verification | `evolve closeout session` → `evolve wiki propose` (`category: arch`) |
-| Reusable generalization pattern | Signature + risk + fix template + scope | `evolve closeout session` → `evolve wiki propose` (`category: coding`) |
+| Recurring root cause pattern | Type + triggers + fix + detection | `evolve kb harvest session` → `evolve kb propose` (`category: debug`) |
+| Non-obvious workaround | Problem + steps + why obvious fix fails | `evolve kb harvest session` → `evolve kb propose` (`category: debug`) |
+| Architecture boundary violation | Violation + correct boundary + verification | `evolve kb harvest session` → `evolve kb propose` (`category: arch`) |
+| Reusable generalization pattern | Signature + risk + fix template + scope | `evolve kb harvest session` → `evolve kb propose` (`category: coding`) |
 
 ---
 
@@ -231,24 +208,25 @@ Goals:      {done}/{total} ({skipped} skipped)
 
 - **Discovery gate** (ARCHAEOLOGY/EXPLORE): evidence for the phase logged, understanding.md updated, discovery goal marked. Archaeology partial via W003 acceptable; explore W006 skip acceptable.
 - **Audit gate** (DIAGNOSE): hypotheses ranked and tested with evidence, root cause confirmed or escalated (`diagnosis-confirmed`). Zero hypotheses tested is BLOCKED.
-- **FIX gate:** fix targets confirmed root cause (not symptom), with `evidence phase=fix` logged; escalate via `S_ESCALATE_DIAGNOSIS` if unresolved after 3 attempts.
-- **CONFIRM gate:** tests pass; CLI review done; `confirmation.overall == "confirmed"`, understanding.md §6 written, verify goal marked. `needs_rework` routes back to FIX (`fix-confirmed`).
+- **FIX gate:** fix targets confirmed root cause (not symptom), with `evidence phase=fix` logged; rework loops bounded by `fix_rounds < max_fix_rounds` (escalate to `S_RECORD` per [shared base](odyssey-base.md) `<fix_loop_cap>`; unresolved diagnosis rounds escalate via `A_ESCALATE_DIAGNOSIS`).
+- **CONFIRM gate:** tests pass; CLI review done; `confirmation.overall == "confirmed"`, understanding.md §6 written, verify goal marked. `needs_rework` routes back to FIX while `fix_rounds < max_fix_rounds` (`fix-confirmed`).
 
 ---
 
 ## Error Codes (debug-specific)
 
+Shared `E000–E004` and `W008` errors are defined in [SKILL.md](../SKILL.md) (including `E001` missing issue/session).
+
 | Code | Severity | Condition | Recovery |
 |------|----------|-----------|----------|
-| E001 | error | No issue, no session | Provide issue or -c |
 | W003 | warning | Archaeology agent or delegate failure | Proceed with available results |
-| W006 | warning | No CLI tools | Skip explore |
+| W006 | warning | No CLI delegate executable (`codex\|agy\|claude`) available | Skip delegate explore, log gap |
 
 ---
 
 ## Success Criteria (debug-specific)
 
-- [ ] Session + 4 output files + prior knowledge searched
+- [ ] Session + mode-contracted output files (`prepare/odyssey-debug.md`) + prior knowledge searched
 - [ ] Archaeology + CLI review → evidence
 - [ ] CLI exploration → explore.json
 - [ ] Hypotheses tested, root cause with evidence refs

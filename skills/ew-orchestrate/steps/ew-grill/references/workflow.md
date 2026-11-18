@@ -4,9 +4,9 @@ Adversarial Socratic pressure testing: `Parse & Route -> Discovery & Terminology
 
 ## Step 1: Discovery & Codebase Grounding
 
-1. Load optional upstream artifact via Run MCP (`read_artifact`) or `evolve run artifact-read <run> upstream-context --session <session>` (or read `--from @file` / `--from <blueprint>`).
-2. Complete the Knowledge Gate (`session-priors` / `wiki_context` / CLI `--reads`) to surface architectural constraints and domain decisions.
-3. Launch a read-only exploration subagent (`invoke_subagent` / host equivalent, joined before Step 2) + `evolve code search` to map overlapping modules, naming conventions, error-handling patterns, and integration boundaries -> save summary to `{run_dir}/evidence/codebase-context.json`. If grounding fails, mark findings `[LOW CONFIDENCE]`.
+1. Load optional upstream artifact via `evolve run read artifact <run> <alias> --session <session>` (`upstream-context`, `current-blueprint`, `current-grill`, or read `--from @file`).
+2. Complete the Run Knowledge Gate (`evolve skill workflows show session-run`) to surface architectural constraints and domain decisions.
+3. Launch a read-only exploration subagent (`cli-explore-agent` / `cli_explore_agent`, via `invoke_subagent` or host equivalent, joined before Step 2; fall back to inline exploration instructions when absent) + `evolve code search` to map overlapping modules, naming conventions, error-handling patterns, and integration boundaries -> save summary to `{run_dir}/evidence/codebase-context.json`. If grounding fails, mark findings `[LOW CONFIDENCE]`.
 
 ## Step 2: Terminology Alignment (`terminology-aligned` gate)
 
@@ -25,7 +25,7 @@ Walk `3` (`shallow`), `5` (`standard`), or `8` (`deep`) risk branches in order f
 
 ## Step 4: Synthesis, Context Package & Seal
 
-1. Write `{run_dir}/outputs/grill-report.md` (decisions, rejected assumptions, `file:line` evidence, open risks, residual severity).
-2. Write `{run_dir}/outputs/context-package.json` (`context-package/1.0`: `domain`, `requirements[]`, `constraints[]`, `non_goals[]`, `insights[]`, `references[]`) for downstream `ew-brainstorm` / `ew-plan` / `ew-blueprint`.
-3. Write `{run_dir}/report.md` with frontmatter (`verdict`, `summary`, `constraints`, `decisions`, `concerns`, `next` proposing `ew-brainstorm` or `ew-plan` only when justified).
-4. Seal via fenced `evolve run complete <run_id> --session <session> --actor <actor> --expected-orchestration-revision <rev> --expected-run-revision <rev> --gate terminology-aligned --gate branches-walked --summary "<summary>" --verdict done|done_with_concerns`. Stage reusable architectural constraints afterward through `ew-knowledge` (`evolve workflows show knowledge`).
+1. Write `{run_dir}/outputs/grill-report.md` (frontmatter `kind: grill-report`, `schema: grill-report/1.0`, `role: primary`, `alias: current-grill`; decisions, rejected assumptions, `file:line` evidence, open risks, residual severity).
+2. Write `{run_dir}/outputs/context-package.json` (`_meta: { kind: "context-package", schema: "context-package/1.0", role: "attachment", alias: "upstream-context" }`, `domain`, `requirements[]`, `constraints[]`, `non_goals[]`, `insights[]`, `references[]`) for downstream `ew-brainstorm` / `ew-plan` / `ew-blueprint`.
+3. Write `{run_dir}/report.md` with frontmatter (`verdict: ready|ready_with_concerns|blocked|failed`, `summary`, `constraints`, `decisions`, `concerns`, `next` proposing `ew-brainstorm` or `ew-plan` only when justified).
+4. Seal or transition the Run per `evolve skill workflows show session-run` (`--gate terminology-aligned --gate branches-walked`). Stage reusable architectural constraints afterward through `ew-knowledge` (`evolve skill workflows show ew-knowledge`).
