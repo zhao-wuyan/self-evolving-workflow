@@ -36,7 +36,6 @@ export interface OmpCommandContext extends OmpContext {
   hasUI: boolean;
   ui: {
     notify(message: string, level: 'info' | 'error'): void;
-    editor(title: string, prefill: string): Promise<string | undefined>;
     confirm(title: string, message: string): Promise<boolean>;
   };
 }
@@ -57,6 +56,7 @@ export interface OmpExtensionApi {
   };
   registerCommand(name: string, command: {
     description: string;
+    getArgumentCompletions?(prefix: string): Array<{ value: string; label: string; description?: string }> | null;
     handler(args: string, ctx: OmpCommandContext): Promise<void>;
   }): void;
   registerTool(tool: {

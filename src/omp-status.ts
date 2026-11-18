@@ -75,7 +75,7 @@ export function registerOmpStatus(api: OmpExtensionApi) {
           return !profile ? '个人经验库未配置' : profile.roots.includes(root) ? '当前项目已开启' : '当前项目未开启';
         }),
       ];
-      await ctx.ui.editor('Evolve 项目状态（只读）', sections.join('\n\n'));
+      ctx.ui.notify(`Evolve 项目状态\n\n${sections.join('\n\n')}`, 'info');
     },
   });
 }

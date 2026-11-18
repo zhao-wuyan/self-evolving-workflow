@@ -26,7 +26,7 @@ export function registerOmpMigration(api: OmpExtensionApi) {
       try {
         const input = args.trim();
         if (input === 'help' || input === '--help') {
-          await ctx.ui.editor('迁移旧版知识', `${usage}\n省略目录时读取当前项目的旧知识。先预览、再确认写入；不转换旧 Session、Run 或工作流产物。`);
+          ctx.ui.notify(`${usage}\n省略目录时读取当前项目的旧知识。先预览、再确认写入；不转换旧 Session、Run 或工作流产物。`, 'info');
           return;
         }
         const knowhowOnly = knowhowFlag.test(input);
@@ -41,8 +41,14 @@ export function registerOmpMigration(api: OmpExtensionApi) {
         const fingerprint = migrationFingerprint(source, entries);
         const added = entries.filter(entry => !entry.existing).length;
         const review = entries.filter(entry => entry.status === 'needs_review').length;
-        const preview = { 来源: source, 目标: join(target, 'wiki', 'entries'), 新增: added, 已存在: entries.length - added, 待审: review, 条目: entries };
-        if (await ctx.ui.editor('迁移预览（修改不会保存，取消即停止）', JSON.stringify(preview, null, 2)) === undefined || !added) return;
+        const preview = [`迁移预览（尚未写入）\n来源：${source}\n目标：${join(target, 'wiki', 'entries')}\n新增 ${added} 条，已存在 ${entries.length - added} 条，待审 ${review} 条。`];
+        for (const entry of entries) {
+          if (entry.existing) continue;
+          const status = { active: '生效', needs_review: '待审', deprecated: '已弃用' }[entry.status];
+          preview.push(`${entry.origin} → wiki/entries/${entry.id}.md（${status}）${entry.issues?.length ? `\n审阅项：${entry.issues.join('；')}` : ''}`);
+        }
+        ctx.ui.notify(preview.join('\n\n'), 'info');
+        if (!added) return;
         if (!await ctx.ui.confirm('确认迁移旧版知识？', `向当前项目 Wiki 写入 ${added} 条新条目。待审项保留待审状态，不改动旧文件。`)) return;
         if (realpathSync(ctx.cwd) !== target || migrationFingerprint(source, migrateLegacyWiki(wiki, source, project, false, layer)) !== fingerprint) {
           throw new InputError('来源或目标在预览后发生变化，请重新运行 /evolve-migrate');

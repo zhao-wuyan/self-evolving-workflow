@@ -55,6 +55,8 @@ evolve agent exec "<prompt>" --to omp --mode analysis|write [--role <name>] [--m
 
 ### OMP 插件入口
 
+**OpenViking 不是插件安装依赖。** 本地 Session / Run、Wiki 和旧知识迁移不需要启动服务；启用远端项目资产或使用跨项目经验库时，先配置 [OpenViking 服务](#openviking-服务可选)。
+
 需要 OMP 和 Node.js ≥ 22.16.0。从 GitHub Release 安装 **`omp-plugin-integration` 分支**的预编译包（不需要克隆、编译，也不需要全局安装 `evolve`）：
 
 ```sh
@@ -98,11 +100,15 @@ omp plugin install .
 | `evolve_run_binding` | 用 `bind` 同时提供 `session`、`run`；用 `unbind` 或 `reset` 清除绑定与搜索资格 |
 | `evolve_workflow` | 调用 `session`、`run`（含 `run task`）、`skill`；个人经验只开放 `status/search/get` |
 
-在 OMP 输入 `/evolve-experience` 查看中文帮助。你也可以直接告诉 Agent「整理待发布个人经验，给出建议后统一提交确认」，无需逐条输入命令。Agent 会用 `evolve_experience_pending` 读取候选，说明建议，再用 `evolve_experience_publish` 发起一次预览和确认；取消不会发布。手动也可以用 `/evolve-experience publish <候选 ID> [更多候选 ID]`。发布逐条校验，遇到变化或失败会停止并报告进度。两种入口均无需另装全局 `evolve`。
+输入 `/evolve-experience` 加空格，即可在 OMP 的原生补全菜单中查看子命令、参数和中文用途；直接回车显示完整帮助。`enable`、`disable`、`status` 等结果直接显示为中文，不需要按 `Ctrl+Q`。`enable` 只更新用户级个人经验配置，不创建 `.evolve/openviking.json`，也不发布经验。
+
+你也可以直接告诉 Agent「整理待发布个人经验，给出建议后统一提交确认」。Agent 会用 `evolve_experience_pending` 读取候选、说明建议，再用 `evolve_experience_publish` 显示预览并请求确认。也可手动用 `/evolve-experience publish <候选 ID> [更多候选 ID]`。取消不会发布；遇到变化或失败会停止并报告进度。两种入口均无需另装全局 `evolve`。
 
 在目标项目的 OMP 会话输入 `/evolve-migrate [--knowhow-only] [旧项目目录]`，即可预览 Maestro Flow 的旧 Spec / Knowhow，确认后写入当前项目 Wiki。省略来源时使用当前项目，不修改旧文件，不转换旧 Session、Run 或工作流产物。
 
 `/evolve-status` 不带参数即可查看当前项目的 Session / 最近 Run、Skill 安装情况、OpenViking 本地配置和个人经验采集状态。只读取，不初始化项目，也不探测远端。
+
+要启用 **项目资产同步**，在目标仓库根目录执行 `/evolve-openviking init [策略文件]`（默认 `evolution.json`）。先提交策略、回放脚本与场景文件，并配置下文的 OpenViking 服务。命令会显示目标仓库、服务和策略，确认后才创建项目 Git 基线并向服务发布首个资产版本。只用个人经验库不需要执行此命令。
 
 插件不会自动安装 Skills。显式调用 `evolve_workflow`，传入 `{"argv":["skill","install","--scope","project","--yes"]}`，再将项目 `skills/` 与 `AGENTS.md` 提交到 Git。已有副本默认保留，`kept_sources` 会报告路径、版本和包内容哈希。
 
@@ -144,6 +150,15 @@ evolve skill workflows show ew-impeccable
   ```
 - **多宿主同步与进化**：`evolve kb config --host all` / `evolve kb sync --host all` 同步 Codex CLI、Claude Code 与 Antigravity 会话记忆，再经 `kb harvest` → `skill draft` → `skill replay` → `skill apply` 完成 Skill 迭代。
 
+### OpenViking 服务（可选）
+
+复用一台可访问的 OpenViking HTTP 服务，或按 [OpenViking 官方部署指南](https://docs.openviking.ai/en/getting-started/04-setup-for-agent) 自行部署。Evolve 和 OMP 插件都不会自动安装或启动该服务，也无需另装 OpenViking 的宿主插件或 MCP。客户端连接读取 `~/.openviking/ovcli.conf` 中的 `url`（服务基地址）和 `api_key`（该服务签发的用户 API key）；也可用绝对路径的 `EVOLVE_OPENVIKING_CONFIG` 指定文件。不要把凭据提交到项目仓库。
+
+- **共享项目 Skill / Wiki / 记忆**：在项目根目录用 `evolve openviking init --policy evolution.json` 显式启用，策略文件须先准备好。详见[项目资产接入说明](docs/openviking-integration-plan.md#可拔插后端与故障策略)。
+- **跨项目个人经验**：单独用下节的 `evolve experience enable` 启用采集，不需要先初始化项目资产。
+
+服务的 `/health` 需返回认证用户的 `account_id`、`user_id` 和服务版本。发布项目资产或个人经验需要服务通过 `/openapi.json` 暴露支持条件写入的 `/api/v1/content/batch-write`；能连通不代表能发布。
+
 ### OpenViking 个人经验库（可选）
 
 **默认关闭。** 在要采集经验的 Git 仓库根目录运行：
@@ -161,6 +176,16 @@ evolve experience disable   # 只停止当前仓库采集，不删除已发布�
 - **按领域和版本按需查**：例如 `evolve experience search python python@3.12 "异步请求阻塞"`。未启用采集的仓库也能查已发布经验；经验仅作参考，项目规则优先。
 
 详见[配置与检索](skills/ew-knowledge/references/knowledge-route.md#个人跨项目经验可选)和[审阅与发布](skills/ew-knowledge/references/closeout-protocol.md#个人跨项目经验审阅)。
+
+## 哪些产物应提交到 Git
+
+| 提交到 Git | 留在本地或发布渠道 |
+| --- | --- |
+| **项目级 Skill 和引导文件**：提交安装实际写入的 `skills/` 或宿主 Skill 目录（如 `.codex/skills/`），以及 `AGENTS.md` / `CLAUDE.md`。Run 从 Git 提交绑定 Skill 版本。 | **运行状态与缓存**：`.evolve/`、`.agent-memory/`、`.codegraph/` 下的 Session / Run 数据库、报告、回执、安装清单、待审队列和索引。 |
+| **可共享的正式项目知识**：审阅 `wiki/entries/` 中新增或变更的 Markdown，仅提交适合仓库读者的条目。`/evolve-migrate` 确认后生成的条目也按此筛选，待审条目不要当成已批准知识。 | **私人数据与机器配置**：用户级 Skill、私有对话与经验、API key、`~/.openviking/ovcli.conf` 和 `~/.evolve/` 不进项目 Git；旧 `.workflow/` 作为迁移来源保留，不重新加入本仓库。 |
+| **共享 OpenViking 项目资产时**：策略文件（如 `evolution.json`）和引用的回放脚本、场景文件须先提交。初始化会自动把不含 API key 的 `.evolve/openviking.json` 加入 Git 基线，无需手动暂存。 | **构建与发布产物**：`node_modules/`、`dist/` 和 `.tgz` 不提交。OMP 的预编译 `.tgz` 由 Actions 上传 GitHub Release。 |
+
+暂存时用 `git add -- <已审阅的文件或目录>` 按路径添加，不要直接用 `git add .`。把值得共享的 Run 结论整理进正式项目文档或 Wiki，不要为了提交结论而强制添加整个运行目录。
 
 ## 迁移与开发
 

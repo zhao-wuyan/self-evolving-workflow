@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
@@ -305,17 +305,25 @@ test('OMP experience batches only selected candidates and requires one interacti
   } });
 
   const h = harness(f.root);
-  const { handler } = h.commands['evolve-experience'];
+  const { handler, getArgumentCompletions: complete } = h.commands['evolve-experience'];
+  assert.equal(complete('ena')[0].value, 'enable');
+  assert.match(complete('sea')[0].label, /<领域> <技术栈版本> <关键词>/);
+  assert.equal(complete('review candidate --relat')[0].value, 'review candidate --relation ');
+  assert.equal(complete('review candidate --relation dup')[0].value, 'review candidate --relation duplicate ');
+  assert.equal(complete('publish first second --rel'), null);
   let approve = false;
-  let cancelPreview = false;
   let confirmationCount = 0;
   let output;
   const ctx = Object.assign(h.ctx, { hasUI: true, ui: {
-    notify(message) { assert.fail(message); },
-    async editor(_title, text) { output = JSON.parse(text); return cancelPreview ? undefined : text; },
+    notify(message, level) { assert.equal(level, 'info', message); output = message; },
+    async editor() { assert.fail('Command text must not use an editor'); },
     async confirm() { confirmationCount++; return approve; },
   } });
   await handler('enable', ctx);
+  assert.match(output, /当前仓库的个人经验采集已开启.*已更新用户级设置/);
+  assert.equal(existsSync(join(f.root, '.evolve/openviking.json')), false);
+  await handler('enable', ctx);
+  assert.match(output, /本次未更改设置/);
   assert.equal(f.evolve('experience', 'status').collecting, true);
 
   f.open('tested', 'ew-test');
@@ -338,28 +346,64 @@ test('OMP experience batches only selected candidates and requires one interacti
   assert.equal(candidates.length, 2);
   const publish = `publish ${candidates.map(item => item.id).join(' ')}`;
 
-  cancelPreview = true;
+  await handler('pending', ctx);
+  assert.match(output, /待发布个人经验/);
+  await handler('review ' + candidates[0].id, ctx);
+  assert.match(output, /发布预览（尚未发布）/);
   await handler(publish, ctx);
-  assert.equal(confirmationCount, 0);
-  cancelPreview = false;
+  assert.equal(confirmationCount, 1);
+  assert.deepEqual((await server.inspect()).files, {});
   ctx.hasUI = false;
   await assert.rejects(h.call('experience_publish', { candidates }), /需要能够展示预览并确认/);
   ctx.hasUI = true;
   assert.equal((await h.call('experience_publish', { candidates })).status, 'cancelled');
-  assert.equal(confirmationCount, 1);
-  assert.deepEqual(output.map(row => row.candidate_id), candidates.map(row => row.id));
+  assert.equal(confirmationCount, 2);
+  assert.deepEqual([...output.matchAll(/候选 ID：([a-f0-9]+)/g)].map(match => match[1]), candidates.map(row => row.id));
   assert.deepEqual((await server.inspect()).files, {});
 
   approve = true;
   const result = await h.call('experience_publish', { candidates });
-  assert.equal(confirmationCount, 2);
+  assert.equal(confirmationCount, 3);
   assert.equal(result.status, 'published');
   assert.deepEqual(result.published.map(row => row.candidate_id), candidates.map(row => row.id));
   const files = (await server.inspect()).files;
   assert.ok(result.published.every(({ receipt }) => files[receipt.uri]));
   await handler('search python python@3.12 concurrent work queue --limit 1', ctx);
-  assert.equal(output.results[0].reference.content.lesson, 'Limit the concurrent work queue.');
+  assert.match(output, /经验：Limit the concurrent work queue\./);
   await handler('disable', ctx);
   assert.equal(f.evolve('experience', 'status').collecting, false);
   assert.deepEqual((await server.inspect()).files, files);
+});
+
+test('OMP OpenViking initialization changes Git and publishes only after confirmation', async t => {
+  const server = await protocol(t);
+  const f = projectFixture(t, server, { profile: false });
+  const h = harness(f.root);
+  f.dispose(() => closeHarnesses(f.root));
+  const { handler } = h.commands['evolve-openviking'];
+  const before = f.git('rev-parse', 'HEAD');
+  let approve = false;
+  let output;
+  const ctx = Object.assign(h.ctx, { hasUI: true, ui: {
+    notify(message, level) { assert.equal(level, 'info', message); output = message; },
+    async confirm(_title, message) {
+      assert.match(message, /evolution\.json.*\n.*Git 基线.*共享的记忆/);
+      return approve;
+    },
+  } });
+  await handler('', ctx);
+  assert.match(output, /默认策略文件：evolution\.json/);
+  await handler('init', ctx);
+  assert.match(output, /已取消/);
+  assert.equal(f.git('rev-parse', 'HEAD'), before);
+  assert.equal(existsSync(join(f.root, '.evolve/openviking.json')), false);
+  assert.deepEqual((await server.inspect()).files, {});
+
+  approve = true;
+  await handler('init', ctx);
+  assert.match(output, /项目初始化完成/);
+  assert.notEqual(f.git('rev-parse', 'HEAD'), before);
+  const project = JSON.parse(f.git('show', 'HEAD:.evolve/openviking.json'));
+  const { head } = await readProjectHead(f.client, project);
+  assert.ok(output.includes(head.release_id));
 });
