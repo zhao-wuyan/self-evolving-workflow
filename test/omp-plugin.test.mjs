@@ -379,6 +379,8 @@ test('OMP experience batches only selected candidates and requires one interacti
 test('OMP OpenViking initialization changes Git and publishes only after confirmation', async t => {
   const server = await protocol(t);
   const f = projectFixture(t, server, { profile: false, minimalSkills: true });
+  f.write('.workflow/knowhow/migration.md', '---\ntitle: Legacy deployment notes\n---\n\nKeep this deployment note local.\n');
+  f.evolve('kb', 'import', '--project', 'legacy-project', '--apply');
   const h = harness(f.root);
   f.dispose(() => closeHarnesses(f.root));
   const { handler } = h.commands['evolve-openviking'];
@@ -404,6 +406,7 @@ test('OMP OpenViking initialization changes Git and publishes only after confirm
   approve = true;
   await handler('init', ctx);
   assert.match(output, /项目初始化完成/);
+  assert.match(output, /1 条 Wiki 未匹配审批记录，已保留在本地，未上传/);
   assert.notEqual(f.git('rev-parse', 'HEAD'), before);
   const project = JSON.parse(f.git('show', 'HEAD:.evolve/openviking.json'));
   assert.equal(project.evolution_policy, '.evolve/evolution.json');
