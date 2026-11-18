@@ -63,7 +63,15 @@ evolve agent exec "<prompt>" --to omp --mode analysis|write [--role <name>] [--m
 omp plugin install 'https://github.com/zhao-wuyan/self-evolving-workflow/releases/download/omp-latest/self-evolving-workflow-omp.tgz'
 ```
 
-重新打开 OMP，在目标项目输入 `/evolve-status` 验证插件已加载。可用 `omp plugin list` 查看安装记录。升级时对同一 URL 重新执行 `omp plugin install --force`，无需修改地址。
+重新打开 OMP，在目标项目输入 `/evolve-status` 验证插件已加载。可用 `omp plugin list` 查看安装记录。
+
+**已安装时升级：**
+
+```sh
+omp plugin upgrade self-evolving-workflow
+```
+
+升级后重新打开 OMP。如需强制重装，可对上面的同一 URL 重新执行 `omp plugin install --force`。
 
 **发布新版（维护者）。** 标签格式为 `omp-v<上游版本>.<OMP 修订号>`：例如 `omp-v0.2.0.1` 表示基于上游 `v0.2.0` 的第 1 次 OMP 发布，包内版本为 `0.2.0-omp.1`。同一上游版本继续用 `.2`、`.3`；同步到新上游版本后从 `.1` 开始。源码的 `package.json` 保留上游版本，预编译包的版本由 Actions 写入。
 
