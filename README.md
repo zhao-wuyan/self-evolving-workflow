@@ -21,6 +21,8 @@
 
 > 需要 `Node.js >= 22.16.0` 和 `Git`。完整宿主目录对照、安装记录与升级/清理用法见 [安装与升级指南](docs/install.md)。
 
+只用 OMP？直接看 [OMP 插件安装](#omp-插件入口)，无需全局安装 `evolve`。
+
 ```sh
 # 1. 全局安装 CLI
 npm install -g self-evolving-workflow
@@ -53,13 +55,27 @@ evolve agent exec "<prompt>" --to omp --mode analysis|write [--role <name>] [--m
 
 ### OMP 插件入口
 
-在本分支构建并链接插件；命令行委派与插件互不依赖：
+需要 OMP 和 Node.js ≥ 22.16.0。从 GitHub Release 安装 **`omp-plugin-integration` 分支**的预编译包（不需要克隆、编译，也不需要全局安装 `evolve`）：
 
 ```sh
+omp plugin install 'https://github.com/zhao-wuyan/self-evolving-workflow/releases/latest/download/self-evolving-workflow-omp.tgz'
+```
+
+重新打开 OMP，在目标项目输入 `/evolve-status` 验证插件已加载。可用 `omp plugin list` 查看安装记录。升级时对同一 URL 重新执行 `omp plugin install --force`，无需修改地址。
+
+发布新版时，从 `omp-plugin-integration` 分支执行 `npm pack`，将产物以 `self-evolving-workflow-omp.tgz` 为附件名上传，并将该 Release 标记为 Latest。
+
+本地开发时才从源码构建和链接：
+
+```sh
+git clone --branch omp-plugin-integration --single-branch https://github.com/zhao-wuyan/self-evolving-workflow.git
+cd self-evolving-workflow
 npm ci
 npm run build
-omp plugin link /path/to/self-evolving-workflow
+omp plugin install .
 ```
+
+`omp plugin install .` 会链接当前源码目录，不要删除或移动它。开发时拉取更新后重新执行 `npm ci` 和 `npm run build`，再重开 OMP。
 
 知识工具在 OMP 进程内运行，不启动 CLI 或 MCP 子进程。`evolve_workflow` 以 `exec` 审批、固定的项目目录和 argv 调用包内 CLI，不经过 shell；需要 PATH 中有 `Node.js >= 22.16.0`，不需要全局 `evolve`。
 
