@@ -342,10 +342,10 @@ async function runWorkflowCli(argv: string[]) {
       const commit = requireText(values.commit, 'Skill commit');
       if (!/^skills\/.+\/SKILL\.md$/.test(entry) || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit)) throw new InputError('Invalid Skill entry or commit');
       const header = workflowHeader(workflowBlob(root, commit, entry).toString('utf8'));
-      const required_links = workflowStrings(header.required_links, 'required_links');
+      const required_links = workflowStrings(header.required_links ?? [], 'required_links');
       const packagePath = entry.slice(0, -'SKILL.md'.length);
       for (const link of required_links) workflowBlob(root, commit, packagePath + workflowPath(link.split('#', 1)[0], '.md'));
-      return print({ entry, commit, required_links });
+      return print({ entry, commit, header, required_links });
     }
     if (!action || action === 'list') return print(commandNames.map(command => ({ command })));
     throw new InputError('Unknown Skill command: ' + action);
