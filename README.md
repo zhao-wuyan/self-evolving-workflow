@@ -25,7 +25,7 @@
 omp plugin install 'https://github.com/zhao-wuyan/self-evolving-workflow/releases/download/omp-latest/self-evolving-workflow-omp.tgz'
 ```
 
-已安装时运行 `omp plugin upgrade self-evolving-workflow`。安装或升级后重开 OMP，在项目目录输入 `/evolve-status`。
+安装后重开 OMP，在项目目录输入 `/evolve-status`。
 
 | 在 OMP 输入 | 用途 |
 | --- | --- |
@@ -39,9 +39,21 @@ omp plugin install 'https://github.com/zhao-wuyan/self-evolving-workflow/release
 
 空策略只同步资产。需要自动演进 Skill？在 OMP 主会话中说「为当前项目检查可复用的回放用例，并预览 OpenViking 演进策略」。项目绑定和策略可提交到 Git，运行产物和凭据留在本地。
 
-首次初始化的 Agent 定义安装到项目 `.omp/agent/agents/`，不会自动提交或上传；项目 Skills 仍按原有方式进行版本管理。
+首次初始化将 Skills 安装到 OMP 自动发现的项目 `.omp/skills/` 并纳入 Git 资产基线；Agent 定义安装到 `.omp/agent/agents/`，不会自动提交或上传。已有项目重跑 `init` 不会自动迁移旧目录。
 
-要跑工作流，可请 OMP 用 `evolve_workflow` 为当前项目安装 Skills，再提交新增的 Skill 和引导文件。
+要在本地跑工作流，可请 OMP 用 `evolve_workflow` 执行 `skill install --scope project --host omp --yes`，再提交新增的 Skill 和引导文件。安装器会生成 `.evolve/install-manifest.json`；单纯安装插件或查看状态不会生成该清单。
+
+### 推荐升级步骤
+
+插件升级不会自动更新已安装到项目的 Skills。建议按以下顺序操作：
+
+1. 在终端执行 `omp plugin upgrade self-evolving-workflow`，完成后重开 OMP。
+2. 在项目目录请 OMP：「用 `evolve_workflow` 执行 `skill status --scope project`，列出返回的 `skills_dir` 并比较项目 Skills 与当前插件随包版本；先展示差异，若存在本地修改或自进化内容，不要直接覆盖。」
+3. 确认可以替换后，请 OMP 用 `evolve_workflow` 执行 `skill install --scope project --host omp --upgrade --yes`，更新 `.omp/skills/`。其他宿主目录按实际位置选择 `--host codex`、`--host claude` 或 `--host agy`；根目录 `skills/` 则省略 `--host`。检查变更后，将更新的 Skill 和引导文件提交到 Git。
+
+`status` 根据 `.evolve/install-manifest.json` 和标准目录是否存在识别安装位置，即使没有清单也会检查标准目录；自定义目录不会自动识别。升级不带 `--host` 时只操作根目录 `skills/`，不会更新状态中列出的所有目录。OMP 项目 Skills 使用 `.omp/skills/`，用户级 Skills 才使用 `~/.omp/agent/skills/`；根目录 `skills/` 和项目内 `.omp/agent/skills/` 不属于 OMP 默认发现位置。
+
+**注意：** `status` 只比较当前随包版本，不联网查询上游；`outdated` 也可能表示本地有修改。`--upgrade` 会替换内容不同的整个 Skill 目录，不会自动合并。修改过或自进化过的 Skills 应先提交保存，再比较并合并所需更新；普通 `install` 则保留已有副本。更多选项见 [安装与升级指南](docs/install.md#3-安装记录状态检查与升级清理)。
 
 ## 快速开始
 

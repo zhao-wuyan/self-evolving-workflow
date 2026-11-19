@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import extension from '../dist/omp-extension.js';
 import { runBundledWorkflow } from '../dist/omp-cli-bridge.js';
 import { contentSha256 } from '../dist/knowledge-reads.js';
-import { publishRelease, readProjectHead } from '../dist/openviking/assets.js';
+import { loadRelease, publishRelease, readProjectHead } from '../dist/openviking/assets.js';
 import { workflowDbPath } from '../dist/workflow-runtime.js';
 import { fixture } from './evolve-workflow-support.mjs';
 import { protocol, projectFixture, seed, releaseFromProject } from './openviking-support.mjs';
@@ -283,6 +283,12 @@ test('OMP workflow control uses the bundled CLI, rejects root escape and reports
   assert.equal(repeated.exit_code, 0);
   assert.equal(readFileSync(kept.path, 'utf8'), customized);
   assert.equal(JSON.parse(repeated.stdout).kept_sources[0].differs, true);
+  const native = await h.call('workflow', { argv: ['skill', 'install', '--scope', 'project', '--host', 'omp', '--skill', 'ew-knowledge', '--yes'] });
+  assert.equal(native.exit_code, 0);
+  assert.equal(JSON.parse(native.stdout).skills_dir, join(f.root, '.omp/skills'));
+  const nativeStatus = JSON.parse((await h.call('workflow', { argv: ['skill', 'status', '--scope', 'project'] })).stdout);
+  assert.equal(nativeStatus.targets.find(target => target.host === 'omp').skills_dir, join(f.root, '.omp/skills'));
+  assert.equal(nativeStatus.targets.find(target => target.host === 'omp').skills.find(skill => skill.name === 'ew-knowledge').status, 'up_to_date');
   await assert.rejects(runBundledWorkflow(f.root, ['skill', 'status', '--root', '..']), /root is fixed/);
   await assert.rejects(runBundledWorkflow(f.root, ['kb', 'get', 'anything']), /workflow control argv/);
   await assert.rejects(runBundledWorkflow(f.root, ['experience', 'publish', 'x']), /only read personal experience/);
@@ -404,6 +410,7 @@ test('OMP OpenViking initialization changes Git and publishes only after confirm
   assert.equal(existsSync(join(f.root, '.evolve/evolution.json')), false);
   assert.deepEqual((await server.inspect()).files, {});
   assert.equal(existsSync(join(f.root, '.omp/agent/agents')), false);
+  assert.equal(existsSync(join(f.root, '.omp/skills')), false);
 
   approve = true;
   await handler('init', ctx);
@@ -416,10 +423,17 @@ test('OMP OpenViking initialization changes Git and publishes only after confirm
   assert.equal(existsSync(join(f.root, 'evolution.json')), true);
   assert.equal(existsSync(join(f.root, 'agents')), false);
   assert.equal(existsSync(join(f.root, '.omp/agent/agents/workflow-executor.md')), true);
-  assert.equal(existsSync(join(f.root, '.omp/agent/skills')), false);
+  assert.equal(existsSync(join(f.root, '.omp/skills/ew-orchestrate/SKILL.md')), true);
+  const manifest = JSON.parse(readFileSync(join(f.root, '.evolve/install-manifest.json'), 'utf8'));
+  assert.equal(manifest.targets[join(f.root, '.omp/skills')].skills_dir, join(f.root, '.omp/skills'));
+  const binding = f.evolve('skill', 'validate', 'ew-companion');
+  assert.equal(binding.package_path, '.omp/skills/ew-orchestrate/steps/ew-companion');
   assert.equal(f.git('ls-tree', '-r', '--name-only', 'HEAD', '--', '.omp/agent/agents'), '');
   const { head } = await readProjectHead(f.client, project);
   assert.ok(output.includes(head.release_id));
+  const release = await loadRelease(f.client, project, head.release_id);
+  assert.ok(release.files.some(file => file.path === '.omp/skills/ew-orchestrate/SKILL.md'));
+  assert.equal(release.files.some(file => file.path.startsWith('.omp/agent/agents/')), false);
 
   await h.event('session_start');
   const args = ['openviking', 'policy', '--entry', f.entry, '--runner', 'tools/replay.mjs', '--scenarios', 'tools/scenarios.json'];
