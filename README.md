@@ -41,10 +41,11 @@ evolve search "回归测试" --mode context --session quickstart
 
 ```sh
 evolve skill install --scope user --host omp --yes
+evolve skill install --scope project --host omp --yes
 evolve agent exec "检查当前项目的测试覆盖" --to omp --mode analysis
 ```
 
-第一条为 OMP 安装用户级 Skills，第二条委派一次只读分析。需要斜杠命令？使用 [OMP 插件分支](https://github.com/zhao-wuyan/self-evolving-workflow/tree/omp-plugin-integration#omp-插件入口)。
+前两条分别安装用户级 Skills（`~/.omp/agent/skills/`）和项目级 Skills（`.omp/skills/`），按需选择；项目 Skills 和引导文件应提交到 Git，供 Run 绑定版本。第三条委派一次只读分析。升级时先更新 CLI，再执行 `evolve skill status --scope project`；确认差异后用 `evolve skill install --scope project --host omp --upgrade --yes` 更新项目副本，存在本地或自进化修改时先保存再合并。需要斜杠命令？使用 [OMP 插件分支](https://github.com/zhao-wuyan/self-evolving-workflow/tree/omp-plugin-integration#omp-插件入口)。
 
 ## 工作流 Skills
 
