@@ -58,6 +58,7 @@ export interface InstallSkillsOptions {
   upgrade?: boolean;
   prune?: boolean;
   force?: boolean;
+  agentsHost?: InstallHost;
 }
 
 export interface SkillInstallStatus {
@@ -83,6 +84,7 @@ interface TargetManifestRecord {
   host: InstallHost | null;
   skills_dir: string;
   agents_dir?: string;
+  agents_host?: InstallHost;
   instructions: string;
   updated_at: string;
   package_version: string;
@@ -477,6 +479,8 @@ function installSkillsToTarget(
   const manifest = readManifest(filePath);
   const targetKey = resolve(skillsDir);
   const existingRecord = manifest.targets[targetKey];
+  const agentsHost = options.agentsHost ?? existingRecord?.agents_host;
+  const agentsTarget = agentsHost ? scopeAndHost(projectRoot, scope, agentsHost) : target;
   const skillRecords: Record<string, InstalledSkillRecord> = { ...(existingRecord?.skills ?? {}) };
   const now = new Date().toISOString();
 
@@ -579,13 +583,15 @@ function installSkillsToTarget(
     }
   }
 
-  const agentInstall = installAgentsToTarget(target, installBase, existingRecord?.agents ?? {}, now, options);
+  const previousAgents = existingRecord?.agents_dir === agentsTarget.agentsDir ? existingRecord.agents ?? {} : {};
+  const agentInstall = installAgentsToTarget(agentsTarget, installBase, previousAgents, now, options);
 
   manifest.targets[targetKey] = {
     scope,
     host: target.host ?? null,
     skills_dir: skillsDir,
-    agents_dir: target.agentsDir,
+    agents_dir: agentsTarget.agentsDir,
+    ...(agentsHost ? { agents_host: agentsHost } : {}),
     instructions: target.instructions,
     updated_at: now,
     package_version: bundlePackageVersion(),
@@ -839,6 +845,7 @@ export function installStatus(root: string, options: { scope?: InstallScope; hos
   const targetStatuses = targets.map(target => {
     const targetKey = resolve(target.skillsDir);
     const record = manifest.targets[targetKey];
+    const agentsTarget = record?.agents_host ? scopeAndHost(root, scope, record.agents_host) : target;
     const trackedSkills = record?.skills ?? {};
     const names = [...new Set([...shipped, ...Object.keys(trackedSkills), ...retiredShippedSkills])].sort();
     const skills = names.flatMap<SkillInstallStatus>(name => {
@@ -880,12 +887,12 @@ export function installStatus(root: string, options: { scope?: InstallScope; hos
         bundle_sha256: bundleHash,
       }];
     });
-    const agents = targetAgentStatuses(target, record);
+    const agents = targetAgentStatuses(agentsTarget, record);
     return {
       ...(target.host ? { host: target.host } : {}),
       root: target.target,
       skills_dir: target.skillsDir,
-      agents_dir: target.agentsDir,
+      agents_dir: agentsTarget.agentsDir,
       instructions: target.instructions,
       manifest_recorded: Boolean(record),
       package_version: record?.package_version ?? null,
