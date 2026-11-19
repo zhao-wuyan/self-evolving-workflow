@@ -455,16 +455,15 @@ test('OMP native init exports .omp/skills assets without root mirrors or Agent d
   assert.equal(f.git('ls-tree', '-r', '--name-only', 'HEAD', '--', '.omp/agent'), '');
 
   const b = projectFixture(t, server, { id: f.project.project_id });
-  const opened = b.open('omp-native-sync', 'sample');
+  const opened = b.open('omp-native-sync', 'ew-orchestrate');
   assert.equal(opened.openviking.phase, 'ready');
   assert.equal(opened.openviking.release_id, initialized.head.release_id);
   assert.ok(existsSync(join(b.root, '.omp', 'skills', 'ew-orchestrate', 'SKILL.md')));
   assert.ok(existsSync(join(b.root, 'skills', 'sample', 'SKILL.md')));
   assert.match(b.git('show', opened.openviking.skill_commit + ':.omp/skills/ew-orchestrate/SKILL.md'), /name: ew-orchestrate/);
-  b.open('omp-native-run', 'ew-orchestrate');
-  const run = b.next('omp-native-run');
+  const run = b.next('omp-native-sync');
   assert.equal(run.skill_ref.package_path, '.omp/skills/ew-orchestrate');
-  assert.match(b.evolve('run', 'skill-read', run.run_id, '--session', 'omp-native-run').markdown, /name: ew-orchestrate/);
+  assert.match(b.evolve('run', 'skill-read', run.run_id, '--session', 'omp-native-sync').markdown, /name: ew-orchestrate/);
 
   const local = readFileSync(join(f.root, '.omp/skills/ew-orchestrate/SKILL.md'), 'utf8') + '\nLocal native OMP modification.\n';
   f.write('.omp/skills/ew-orchestrate/SKILL.md', local);
