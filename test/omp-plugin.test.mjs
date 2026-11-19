@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
@@ -380,6 +380,48 @@ test('OMP experience batches only selected candidates and requires one interacti
   await handler('disable', ctx);
   assert.equal(f.evolve('experience', 'status').collecting, false);
   assert.deepEqual((await server.inspect()).files, files);
+});
+
+test('OMP OpenViking initialization failures explain recovery without altering user changes', async t => {
+  const server = await protocol(t);
+  const f = projectFixture(t, server, { profile: false, minimalSkills: true });
+  const h = harness(f.root);
+  f.dispose(() => closeHarnesses(f.root));
+  let output;
+  Object.assign(h.ctx, { hasUI: true, ui: {
+    confirm: async () => true,
+    notify(message, level) { assert.equal(level, 'error'); output = message; },
+  } });
+  const { handler } = h.commands['evolve-openviking'];
+  const before = f.git('rev-parse', 'HEAD');
+  f.write('user-note.txt', 'User staged content'); f.git('add', 'user-note.txt');
+  await handler('init', h.ctx);
+  assert.match(output, /已暂存/);
+  assert.match(output, /git diff --cached --name-status/);
+  assert.match(output, /取消暂存.*保留文件内容/);
+  assert.match(output, /诊断信息：OPENVIKING_STAGED_CHANGES/);
+  assert.equal(f.git('show', ':user-note.txt'), 'User staged content');
+  console.log(output);
+  f.git('restore', '--staged', 'user-note.txt');
+  f.write('.omp/skills/user-owned/SKILL.md', 'User-owned Skill');
+  await handler('init', h.ctx);
+  assert.match(output, /避免覆盖/);
+  assert.match(output, /git status --short/);
+  assert.match(output, /诊断信息：OPENVIKING_MANAGED_DIRTY/);
+  assert.equal(readFileSync(join(f.root, '.omp/skills/user-owned/SKILL.md'), 'utf8'), 'User-owned Skill');
+  rmSync(join(f.root, '.omp/skills/user-owned'), { recursive: true });
+  await server.update({ unavailable: true });
+  await handler('init', h.ctx);
+  assert.match(output, /服务/);
+  assert.match(output, /检查/);
+  assert.match(output, /诊断信息：.*HTTP 503/);
+  assert.equal(f.git('rev-parse', 'HEAD'), before);
+  assert.equal(existsSync(join(f.root, '.evolve/openviking.json')), false);
+  process.env.EVOLVE_OPENVIKING_CONFIG = join(f.root, 'missing-connection.json');
+  await handler('init', h.ctx);
+  assert.match(output, /连接配置/);
+  assert.match(output, /ovcli.conf/);
+  assert.match(output, /诊断信息：OPENVIKING_CONFIG_INVALID/);
 });
 
 test('OMP OpenViking initialization changes Git and publishes only after confirmation', async t => {

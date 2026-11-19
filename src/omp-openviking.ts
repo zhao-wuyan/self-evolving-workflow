@@ -1,6 +1,7 @@
 import { realpathSync } from 'node:fs';
 import { InputError } from './common.js';
 import type { OmpExtensionApi } from './omp-contract.js';
+import { OpenVikingError } from './openviking/client.js';
 import { connectionConfig, readProject } from './openviking/config.js';
 import { gitText } from './openviking/git.js';
 import { initializeProject } from './openviking/lifecycle.js';
@@ -8,6 +9,32 @@ import { defaultEvolutionPolicyPath } from './openviking/policy.js';
 import { workflowHead, workflowPath } from './workflow-skills.js';
 
 const usage = '/evolve-openviking init [策略文件]';
+const initializationHints: Readonly<Record<string, string>> = {
+  OPENVIKING_STAGED_CHANGES: '仓库中有已暂存、尚未提交的改动。为保护你的暂存内容，初始化已停止。\n请在 Git 面板查看“已暂存的更改”，确认后提交，或只取消暂存（保留文件内容），再重新初始化。\n也可运行 git diff --cached --name-status 查看文件列表；检查范围是整个仓库，不仅是 Skills。',
+  OPENVIKING_MANAGED_DIRTY: 'Skills 目录中有未提交的修改，或有无法安全接管的文件。为避免覆盖本地内容，初始化已停止。\n请运行 git status --short 查看改动，确认需要保留的内容并提交后再试；不要直接丢弃文件。',
+  OPENVIKING_CONFIG_INVALID: 'OpenViking 连接配置缺失或无效。\n请检查 ~/.openviking/ovcli.conf 中的服务地址和 API key；如设置了 EVOLVE_OPENVIKING_CONFIG，请检查它指向的配置文件。不要把 API key 发到聊天中。',
+  OPENVIKING_CONFIG_PATH: 'OpenViking 配置文件路径无效。\n请将 EVOLVE_OPENVIKING_CONFIG 设置为配置文件的绝对路径后再试。',
+  OPENVIKING_POLICY_NOT_COMMITTED: '演进策略或它引用的回放文件尚未提交，无法建立可复现的初始化基线。\n请检查下方诊断信息中的文件，确认内容并提交后再试。',
+  OPENVIKING_POLICY_FILE_REQUIRED: '找不到演进策略或它引用的回放文件。\n请检查下方文件路径并补齐文件；首次只同步资产时，可不指定策略文件，运行 /evolve-openviking init。',
+  OPENVIKING_LOCAL_CHANGED: '初始化期间检测到本地文件变化，已停止以避免覆盖新内容。\n请检查并保留本地改动，待文件不再变化后重新初始化。',
+  OPENVIKING_LOCAL_ADVANCED: '初始化期间 Git 提交发生了变化，无法安全应用原先准备的基线。\n请等待其他 Git 操作结束，再重新初始化并确认。',
+  OPENVIKING_JOB_BUSY: '另一个 OpenViking 操作正在运行。\n请等待该操作结束后再试，不要删除锁文件或同时重复初始化。',
+  OPENVIKING_RESULT_UNKNOWN: '未能确认 OpenViking 服务的处理结果，可能存在连接中断或超时。\n请先检查服务连接和项目状态；本地可能已建立基线，不要删除生成文件。连接恢复后重新运行 init 可恢复未完成的发布。',
+};
+
+function initializationFailure(error: unknown) {
+  const detail = error instanceof Error ? error.message : String(error);
+  const code = detail.match(/^[A-Z][A-Z0-9_]+(?=[:\s]|$)/)?.[0];
+  let hint = code ? initializationHints[code] : undefined;
+  if (!hint && error instanceof OpenVikingError) {
+    hint = error.status === 401 || error.status === 403
+      ? 'OpenViking 服务拒绝了当前身份的请求。\n请检查 API key 是否有效，以及账号是否有项目访问权限；不要把密钥发到聊天中。'
+      : 'OpenViking 服务未能完成请求。\n请检查服务是否可用，并让 Agent 根据下方诊断信息检查服务状态和项目配置。';
+  }
+  if (!hint && /[\u4e00-\u9fff]/.test(detail)) return `OpenViking 初始化未完成\n${detail}`;
+  hint ??= '初始化遇到尚未确认原因的问题。\n请将下方诊断信息交给 Agent 排查，先保留本地文件，不要反复删除文件后重试。';
+  return `OpenViking 初始化未完成\n${hint}\n\n诊断信息：${detail}`;
+}
 
 export function registerOmpOpenViking(api: OmpExtensionApi) {
   api.registerCommand('evolve-openviking', {
@@ -54,7 +81,7 @@ export function registerOmpOpenViking(api: OmpExtensionApi) {
         const wikiNotice = localWiki ? `\n${localWiki} 条 Wiki 未匹配审批记录，已保留在本地，未上传。` : '';
         ctx.ui.notify(`${status}\n项目 ID：${result.project.project_id}\n资产版本：${result.head.release_id}\n配置：.evolve/openviking.json${wikiNotice}`, 'info');
       } catch (error) {
-        ctx.ui.notify(`OpenViking 初始化未完成：${error instanceof Error ? error.message : String(error)}`, 'error');
+        ctx.ui.notify(initializationFailure(error), 'error');
       }
     },
   });
