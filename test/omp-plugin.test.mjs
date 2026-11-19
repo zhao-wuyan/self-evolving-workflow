@@ -412,6 +412,8 @@ test('OMP OpenViking initialization changes Git and publishes only after confirm
   assert.equal(existsSync(join(f.root, '.omp/agent/agents')), false);
   assert.equal(existsSync(join(f.root, '.omp/skills')), false);
 
+  // 模拟上次初始化安装后留下的原版包，本次确认后应直接接管。
+  f.evolve('skill', 'install', 'ew-knowledge', '--host', 'omp', '--yes');
   approve = true;
   await handler('init', ctx);
   assert.match(output, /项目初始化完成/);
