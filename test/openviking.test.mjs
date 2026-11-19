@@ -9,6 +9,8 @@ import { readProject, validateProject } from '../dist/openviking/config.js';
 import { loadRelease, manifestBytes, publishRelease, readProjectHead, sha256, stableJson, validateManifest } from '../dist/openviking/assets.js';
 import { cacheRelease, selectMemory, exportMemory, exportWiki, fileRecord } from '../dist/openviking/knowledge.js';
 import { createAssetCommit, gitBytes, skillAssets } from '../dist/openviking/git.js';
+import { initializeProject } from '../dist/openviking/lifecycle.js';
+import { installSkills, installStatus } from '../dist/workflow-install.js';
 import { mergeProjectAssets } from '../dist/openviking/merge.js';
 import { freezeKnowledge, frozenKnowledgeHash } from '../dist/openviking/frozen.js';
 import { MemoryStore, defaultMemoryDbPath } from '../dist/memory.js';
@@ -405,12 +407,35 @@ test('init commits only the profile and missing bundled Skills, and remains expl
   assert.equal(initialized.project.failure_policy, 'local');
   assert.throws(() => f.git('show', 'HEAD:user-note.txt'));
   assert.equal(readFileSync(join(f.root, 'user-note.txt'), 'utf8'), 'Unrelated user work');
+  assert.equal(existsSync(join(f.root, 'agents/workflow-executor.md')), true);
+  assert.equal(existsSync(join(f.root, '.omp/agent/agents')), false);
   const manifest = await loadRelease(f.client, f.project, initialized.head.release_id);
   assert.equal(manifest.verification.kind, 'bootstrap');
   assert.deepEqual(manifest.verification.replay_ids, []);
   assert.ok(manifest.files.some(file => file.path === 'skills/workflow-evolve/scripts/evolve-loop.mjs'));
   assert.equal(f.evolve('openviking', 'init', '--policy', 'evolution.json').head.release_id, initialized.head.release_id);
   assert.equal(f.evolve('openviking', 'config', '--enabled', 'false').backend, 'local');
+});
+
+test('init installs host Agents without moving Skills or publishing Agent definitions', async t => {
+  const server = await protocol(t);
+  const f = projectFixture(t, server, { profile: false, minimalSkills: true });
+  f.git('rm', '-r', 'agents'); f.git('commit', '-qm', '测试: 不预置通用 Agent');
+  f.write('.claude/agents/workflow-reviewer.md', 'User customized Agent definition.\n');
+  const initialized = await initializeProject(f.root, undefined, f.project.project_id, 'claude');
+  assert.equal(existsSync(join(f.root, 'agents')), false);
+  assert.equal(existsSync(join(f.root, '.claude/agents/workflow-executor.md')), true);
+  assert.equal(existsSync(join(f.root, '.claude/skills')), false);
+  assert.equal(readFileSync(join(f.root, '.claude/agents/workflow-reviewer.md'), 'utf8'), 'User customized Agent definition.\n');
+  assert.equal(f.git('ls-tree', '-r', '--name-only', 'HEAD', '--', '.claude/agents'), '');
+  const manifest = await loadRelease(f.client, f.project, initialized.head.release_id);
+  assert.ok(manifest.files.every(file => file.path.startsWith('skills/')));
+  // 后续普通安装保留已选择的 Agent 宿主，不重新创建根目录副本。
+  installSkills(f.root, ['ew-knowledge']);
+  assert.equal(existsSync(join(f.root, 'agents')), false);
+  const status = installStatus(f.root).targets.find(target => target.skills_dir === join(f.root, 'skills'));
+  assert.equal(status.agents_dir, join(f.root, '.claude/agents'));
+  assert.equal(status.agents.find(agent => agent.name === 'workflow-executor').status, 'up_to_date');
 });
 
 test('init keeps migrated Wiki local until an explicit approval is published', async t => {

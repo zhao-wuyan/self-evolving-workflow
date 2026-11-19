@@ -7,7 +7,7 @@ import { InputError } from '../common.js';
 import { createModelClient } from '../model-client.js';
 import { reviewSession, type ReviewedRun, type SkillSignal } from '../retrospective.js';
 import { readSkillReplayReceipt, verifySkillCommit } from '../skill-replay.js';
-import { installSkills } from '../workflow-install.js';
+import { installSkills, type InstallHost } from '../workflow-install.js';
 import { WorkflowStore, workflowId, type Mutation } from '../workflow-runtime.js';
 import { bindWorkflowSkill, workflowHead, workflowPath } from '../workflow-skills.js';
 import { Wiki, readWikiPages } from '../wiki.js';
@@ -48,7 +48,7 @@ async function locked<T>(folder: string, action: () => Promise<T>): Promise<T> {
   }
 }
 
-export async function initializeProject(root: string, policyPath?: string, projectId?: string) {
+export async function initializeProject(root: string, policyPath?: string, projectId?: string, agentsHost?: InstallHost) {
   const client = new OpenVikingClient();
   const existing = readProject(root);
   if (existing) {
@@ -94,7 +94,7 @@ export async function initializeProject(root: string, policyPath?: string, proje
   return locked(folder, async () => {
     const wiki = exportWiki(root);
     const memory = exportMemory(root);
-    const installed = installSkills(root, []);
+    const installed = installSkills(root, [], undefined, { agentsHost });
     const added: AssetFile[] = [];
     const bodies = new Map<string, Buffer>();
     const walk = (path: string) => {
