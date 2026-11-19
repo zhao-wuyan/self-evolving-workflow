@@ -41,6 +41,8 @@ omp plugin install 'https://github.com/zhao-wuyan/self-evolving-workflow/release
 
 首次初始化将 Skills 安装到 OMP 自动发现的项目 `.omp/skills/` 并纳入 Git 资产基线；Agent 定义安装到 `.omp/agent/agents/`，不会自动提交或上传。已有项目重跑 `init` 不会自动迁移旧目录。
 
+本地 Wiki 发布后，CLI 会返回 `openviking_sync` 状态和下一步命令；本地成功不代表已上传。需要同步时，可请 OMP 按返回命令执行 `openviking knowledge preview`，再根据已有同步授权或本次确认执行 `knowledge publish --approval <哈希>`。此入口无需重新创建 Session，只更新预览中已审批的 Wiki，保留远端 Skills、Memory 和未选条目；正文、目的地或远端版本变化时重新预览。
+
 要在本地跑工作流，可请 OMP 用 `evolve_workflow` 执行 `skill install --scope project --host omp --yes`，再提交新增的 Skill 和引导文件。安装器会生成 `.evolve/install-manifest.json`；单纯安装插件或查看状态不会生成该清单。
 
 ### 推荐升级步骤

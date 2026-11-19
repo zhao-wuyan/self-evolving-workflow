@@ -43,7 +43,7 @@ export function selectMemory(root: string, id: string, operation: 'share' | 'uns
 export function sourceWikiHashes(root: string) {
   return Object.fromEntries(readWikiPages(root, true).map(page => [page.id, sha256(readFileSync(join(root, page.path)))]));
 }
-export function exportWiki(root: string, base?: ProjectManifest, initial?: Record<string, string>) {
+export function exportWiki(root: string, base?: ProjectManifest, initial?: Record<string, string>, selection?: readonly string[]) {
   const wiki = new Wiki(root);
   const path = join(root, '.agent-memory', 'openviking', 'published-wiki.json');
   const publication: WikiPublication = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8'))
@@ -53,11 +53,13 @@ export function exportWiki(root: string, base?: ProjectManifest, initial?: Recor
   const consumed: WikiPublication['changes'] = {};
   const localOnly: string[] = [];
   for (const page of readWikiPages(root, true)) {
+    if (selection && !selection.includes(page.id)) continue;
     const bytes = readFileSync(join(root, page.path));
     const content = bytes.toString('utf8');
     const hash = sha256(bytes);
     const applied = listWikiChanges(wiki, { entry: page.id }).filter(change => change.state === 'applied' && change.after === content).at(-1);
     // 首次发布只纳入已审批的条目；本地迁移并不授权上传。
+    if (selection && !applied) throw new InputError('OPENVIKING_WIKI_UNAPPROVED: ' + page.id);
     if (!base && !applied) {
       localOnly.push(page.id);
       continue;
@@ -119,7 +121,7 @@ export function acknowledgeKnowledge(root: string, wiki: WikiPublication['change
   const previous: WikiPublication = raw ? JSON.parse(raw.toString('utf8')) : { schema_version: 'openviking-local-publication/1.0', changes: {} };
   replaceJson(wikiPath, raw, { ...previous, changes: { ...previous.changes, ...wiki } });
   const path = join(folder, 'share.json');
-  if (!existsSync(path)) return;
+  if (!Object.keys(memory).length || !existsSync(path)) return;
   const shareRaw = readFileSync(path);
   const selection: SelectionFile = JSON.parse(shareRaw.toString('utf8'));
   for (const [id, consumed] of Object.entries(memory)) {
