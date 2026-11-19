@@ -51,10 +51,6 @@ process.env.AGENT_MEMORY_CLI = memoryCli;
 if (process.env.AGENT_MEMORY_DB) process.env.AGENT_MEMORY_DB = resolve(root, process.env.AGENT_MEMORY_DB);
 
 const skillEntry = entry.replaceAll('\\', '/').replace(`${root.replaceAll('\\', '/')}/`, '');
-// 支持嵌套 Skill 包，例如 skills/ew-orchestrate/steps/ew-execute/SKILL.md。
-if (!/^skills\/(?:[a-z0-9]+(?:-[a-z0-9]+)*\/)+SKILL\.md$/i.test(skillEntry)) {
-  throw new Error('--skill must point to skills/<id>/SKILL.md (nested step packages are allowed)');
-}
 const packageDir = dirname(skillEntry).replaceAll('\\', '/');
 jsonCommand(process.execPath, [memoryCli, '--root', root, 'skill', 'inspect', skillEntry, '--commit', git(['rev-parse', 'HEAD'])]);
 const scenarios = JSON.parse(readFileSync(scenariosPath, 'utf8'));

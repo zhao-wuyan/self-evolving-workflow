@@ -13,7 +13,7 @@ import {
   type WorktreeSpec,
 } from './orchestrator.js';
 import { WorkflowStore, workflowId, type Mutation, type WorkflowStep } from './workflow-runtime.js';
-import { bindWorkflowSkill, commandNames, workflowBlob, workflowHeader, workflowPath, workflowStrings } from './workflow-skills.js';
+import { bindWorkflowSkill, commandNames, isProjectSkillEntry, workflowBlob, workflowHeader, workflowPath, workflowStrings } from './workflow-skills.js';
 import { wikiLookupScope } from './workflow-knowledge.js';
 import { installSkills, installStatus, installWorkflow, workflowDocument, workflowDocuments } from './workflow-install.js';
 import { runOpenVikingCli, openVikingHelp } from './openviking/cli.js';
@@ -340,7 +340,7 @@ async function runWorkflowCli(argv: string[]) {
     if (action === 'inspect') {
       const entry = workflowPath(requireText(args[0], 'Skill entry'));
       const commit = requireText(values.commit, 'Skill commit');
-      if (!/^skills\/.+\/SKILL\.md$/.test(entry) || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit)) throw new InputError('Invalid Skill entry or commit');
+      if (!isProjectSkillEntry(entry) || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit)) throw new InputError('Invalid Skill entry or commit');
       const header = workflowHeader(workflowBlob(root, commit, entry).toString('utf8'));
       const required_links = workflowStrings(header.required_links ?? [], 'required_links');
       const packagePath = entry.slice(0, -'SKILL.md'.length);

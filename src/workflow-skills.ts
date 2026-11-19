@@ -129,7 +129,40 @@ export function readWorkflowLink(root: string, skill: WorkflowSkill, from: strin
   return readWorkflowMarkdown(root, skill, linkPath(from, destination));
 }
 
-export const projectSkillRoots = ['skills', '.agents/skills', '.codex/skills', '.claude/skills'] as const;
+// OMP 的原生项目目录优先于通用根目录，与各宿主 Skill 安装位置保持一致。
+export const projectSkillRoots = ['.omp/skills', 'skills', '.agents/skills', '.codex/skills', '.claude/skills'] as const;
+
+export function isProjectSkillPath(path: string) {
+  return projectSkillRoots.some(skillRoot => path.startsWith(skillRoot + '/'));
+}
+
+export function isProjectSkillEntry(path: string) {
+  return projectSkillRoots.some(skillRoot => {
+    const prefix = skillRoot + '/';
+    if (!path.startsWith(prefix) || !path.endsWith('/SKILL.md')) return false;
+    const packagePath = path.slice(prefix.length, -'/SKILL.md'.length);
+    return packagePath.length > 0 && !packagePath.startsWith('/');
+  });
+}
+
+export function projectSkillPackageKey(path: string) {
+  for (const skillRoot of projectSkillRoots) {
+    const prefix = skillRoot + '/';
+    if (!path.startsWith(prefix)) continue;
+    const name = path.slice(prefix.length).split('/')[0];
+    return name ? `${skillRoot}/${name}` : undefined;
+  }
+  return undefined;
+}
+
+export function findProjectSkillAsset(files: readonly { path: string }[], packageName: string, relativePath: string) {
+  const suffix = '/' + packageName + '/' + relativePath;
+  for (const skillRoot of projectSkillRoots) {
+    const path = skillRoot + suffix;
+    if (files.some(file => file.path === path)) return path;
+  }
+  return undefined;
+}
 
 export function findWorkflowPackageTree(
   root: string,

@@ -163,8 +163,13 @@ test('Skill replay records pass^k samples, feedback, trailers and version bumps;
   assert.match(await readFile(entry, 'utf8'), /version: 1\.0\.2/);
 });
 
-test('Evolution loop feeds replay failures back, persists a scenario bank and skips addressed signals', async t => {
-  const { root, runner } = await fixture(t);
+for (const skillRoot of ['skills', '.omp/skills']) test(`Evolution loop feeds replay failures back from ${skillRoot}, persists a scenario bank and skips addressed signals`, async t => {
+  const { root, runner, git } = await fixture(t);
+  if (skillRoot !== 'skills') {
+    await mkdir(join(root, '.omp'), { recursive: true });
+    await git('mv', 'skills', skillRoot);
+    await git('commit', '-qm', '测试: 使用 OMP 原生项目 Skill 目录');
+  }
   const agy = join(root, '..', `${root.split(/[\\/]/).at(-1)}-agy.mjs`);
   t.after(() => rm(agy, { force: true }));
   await writeFile(agy, [
@@ -185,7 +190,7 @@ test('Evolution loop feeds replay failures back, persists a scenario bank and sk
     { id: 'missing-preflight', input: { task: 'reproduce', needs: 'Verify preflight.' }, baseline: false },
     { id: 'existing-flow', input: { task: 'existing' }, baseline: true },
   ]));
-  const evolveLoop = async () => JSON.parse((await execute(process.execPath, [loop, '--skill', 'skills/example/SKILL.md',
+  const evolveLoop = async () => JSON.parse((await execute(process.execPath, [loop, '--skill', `${skillRoot}/example/SKILL.md`,
     '--iterations', '1', '--scenarios', scenarios, '--history', history, '--runner', runner, '--agy', agy,
     '--memory-cli', cli, '--max-retries', '1', '--auto'], { cwd: root, encoding: 'utf8' })).stdout);
   const result = await evolveLoop();
