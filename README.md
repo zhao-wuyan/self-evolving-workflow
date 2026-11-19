@@ -39,6 +39,8 @@ omp plugin install 'https://github.com/zhao-wuyan/self-evolving-workflow/release
 
 空策略只同步资产。需要自动演进 Skill？在 OMP 主会话中说「为当前项目检查可复用的回放用例，并预览 OpenViking 演进策略」。项目绑定和策略可提交到 Git，运行产物和凭据留在本地。
 
+首次初始化的 Agent 定义安装到项目 `.omp/agent/agents/`，不会自动提交或上传；项目 Skills 仍按原有方式进行版本管理。
+
 要跑工作流，可请 OMP 用 `evolve_workflow` 为当前项目安装 Skills，再提交新增的 Skill 和引导文件。
 
 ## 快速开始

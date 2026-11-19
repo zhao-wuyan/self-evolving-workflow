@@ -379,6 +379,7 @@ test('OMP experience batches only selected candidates and requires one interacti
 test('OMP OpenViking initialization changes Git and publishes only after confirmation', async t => {
   const server = await protocol(t);
   const f = projectFixture(t, server, { profile: false, minimalSkills: true });
+  f.git('rm', '-r', 'agents'); f.git('commit', '-qm', '测试: 不预置根目录 Agent');
   f.write('.workflow/knowhow/migration.md', '---\ntitle: Legacy deployment notes\n---\n\nKeep this deployment note local.\n');
   f.evolve('kb', 'import', '--project', 'legacy-project', '--apply');
   const h = harness(f.root);
@@ -402,6 +403,7 @@ test('OMP OpenViking initialization changes Git and publishes only after confirm
   assert.equal(existsSync(join(f.root, '.evolve/openviking.json')), false);
   assert.equal(existsSync(join(f.root, '.evolve/evolution.json')), false);
   assert.deepEqual((await server.inspect()).files, {});
+  assert.equal(existsSync(join(f.root, '.omp/agent/agents')), false);
 
   approve = true;
   await handler('init', ctx);
@@ -412,6 +414,10 @@ test('OMP OpenViking initialization changes Git and publishes only after confirm
   assert.equal(project.evolution_policy, '.evolve/evolution.json');
   assert.deepEqual(JSON.parse(f.git('show', 'HEAD:.evolve/evolution.json')).targets, []);
   assert.equal(existsSync(join(f.root, 'evolution.json')), true);
+  assert.equal(existsSync(join(f.root, 'agents')), false);
+  assert.equal(existsSync(join(f.root, '.omp/agent/agents/workflow-executor.md')), true);
+  assert.equal(existsSync(join(f.root, '.omp/agent/skills')), false);
+  assert.equal(f.git('ls-tree', '-r', '--name-only', 'HEAD', '--', '.omp/agent/agents'), '');
   const { head } = await readProjectHead(f.client, project);
   assert.ok(output.includes(head.release_id));
 
