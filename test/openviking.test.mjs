@@ -418,6 +418,40 @@ test('init commits only the profile and missing bundled Skills, and remains expl
   assert.equal(f.evolve('openviking', 'config', '--enabled', 'false').backend, 'local');
 });
 
+test('init recovers installer-owned untracked Skills while preserving local edits and the index', async t => {
+  const server = await protocol(t);
+  for (const host of [undefined, 'omp']) {
+    const f = projectFixture(t, server, { profile: false });
+    const installed = installSkills(f.root, ['ew-knowledge'], host);
+    // 覆盖包已落盘、安装清单尚未写入就中断的情况。
+    if (host === 'omp') rmSync(installed.manifest_path);
+    const path = host ? '.omp/skills/ew-knowledge/SKILL.md' : 'skills/ew-knowledge/SKILL.md';
+    const body = readFileSync(join(f.root, path), 'utf8');
+    const before = f.git('rev-parse', 'HEAD');
+    f.write(path, body + '\nUser modification.\n');
+    await assert.rejects(initializeProject(f.root, undefined, f.project.project_id, host, host), /MANAGED_DIRTY/);
+    assert.equal(readFileSync(join(f.root, path), 'utf8'), body + '\nUser modification.\n');
+    assert.equal(f.git('rev-parse', 'HEAD'), before);
+    f.write(path, body);
+    f.write('skills/unknown/SKILL.md', 'User-owned untracked Skill.\n');
+    await assert.rejects(initializeProject(f.root, undefined, f.project.project_id, host, host), /MANAGED_DIRTY/);
+    assert.equal(readFileSync(join(f.root, 'skills/unknown/SKILL.md'), 'utf8'), 'User-owned untracked Skill.\n');
+    rmSync(join(f.root, 'skills/unknown'), { recursive: true });
+    f.write('user-note.txt', 'Unrelated staged work'); f.git('add', 'user-note.txt');
+    await assert.rejects(initializeProject(f.root, undefined, f.project.project_id, host, host), /STAGED_CHANGES/);
+    assert.equal(f.git('show', ':user-note.txt'), 'Unrelated staged work');
+    f.git('restore', '--staged', 'user-note.txt');
+    const initialized = await initializeProject(f.root, undefined, f.project.project_id, host, host);
+    assert.equal(f.git('show', 'HEAD:' + path), body.trimEnd());
+    assert.equal(readFileSync(join(f.root, path), 'utf8'), body);
+    assert.equal(f.git('status', '--porcelain', '--', installed.skills_dir), '');
+    assert.equal(readFileSync(join(f.root, 'user-note.txt'), 'utf8'), 'Unrelated staged work');
+    const manifest = await loadRelease(f.client, f.project, initialized.head.release_id);
+    assert.ok(manifest.files.some(file => file.path === path));
+    assert.equal((await initializeProject(f.root, undefined, f.project.project_id, host, host)).head.release_id, initialized.head.release_id);
+  }
+});
+
 test('init installs host Agents without moving Skills or publishing Agent definitions', async t => {
   const server = await protocol(t);
   const f = projectFixture(t, server, { profile: false, minimalSkills: true });

@@ -7,9 +7,9 @@ import { InputError } from '../common.js';
 import { createModelClient } from '../model-client.js';
 import { reviewSession, type ReviewedRun, type SkillSignal } from '../retrospective.js';
 import { readSkillReplayReceipt, verifySkillCommit } from '../skill-replay.js';
-import { installSkills, type InstallHost } from '../workflow-install.js';
+import { installSkills, installStatus, type InstallHost } from '../workflow-install.js';
 import { WorkflowStore, workflowId, type Mutation } from '../workflow-runtime.js';
-import { bindWorkflowSkill, findProjectSkillAsset, isProjectSkillPath, projectSkillPackageKey, workflowHead, workflowPath } from '../workflow-skills.js';
+import { bindWorkflowSkill, findProjectSkillAsset, isProjectSkillPath, projectSkillPackageKey, projectSkillRoots, workflowHead, workflowPath } from '../workflow-skills.js';
 import { Wiki, readWikiPages } from '../wiki.js';
 import { readPolicy, readProject, privateProjectUri, projectFile, replaceJson } from './config.js';
 import { ensureDirectory, isMissing, OpenVikingClient, OpenVikingError } from './client.js';
@@ -48,6 +48,15 @@ async function locked<T>(folder: string, action: () => Promise<T>): Promise<T> {
   }
 }
 
+function recoverableInstalledSkills(root: string) {
+  return installStatus(root).targets.flatMap(target => target.skills.flatMap(skill => {
+    if (skill.status !== 'up_to_date') return [];
+    const path = relative(root, join(target.skills_dir, skill.name)).split('\\').join('/');
+    if (!isProjectSkillPath(path + '/') || gitText(root, ['ls-files', '--', path + '/'])) return [];
+    return [path];
+  })).sort();
+}
+
 export async function initializeProject(root: string, policyPath?: string, projectId?: string, agentsHost?: InstallHost, skillsHost?: InstallHost) {
   const client = new OpenVikingClient();
   const existing = readProject(root);
@@ -74,7 +83,9 @@ export async function initializeProject(root: string, policyPath?: string, proje
     return { project: existing, head, existing: true };
   }
   const base = workflowHead(root);
-  assertManagedClean(root);
+  // 上次安装留下的原版未跟踪包可纳入基线；已修改、已跟踪和未知文件仍受脏检查保护。
+  const recovered = recoverableInstalledSkills(root);
+  assertManagedClean(root, [...projectSkillRoots.map(path => path + '/'), ...recovered.map(path => ':(exclude,literal)' + path + '/')]);
   const createPolicy = policyPath === undefined &&
     !lstatSync(join(root, defaultEvolutionPolicyPath), { throwIfNoEntry: false }) &&
     !gitText(root, ['ls-files', '--', defaultEvolutionPolicyPath]);
@@ -94,6 +105,7 @@ export async function initializeProject(root: string, policyPath?: string, proje
   return locked(folder, async () => {
     const wiki = exportWiki(root);
     const memory = exportMemory(root);
+    if (JSON.stringify(recoverableInstalledSkills(root)) !== JSON.stringify(recovered)) throw new InputError('OPENVIKING_LOCAL_CHANGED');
     const installed = installSkills(root, [], skillsHost, { agentsHost });
     const skillsRoot = relative(root, installed.skills_dir).split('\\').join('/');
     const added: AssetFile[] = [];
@@ -108,7 +120,7 @@ export async function initializeProject(root: string, policyPath?: string, proje
         } else throw new InputError('OPENVIKING_UNSUPPORTED_GIT_MODE');
       }
     };
-    for (const name of installed.installed) walk(skillsRoot + '/' + name);
+    for (const path of [...recovered, ...installed.installed.map(name => skillsRoot + '/' + name)]) walk(path);
     const descriptor = Buffer.from(JSON.stringify(project, null, 2) + '\n');
     added.push(fileRecord('.evolve/openviking.json', descriptor)); bodies.set('.evolve/openviking.json', descriptor);
     if (createPolicy) {
