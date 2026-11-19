@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { InputError } from '../common.js';
-import { workflowPath, workflowRecord } from '../workflow-skills.js';
+import { isProjectSkillPath, workflowPath, workflowRecord } from '../workflow-skills.js';
 import { validateProject } from './config.js';
 import { ensureDirectory, isMissing, OpenVikingClient, OpenVikingError } from './client.js';
 import type { AssetFile, OpenVikingProject, ProjectHead, ProjectManifest, WriteOperation } from './types.js';
@@ -17,7 +17,7 @@ export function digest(value: unknown): string {
 }
 export function assetPath(path: string) {
   workflowPath(path);
-  if (!/^(?:skills\/.+|wiki\/entries\/[a-z0-9][a-z0-9_-]*\.md|memory\/[a-f0-9]{64}\.md)$/.test(path) ||
+  if (!(isProjectSkillPath(path) || /^(?:wiki\/entries\/[a-z0-9][a-z0-9_-]*\.md|memory\/[a-f0-9]{64}\.md)$/.test(path)) ||
       path.split('/').some(part => /^(?:\.git|\.agent-memory|con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part) || /[. ]$/.test(part))) {
     throw new InputError('OPENVIKING_INVALID_ASSET_PATH');
   }
@@ -91,7 +91,7 @@ export function validateManifest(value: unknown, project: OpenVikingProject): Pr
     }
     knowledge.add(file.path);
   }
-  if ([...paths.values()].some(file => !file.path.startsWith('skills/') && !knowledge.has(file.path))) throw new InputError('OPENVIKING_UNLISTED_KNOWLEDGE');
+  if ([...paths.values()].some(file => !isProjectSkillPath(file.path) && !knowledge.has(file.path))) throw new InputError('OPENVIKING_UNLISTED_KNOWLEDGE');
   const proof = workflowRecord(item.verification, 'release verification');
   if (!['bootstrap', 'evolved', 'knowledge'].includes(String(proof.kind)) || !Array.isArray(proof.replay_ids) ||
       proof.replay_ids.some(id => typeof id !== 'string' || !/^[a-f0-9]{64}$/.test(id)) ||

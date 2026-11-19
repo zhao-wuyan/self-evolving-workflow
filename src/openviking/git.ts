@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { InputError } from '../common.js';
-import { workflowHead, workflowPath } from '../workflow-skills.js';
+import { isProjectSkillPath, projectSkillRoots, workflowHead, workflowPath } from '../workflow-skills.js';
 import { assetPath, sha256 } from './assets.js';
 import type { AssetFile } from './types.js';
 
@@ -17,10 +17,12 @@ export function gitText(root: string, args: string[], input?: Buffer | string, e
 export function skillAssets(root: string, commit: string) {
   const files: AssetFile[] = [];
   const bytes = new Map<string, Buffer>();
-  for (const record of gitBytes(root, ['ls-tree', '-r', '-z', commit, '--', 'skills/']).toString('utf8').split('\0').filter(Boolean)) {
+  const roots = projectSkillRoots.map(skillRoot => skillRoot + '/');
+  for (const record of gitBytes(root, ['ls-tree', '-r', '-z', commit, '--', ...roots]).toString('utf8').split('\0').filter(Boolean)) {
     const match = /^(100644|100755) blob ([a-f0-9]+)\t(.+)$/.exec(record);
     if (!match) throw new InputError('OPENVIKING_UNSUPPORTED_GIT_MODE');
     const path = assetPath(match[3]);
+    if (!isProjectSkillPath(path)) throw new InputError('OPENVIKING_INVALID_ASSET_PATH');
     const body = gitBytes(root, ['cat-file', 'blob', match[2]]);
     files.push({ path, mode: match[1] as AssetFile['mode'], size: body.length, sha256: sha256(body) });
     bytes.set(path, body);
@@ -33,7 +35,7 @@ export function assertCleanIndex(root: string) {
   gitText(root, ['var', 'GIT_AUTHOR_IDENT']);
   gitText(root, ['var', 'GIT_COMMITTER_IDENT']);
 }
-export function assertManagedClean(root: string, paths: string[] = ['skills/']) {
+export function assertManagedClean(root: string, paths: string[] = projectSkillRoots.map(skillRoot => skillRoot + '/')) {
   assertCleanIndex(root);
   if (paths.length && gitText(root, ['status', '--porcelain', '--untracked-files=all', '--', ...paths])) {
     throw new InputError('OPENVIKING_MANAGED_DIRTY');

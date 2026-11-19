@@ -3,6 +3,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { InputError } from '../common.js';
 import { fileRecord } from './knowledge.js';
+import { isProjectSkillPath } from '../workflow-skills.js';
 import { sha256, stableJson } from './assets.js';
 import type { AssetFile, ProjectManifest } from './types.js';
 
@@ -28,7 +29,7 @@ export function mergeProjectAssets(base: ProjectManifest, ours: ProjectManifest,
       }
       continue;
     }
-    if (!path.startsWith('skills/') || !b || !o || !t) { conflicts.push(path); continue; }
+    if (!isProjectSkillPath(path) || !b || !o || !t) { conflicts.push(path); continue; }
     const mode = choose(b.mode, o.mode, t.mode);
     if (!mode.resolved) { conflicts.push(path); continue; }
     const bodies = [baseBytes.get(path)!, ourBytes.get(path)!, theirBytes.get(path)!];

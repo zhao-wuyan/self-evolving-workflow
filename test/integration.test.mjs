@@ -561,8 +561,8 @@ test('Evolve installs OMP user Skills without replacing existing Skills or instr
   assert.equal(await readFile(entry, 'utf8'), customized);
   assert.equal(await readFile(guidance, 'utf8'), after);
   const project = await evolve('skill', 'install', '--scope', 'project', '--host', 'omp', '--skill', 'ew-knowledge', '--yes');
-  assert.equal(project.root, join(root, '.omp', 'agent'));
-  await access(join(project.root, 'skills', 'ew-knowledge', 'SKILL.md'));
+  assert.equal(project.root, join(root, '.omp'));
+  await access(join(root, '.omp', 'skills', 'ew-knowledge', 'SKILL.md'));
   await assert.rejects(access(join(root, 'skills')));
 });
 

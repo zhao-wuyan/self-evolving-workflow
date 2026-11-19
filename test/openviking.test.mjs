@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, cpSync } from 'node:fs';
 import { join } from 'node:path';
 import { protocol, projectFixture, releaseFromProject, seed, fakeAgy, completeSample } from './openviking-support.mjs';
-import { readProject, validateProject } from '../dist/openviking/config.js';
+import { readPolicy, readProject, validateEvolutionPolicy, validateProject } from '../dist/openviking/config.js';
+import { prepareEvolutionScenarios } from '../dist/openviking/evolution-scenarios.js';
 import { loadRelease, manifestBytes, publishRelease, readProjectHead, sha256, stableJson, validateManifest } from '../dist/openviking/assets.js';
 import { cacheRelease, selectMemory, exportMemory, exportWiki, fileRecord } from '../dist/openviking/knowledge.js';
 import { createAssetCommit, gitBytes, skillAssets } from '../dist/openviking/git.js';
@@ -436,6 +437,77 @@ test('init installs host Agents without moving Skills or publishing Agent defini
   const status = installStatus(f.root).targets.find(target => target.skills_dir === join(f.root, 'skills'));
   assert.equal(status.agents_dir, join(f.root, '.claude/agents'));
   assert.equal(status.agents.find(agent => agent.name === 'workflow-executor').status, 'up_to_date');
+});
+
+test('OMP native init exports .omp/skills assets without root mirrors or Agent definitions', async t => {
+  const server = await protocol(t);
+  const f = projectFixture(t, server, { profile: false });
+  const initialized = await initializeProject(f.root, undefined, f.project.project_id, 'omp', 'omp');
+  assert.ok(existsSync(join(f.root, '.omp', 'skills', 'ew-orchestrate', 'SKILL.md')));
+  assert.ok(existsSync(join(f.root, '.omp', 'skills', 'workflow-evolve', 'scripts', 'evolve-loop.mjs')));
+  assert.ok(existsSync(join(f.root, '.omp', 'agent', 'agents', 'workflow-executor.md')));
+  assert.equal(existsSync(join(f.root, 'skills', 'ew-orchestrate', 'SKILL.md')), false);
+  assert.ok(existsSync(join(f.root, 'skills', 'sample', 'SKILL.md')));
+  const manifest = await loadRelease(f.client, f.project, initialized.head.release_id);
+  assert.ok(manifest.files.some(file => file.path === '.omp/skills/ew-orchestrate/SKILL.md'));
+  assert.ok(manifest.files.some(file => file.path === 'skills/sample/SKILL.md'));
+  assert.ok(manifest.files.every(file => !file.path.startsWith('.omp/agent/')));
+  assert.equal(f.git('ls-tree', '-r', '--name-only', 'HEAD', '--', '.omp/agent'), '');
+
+  const b = projectFixture(t, server, { id: f.project.project_id });
+  const opened = b.open('omp-native-sync', 'sample');
+  assert.equal(opened.openviking.phase, 'ready');
+  assert.equal(opened.openviking.release_id, initialized.head.release_id);
+  assert.ok(existsSync(join(b.root, '.omp', 'skills', 'ew-orchestrate', 'SKILL.md')));
+  assert.ok(existsSync(join(b.root, 'skills', 'sample', 'SKILL.md')));
+  assert.match(b.git('show', opened.openviking.skill_commit + ':.omp/skills/ew-orchestrate/SKILL.md'), /name: ew-orchestrate/);
+  b.open('omp-native-run', 'ew-orchestrate');
+  const run = b.next('omp-native-run');
+  assert.equal(run.skill_ref.package_path, '.omp/skills/ew-orchestrate');
+  assert.match(b.evolve('run', 'skill-read', run.run_id, '--session', 'omp-native-run').markdown, /name: ew-orchestrate/);
+
+  const local = readFileSync(join(f.root, '.omp/skills/ew-orchestrate/SKILL.md'), 'utf8') + '\nLocal native OMP modification.\n';
+  f.write('.omp/skills/ew-orchestrate/SKILL.md', local);
+  f.git('add', '.omp/skills'); f.git('commit', '-qm', '测试: 本地 OMP Skill 修改');
+  assert.throws(() => f.open('omp-native-conflict', 'sample'), /LOCAL_ASSET_CONFLICT/);
+});
+
+test('OMP native policy validates and replays .omp/skills targets without a real model', async t => {
+  const server = await protocol(t);
+  const f = projectFixture(t, server, { profile: false });
+  mkdirSync(join(f.root, '.omp', 'skills'), { recursive: true });
+  cpSync(join(f.root, 'skills', 'sample'), join(f.root, '.omp', 'skills', 'sample'), { recursive: true });
+  f.write('.omp/tools/scenarios.json', readFileSync(join(f.root, 'tools', 'scenarios.json'), 'utf8'));
+  f.write('.omp/tools/replay.mjs', `import {readFileSync} from 'node:fs';
+import {createHash} from 'node:crypto';
+import {join} from 'node:path';
+import {pathToFileURL} from 'node:url';
+const request = JSON.parse(readFileSync(0, 'utf8'));
+const body = readFileSync(request.entry, 'utf8');
+const script = '.omp/skills/sample/scripts/release.mjs';
+const {release} = await import(pathToFileURL(join(process.cwd(), script)).href);
+const result = release(request.input, body.includes('migration_approval'));
+const passed = request.input.migrationApproved ? result.decision === 'released' && result.artifact.build === request.input.build
+  : result.decision === 'blocked' && result.artifact === null;
+console.log(JSON.stringify({passed, loaded: [request.entry, script].map(path => ({path, sha256:createHash('sha256').update(readFileSync(path)).digest('hex')}))}));\n`);
+  f.write('native-evolution.json', JSON.stringify({ schema_version: 'evolve-openviking-policy/1.0',
+    targets: [{ entry: '.omp/skills/sample/SKILL.md', runner: '.omp/tools/replay.mjs', scenarios: '.omp/tools/scenarios.json' }] }));
+  f.git('add', '.omp', 'native-evolution.json'); f.git('commit', '-qm', '测试: 原生 OMP 回放策略');
+  const policy = readPolicy(f.root, 'native-evolution.json');
+  assert.equal(policy.targets[0].entry, '.omp/skills/sample/SKILL.md');
+  assert.throws(() => validateEvolutionPolicy(f.root, { schema_version: 'evolve-openviking-policy/1.0',
+    targets: [{ entry: '.omp/agent/agents/workflow-executor.md', runner: '.omp/tools/replay.mjs', scenarios: '.omp/tools/scenarios.json' }] }), /POLICY_ENTRY_INVALID/);
+
+  const release = await seed(f);
+  const cache = await cacheRelease(f.root, f.client, f.project, release.head.release_id, release.manifest);
+  const snapshot = await freezeKnowledge(join(f.root, '.agent-memory', 'native-policy-frozen'), cache, f.client, f.project, release.manifest);
+  const folder = join(f.root, '.agent-memory', 'native-policy-replay');
+  const frozen = await prepareEvolutionScenarios(f.root, f.git('rev-parse', 'HEAD'), policy.targets[0], folder, snapshot.path,
+    [{ summary: 'Native OMP target needs migration approval', sources: ['fixture:native-omp'] }]);
+  assert.ok('sha256' in frozen);
+  const cases = JSON.parse(readFileSync(join(folder, 'scenarios.json'), 'utf8'));
+  assert.equal(cases.length, 2);
+  assert.ok(cases.some(item => item.baseline === false));
 });
 
 test('init keeps migrated Wiki local until an explicit approval is published', async t => {

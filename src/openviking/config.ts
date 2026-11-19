@@ -4,7 +4,7 @@ import { homedir } from 'node:os';
 import { dirname, isAbsolute, join } from 'node:path';
 import { InputError, requireText } from '../common.js';
 import { isRepositoryId } from '../wiki-entry.js';
-import { workflowPath, workflowRecord } from '../workflow-skills.js';
+import { isProjectSkillEntry, workflowPath, workflowRecord } from '../workflow-skills.js';
 import type { EvolutionPolicy, OpenVikingProject } from './types.js';
 
 export function connectionConfig(): { url: string; api_key: string } {
@@ -65,7 +65,9 @@ export function validateEvolutionPolicy(root: string, input: unknown): Evolution
   const targets = value.targets.map(input => {
     const item = workflowRecord(input, 'evolution target');
     const entry = workflowPath(requireText(item.entry, 'target entry'));
-    if (!/^skills\/.+\/SKILL\.md$/.test(entry)) throw new InputError('OPENVIKING_POLICY_ENTRY_INVALID');
+    if (!isProjectSkillEntry(entry)) {
+      throw new InputError('OPENVIKING_POLICY_ENTRY_INVALID');
+    }
     const runner = workflowPath(requireText(item.runner, 'business runner'));
     const scenarios = workflowPath(requireText(item.scenarios, 'scenarios'));
     if (!lstatSync(join(root, runner)).isFile()) throw new InputError('OPENVIKING_POLICY_RUNNER_INVALID');

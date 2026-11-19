@@ -28,7 +28,11 @@ const hosts = {
     user: { path: ['.gemini', 'config'], instructions: ['.gemini', 'AGENTS.md'] },
   },
   omp: {
-    project: { path: ['.omp', 'agent'], instructions: ['AGENTS.md'] },
+    // OMP 原生项目 Skill 位于 .omp/skills，Agents 仍由 .omp/agent 承载。
+    project: {
+      path: ['.omp'], skills: ['.omp', 'skills'], agents: ['.omp', 'agent', 'agents'],
+      instructions: ['AGENTS.md'],
+    },
     user: { path: ['.omp', 'agent'], instructions: ['.omp', 'agent', 'AGENTS.md'] },
   },
 } as const;
@@ -43,6 +47,13 @@ const instructionEndMarker = '<!-- evolve:instructions:end -->';
 type InstallScope = 'project' | 'user';
 export type InstallHost = keyof typeof hosts;
 export const installHosts = Object.keys(hosts) as InstallHost[];
+
+interface HostScopeConfig {
+  path: readonly string[];
+  skills?: readonly string[];
+  agents?: readonly string[];
+  instructions: readonly string[];
+}
 
 interface InstallOptions {
   scope?: InstallScope;
@@ -621,7 +632,9 @@ function installSkillsToTarget(
 
 export function installSkills(root: string, requested: string[], hostArg?: string, options: InstallSkillsOptions = {}) {
   if (!hostArg) {
-    return installSkillsToTarget(projectRootTarget(root), 'project', root, requested, options);
+    const target = projectRootTarget(root);
+    const result = installSkillsToTarget(target, 'project', root, requested, options);
+    return { ...result, skills_dir: target.skillsDir };
   }
   const selectedHosts = parseInstallHosts(hostArg);
   if (selectedHosts.length === 1) {
@@ -636,6 +649,7 @@ export function installSkills(root: string, requested: string[], hostArg?: strin
   });
   return {
     skills: targets[0].skills,
+    skills_dir: targets[0].skills_dir,
     installed: [...new Set(targets.flatMap(item => item.installed))],
     upgraded: [...new Set(targets.flatMap(item => item.upgraded))],
     kept: [...new Set(targets.flatMap(item => item.kept))],
@@ -763,16 +777,18 @@ function projectRootTarget(root: string): InstallTarget {
 }
 
 function scopeAndHost(root: string, scope: InstallScope, host: InstallHost): InstallTarget {
-  const config = hosts[host][scope];
+  const config: HostScopeConfig = hosts[host][scope];
   const base = scope === 'project' ? root : homedir();
   const target = join(base, ...config.path);
+  const skillsPath = config.skills ?? [...config.path, 'skills'];
+  const agentsPath = config.agents ?? [...config.path, 'agents'];
   return {
     host,
     target,
-    skillsDir: join(target, 'skills'),
-    agentsDir: join(target, 'agents'),
+    skillsDir: join(base, ...skillsPath),
+    agentsDir: join(base, ...agentsPath),
     instructions: join(base, ...config.instructions),
-    skillsLabel: scope === 'project' ? `${config.path.join('/')}/skills/` : 'skills/',
+    skillsLabel: scope === 'project' ? `${skillsPath.join('/')}/` : 'skills/',
   };
 }
 

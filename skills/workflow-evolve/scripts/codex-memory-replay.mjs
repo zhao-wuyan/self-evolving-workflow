@@ -11,7 +11,7 @@ const rubric = typeof input?.rubric === 'string' ? [input.rubric]
   : Array.isArray(input?.rubric) ? input.rubric : undefined;
 const hasExpected = typeof input?.expected === 'string' && input.expected.trim();
 const hasRubric = rubric?.length > 0 && rubric.every(item => typeof item === 'string' && item.trim());
-if (!/^skills\/(?:[a-z0-9]+(?:-[a-z0-9]+)*\/)+SKILL\.md$/.test(entry) ||
+if (typeof entry !== 'string' || !entry ||
     !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit) ||
     typeof input?.task !== 'string' || !input.task.trim() ||
     (!hasExpected && !hasRubric) || (input.rubric !== undefined && !hasRubric)) {
@@ -43,6 +43,9 @@ function resolveCli(value) {
   return resolved;
 }
 const memoryCli = resolveCli(process.env.EVOLVE_CLI || process.env.AGENT_MEMORY_CLI || defaultCli);
+execFileSync(process.execPath, [memoryCli, '--root', root, 'skill', 'inspect', entry, '--commit', commit], {
+  cwd: root, encoding: 'utf8', windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
+});
 const markdown = git('show', commit + ':' + entry);
 const header = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(markdown.replace(/^\uFEFF/, ''));
 const required = (header ? parse(header[1])?.required_links : undefined) ?? [];

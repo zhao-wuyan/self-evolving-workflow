@@ -40,12 +40,14 @@ evolve --help
 | 当前项目（Codex CLI） | `evolve skill install --scope project --host codex --yes` | `.codex/skills/` | `AGENTS.md` |
 | 当前项目（Claude Code） | `evolve skill install --scope project --host claude --yes` | `.claude/skills/` | `CLAUDE.md` |
 | 当前项目（Antigravity） | `evolve skill install --scope project --host agy --yes` | `.agents/skills/` | `AGENTS.md` |
-| 当前项目（全部宿主） | `evolve skill install --scope project --host all --yes` | `.codex/skills/`、`.claude/skills/`、`.agents/skills/` | `AGENTS.md`、`CLAUDE.md` |
+| 当前项目（OMP） | `evolve skill install --scope project --host omp --yes` | `.omp/skills/` | `AGENTS.md` |
+| 当前项目（全部宿主） | `evolve skill install --scope project --host all --yes` | `.codex/skills/`、`.claude/skills/`、`.agents/skills/`、`.omp/skills/` | `AGENTS.md`、`CLAUDE.md` |
 | 当前项目（通用无宿主参数） | `evolve skill install --scope project --yes` | `skills/` | `AGENTS.md` |
 | Codex CLI（用户级） | `evolve skill install --scope user --host codex --yes` | `~/.codex/skills/` | `~/.codex/AGENTS.md` |
 | Claude Code（用户级） | `evolve skill install --scope user --host claude --yes` | `~/.claude/skills/` | `~/.claude/CLAUDE.md` |
 | Antigravity（用户级） | `evolve skill install --scope user --host agy --yes` | `~/.gemini/config/skills/` | `~/.gemini/AGENTS.md` |
-| 全部宿主（用户级） | `evolve skill install --scope user --host all --yes` | 上述 3 个用户级目录 | 对应 3 份用户引导 |
+| OMP（用户级） | `evolve skill install --scope user --host omp --yes` | `~/.omp/agent/skills/` | `~/.omp/agent/AGENTS.md` |
+| 全部宿主（用户级） | `evolve skill install --scope user --host all --yes` | 上述 4 个用户级目录 | 对应 4 份用户引导 |
 
 ### 常用安装变体
 
@@ -53,10 +55,10 @@ evolve --help
 - **仅安装 Skill 包、不写入引导文件**：
 
   ```sh
-  evolve skill install [包名...] [--host codex|claude|agy|all]
+  evolve skill install [包名...] [--host codex|claude|agy|omp|all]
   ```
 
-- **项目级提交到 Git**：按项目安装后，请将已安装的 Skill 目录（`.codex/skills/`、`.claude/skills/`、`.agents/skills/` 或 `skills/`）与 `AGENTS.md` / `CLAUDE.md` 提交到 Git，以便 Evolve 将 Run 绑定到固定 Git 提交版本。
+- **项目级提交到 Git**：按项目安装后，请将已安装的 Skill 目录（`.codex/skills/`、`.claude/skills/`、`.agents/skills/`、`.omp/skills/` 或 `skills/`）与 `AGENTS.md` / `CLAUDE.md` 提交到 Git，以便 Evolve 将 Run 绑定到固定 Git 提交版本。
 - **忽略本地运行时产物**：索引、数据库与过程文件统一保存在项目根目录的 `.evolve/` 下，建议在 `.gitignore` 中添加 `/.evolve/`（以及按需忽略代码图谱 `/.codegraph/`）。
 
 ---
@@ -83,9 +85,13 @@ evolve skill status --host all
 
 每个 Skill 会返回以下状态之一：`up_to_date`（与当前发布包一致）、`outdated`（本地副本已过期或有变更）、`not_installed`（尚未安装）或 `retired`（已改名或退役的历史 Evolve 包）。
 
+`status` 使用安装清单及标准目录是否存在来识别目标，结果的 `skills_dir` 给出实际目录；没有清单也能发现标准目录。OMP 项目使用 `.omp/skills/`，用户级使用 `~/.omp/agent/skills/`。手动放到其他目录不会自动识别。
+
 ### 升级已有 Skill 与清理退役旧包
 
 默认 `evolve skill install` 会跳过已存在 `SKILL.md` 的目录，避免覆盖本地文件。需要升级或清理时使用 `--upgrade` / `--prune` / `--force`：
+
+升级来源为当前 CLI 随包 Skills，不会联网拉取上游；先升级 CLI，再检查项目状态。`--upgrade` 会替换内容不同的整个 Skill 目录，不自动合并本地或自进化修改；请先提交保存，再比较并合并。升级时沿用实际安装宿主（例如 OMP 使用 `--host omp`）；无 `--host` 的非交互项目安装只操作根目录 `skills/`。
 
 ```sh
 # 项目级增量升级（仅替换内容不一致的 Skill 并补装缺失包，支持失败自动回滚）

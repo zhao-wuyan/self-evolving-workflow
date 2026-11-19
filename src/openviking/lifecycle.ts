@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { InputError } from '../common.js';
@@ -9,7 +9,7 @@ import { reviewSession, type ReviewedRun, type SkillSignal } from '../retrospect
 import { readSkillReplayReceipt, verifySkillCommit } from '../skill-replay.js';
 import { installSkills, type InstallHost } from '../workflow-install.js';
 import { WorkflowStore, workflowId, type Mutation } from '../workflow-runtime.js';
-import { bindWorkflowSkill, workflowHead, workflowPath } from '../workflow-skills.js';
+import { bindWorkflowSkill, findProjectSkillAsset, isProjectSkillPath, projectSkillPackageKey, workflowHead, workflowPath } from '../workflow-skills.js';
 import { Wiki, readWikiPages } from '../wiki.js';
 import { readPolicy, readProject, privateProjectUri, projectFile, replaceJson } from './config.js';
 import { ensureDirectory, isMissing, OpenVikingClient, OpenVikingError } from './client.js';
@@ -48,7 +48,7 @@ async function locked<T>(folder: string, action: () => Promise<T>): Promise<T> {
   }
 }
 
-export async function initializeProject(root: string, policyPath?: string, projectId?: string, agentsHost?: InstallHost) {
+export async function initializeProject(root: string, policyPath?: string, projectId?: string, agentsHost?: InstallHost, skillsHost?: InstallHost) {
   const client = new OpenVikingClient();
   const existing = readProject(root);
   if (existing) {
@@ -66,7 +66,7 @@ export async function initializeProject(root: string, policyPath?: string, proje
         const consumed = JSON.parse(readFileSync(join(folder, 'knowledge.json'), 'utf8'));
         acknowledgeKnowledge(root, consumed.wiki, consumed.memory);
         saveJob(join(folder, 'published.json'), head);
-        saveJob(join(root, '.agent-memory', 'openviking', 'materialized.json'), { release_id: sha256(manifestBytes(manifest)), files: manifest.files.filter(file => file.path.startsWith('skills/')) });
+        saveJob(join(root, '.agent-memory', 'openviking', 'materialized.json'), { release_id: sha256(manifestBytes(manifest)), files: manifest.files.filter(file => isProjectSkillPath(file.path)) });
         return { project: existing, head, existing: true, recovered: true, local_only_wiki: consumed.local_only_wiki as string[] | undefined };
       });
     }
@@ -94,7 +94,8 @@ export async function initializeProject(root: string, policyPath?: string, proje
   return locked(folder, async () => {
     const wiki = exportWiki(root);
     const memory = exportMemory(root);
-    const installed = installSkills(root, [], undefined, { agentsHost });
+    const installed = installSkills(root, [], skillsHost, { agentsHost });
+    const skillsRoot = relative(root, installed.skills_dir).split('\\').join('/');
     const added: AssetFile[] = [];
     const bodies = new Map<string, Buffer>();
     const walk = (path: string) => {
@@ -107,7 +108,7 @@ export async function initializeProject(root: string, policyPath?: string, proje
         } else throw new InputError('OPENVIKING_UNSUPPORTED_GIT_MODE');
       }
     };
-    for (const name of installed.installed) walk('skills/' + name);
+    for (const name of installed.installed) walk(skillsRoot + '/' + name);
     const descriptor = Buffer.from(JSON.stringify(project, null, 2) + '\n');
     added.push(fileRecord('.evolve/openviking.json', descriptor)); bodies.set('.evolve/openviking.json', descriptor);
     if (createPolicy) {
@@ -116,7 +117,7 @@ export async function initializeProject(root: string, policyPath?: string, proje
     }
     const commit = createAssetCommit(root, base, added, bodies, [], 'chore: 建立 OpenViking 项目资产基线');
     // 新安装包属于本次操作；仅移除逐字节未变的临时副本，让 Git 安全地创建跟踪文件。
-    for (const file of added.filter(file => file.path.startsWith('skills/'))) {
+    for (const file of added.filter(file => isProjectSkillPath(file.path))) {
       if (!readFileSync(join(root, file.path)).equals(bodies.get(file.path)!)) throw new InputError('OPENVIKING_LOCAL_CHANGED');
       rmSync(join(root, file.path));
     }
@@ -153,23 +154,20 @@ function sameAsset(a: AssetFile | undefined, b: AssetFile | undefined) {
 
 async function checkLocalAssetBaseline(root: string, base: string, manifest: ProjectManifest, previous: AssetFile[] | undefined,
   client: OpenVikingClient, project: OpenVikingProject) {
-  const local = new Map<string, AssetFile>();
-  for (const record of gitBytes(root, ['ls-tree', '-r', '-z', base, '--', 'skills/']).toString('utf8').split('\0').filter(Boolean)) {
-    const match = /^(100644|100755) blob ([a-f0-9]+)\t(.+)$/.exec(record);
-    if (!match) throw new InputError('OPENVIKING_UNSUPPORTED_GIT_MODE');
-    const path = match[3];
-    local.set(path, fileRecord(path, gitBytes(root, ['cat-file', 'blob', match[2]]), match[1] as AssetFile['mode']));
-  }
-  const managed = manifest.files.filter(file => file.path.startsWith('skills/'));
+  const local = new Map(skillAssets(root, base).files.map(file => [file.path, file]));
+  const managed = manifest.files.filter(file => isProjectSkillPath(file.path));
   let baseline = previous;
   if (baseline === undefined) {
     let ancestor = manifest;
     const seen = new Set<string>();
     while (true) {
-      const files = ancestor.files.filter(file => file.path.startsWith('skills/'));
+      const files = ancestor.files.filter(file => isProjectSkillPath(file.path));
       const byPath = new Map(files.map(file => [file.path, file]));
-      const packages = new Set([...managed, ...files].map(file => file.path.split('/')[1]));
-      if ([...local.values()].every(file => !packages.has(file.path.split('/')[1]) || sameAsset(file, byPath.get(file.path)))) {
+      const packages = new Set([...managed, ...files].flatMap(file => projectSkillPackageKey(file.path) ?? []));
+      if ([...local.values()].every(file => {
+        const key = projectSkillPackageKey(file.path);
+        return !key || !packages.has(key) || sameAsset(file, byPath.get(file.path));
+      })) {
         baseline = files; break;
       }
       if (!ancestor.parent) throw new InputError('OPENVIKING_LOCAL_ASSET_CONFLICT');
@@ -209,7 +207,7 @@ export async function prepareSession(root: string, store: WorkflowStore, id: str
     await client.identity(project);
     const manifest = await loadRelease(client, project, assets.release_id);
     const cache = await cacheRelease(root, client, project, assets.release_id, manifest);
-    const managed = manifest.files.filter(file => file.path.startsWith('skills/'));
+    const managed = manifest.files.filter(file => isProjectSkillPath(file.path));
     const materializedPath = join(root, '.agent-memory', 'openviking', 'materialized.json');
     const previous: AssetFile[] | undefined = existsSync(materializedPath) ? JSON.parse(readFileSync(materializedPath, 'utf8')).files : undefined;
     const bytes = new Map(managed.map(file => [file.path, readFileSync(join(cache, 'assets', file.path))]));
@@ -355,7 +353,9 @@ export async function finishSession(root: string, store: WorkflowStore, id: stri
           let state;
           if (existsSync(statePath)) state = JSON.parse(readFileSync(statePath, 'utf8'));
           else {
-            const driver = join(cache, 'assets', 'skills', 'workflow-evolve', 'scripts', 'evolve-loop.mjs');
+            const driverPath = findProjectSkillAsset(base.files, 'workflow-evolve', 'scripts/evolve-loop.mjs');
+            if (!driverPath) throw new InputError('OPENVIKING_DRIVER_MISSING');
+            const driver = join(cache, 'assets', driverPath);
             const cli = join(bundle, 'dist', 'workflow-cli.js');
             const output = execFileSync(process.execPath, [driver, '--skill', target.entry, '--scenarios', runTarget.scenarios, '--runner', target.runner,
               '--memory-cli', cli, '--iterations', '1', '--auto', '--review', reviewPath, '--output-dir', outputDir,
@@ -382,13 +382,13 @@ export async function finishSession(root: string, store: WorkflowStore, id: stri
       if (candidateCommit) {
         if (assets.publication?.state !== 'conflict' || !existsSync(join(folder, 'theirs.json'))) throw new InputError('OPENVIKING_RESOLUTION_NOT_EXPECTED');
         const changed = gitText(root, ['diff', '--name-only', job.candidate_commit, candidateCommit]).split(/\r?\n/).filter(Boolean);
-        if (changed.some(path => !path.startsWith('skills/'))) throw new InputError('OPENVIKING_CANDIDATE_UNMANAGED_CHANGES');
+        if (changed.some(path => !isProjectSkillPath(path))) throw new InputError('OPENVIKING_CANDIDATE_UNMANAGED_CHANGES');
         const theirs: ProjectManifest = JSON.parse(readFileSync(join(folder, 'theirs.json'), 'utf8'));
         job.resolved_against = sha256(manifestBytes(theirs));
         job.candidate_commit = candidateCommit; delete job.manifest; saveJob(path, job);
       }
       const candidate = skillAssets(root, job.candidate_commit);
-      const baseSkills = base.files.filter(file => file.path.startsWith('skills/'));
+      const baseSkills = base.files.filter(file => isProjectSkillPath(file.path));
       const changedSkillPaths = [...new Set([...baseSkills, ...candidate.files].map(file => file.path))].filter(path =>
         stableJson(baseSkills.find(file => file.path === path)) !== stableJson(candidate.files.find(file => file.path === path)));
       const affected = evolutionTargets.filter(target => changedSkillPaths.some(path => path.startsWith(dirname(target.entry).replaceAll('\\', '/') + '/')));
@@ -401,11 +401,11 @@ export async function finishSession(root: string, store: WorkflowStore, id: stri
         return store.recordAssetPublication(id, { state: 'no_change' }, fence);
       }
       let bytes = new Map(baseBytes);
-      for (const path of [...bytes.keys()]) if (path.startsWith('skills/') || !wiki.wiki.some(item => item.path === path) && !memory.memory.some(item => item.path === path)) bytes.delete(path);
+      for (const path of [...bytes.keys()]) if (isProjectSkillPath(path) || !wiki.wiki.some(item => item.path === path) && !memory.memory.some(item => item.path === path)) bytes.delete(path);
       for (const [path, body] of [...candidate.bytes, ...wiki.bodies, ...memory.bodies]) bytes.set(path, body);
       if (job.manifest) bytes = new Map(job.manifest.files.map(file => [file.path, readFileSync(join(folder, 'candidate-assets', file.path))]));
       let manifest: ProjectManifest = job.manifest ?? { ...base, created_at: job.created_at, source_commit: job.candidate_commit, parent: job.resolved_against ?? job.base_release,
-        cli_version: cliVersion, files: [...candidate.files, ...[...bytes].filter(([path]) => !path.startsWith('skills/')).map(([path, body]) => fileRecord(path, body))],
+        cli_version: cliVersion, files: [...candidate.files, ...[...bytes].filter(([path]) => !isProjectSkillPath(path)).map(([path, body]) => fileRecord(path, body))],
         wiki: wiki.wiki, memory: memory.memory,
         verification: { kind: affected.length ? 'evolved' : 'knowledge', session_id: id, replay_ids: job.replay_ids, validation_id: null } };
       for (let competition = 0; competition < 2; competition++) {
@@ -420,13 +420,13 @@ export async function finishSession(root: string, store: WorkflowStore, id: stri
           }
           const merged = mergeProjectAssets(base, manifest, theirs, baseBytes, bytes, theirBytes, join(folder, 'merge-' + competition));
           manifest = { ...merged.manifest, parent: latest.head.release_id }; bytes = merged.bytes;
-          const files = manifest.files.filter(file => file.path.startsWith('skills/'));
+          const files = manifest.files.filter(file => isProjectSkillPath(file.path));
           const current = skillAssets(root, workflowHead(root));
           const removed = current.files.filter(file => !files.some(item => item.path === file.path)).map(file => file.path);
           job.candidate_commit = createAssetCommit(root, workflowHead(root), files, bytes, removed, 'chore: 合并 OpenViking 并发项目资产');
           manifest.source_commit = job.candidate_commit;
         }
-        const changed = [...new Set([...base.files, ...manifest.files].filter(file => file.path.startsWith('skills/')).map(file => file.path))]
+        const changed = [...new Set([...base.files, ...manifest.files].filter(file => isProjectSkillPath(file.path)).map(file => file.path))]
           .filter(path => stableJson(manifest.files.find(file => file.path === path)) !== stableJson(base.files.find(file => file.path === path))).map(path => ({ path }));
         const targets = evolutionTargets.filter(target => changed.some(file => file.path.startsWith(dirname(target.entry).replaceAll('\\', '/') + '/')));
         if (changed.some(file => !targets.some(target => file.path.startsWith(dirname(target.entry).replaceAll('\\', '/') + '/')))) throw new InputError('OPENVIKING_EVOLUTION_TARGET_MISSING');
