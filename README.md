@@ -89,6 +89,15 @@ evolve skill workflows show ew-impeccable
 
 **共享项目 Skill、Wiki 和记忆**：在仓库根目录运行 `evolve openviking init`。首次会准备 `.evolve/evolution.json`，空策略只同步，不自动演进 Skill。详见[项目资产接入说明](docs/openviking-integration-plan.md#可拔插后端与故障策略)。
 
+**发布收尾后新增的 Wiki**：本地审批发布成功后，CLI 返回 `openviking_sync` 状态及下一步命令；这一步不访问远端，也不代表已上传。已启用 OpenViking 的项目可直接预览并发布，无需重新创建 Session：
+
+```sh
+evolve openviking knowledge preview entries/preflight
+evolve openviking knowledge publish --approval <预览返回的哈希>
+```
+
+预览不上传内容；确认展示的正文和项目目的地后再发布。已有“同步这些条目”的明确授权可直接使用。省略条目 ID 会检查本地已审批 Wiki；仅发布预览列出的差异，保留远端 Skills、Memory 和未选择的 Wiki，不触发 Skill 演进。本地内容或远端版本变化时重新预览；结果不确定时用同一批准哈希重试，CLI 核实远端版本后恢复回执。`openviking sync` 用于拉取 Session 资产，`finish` 用于完成 Session 的资产发布。
+
 ### OpenViking 个人经验库（可选）
 
 只想跨项目复用个人经验，不必初始化项目资产。在目标仓库根目录运行：

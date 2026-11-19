@@ -96,7 +96,10 @@ export function validateManifest(value: unknown, project: OpenVikingProject): Pr
   if (!['bootstrap', 'evolved', 'knowledge'].includes(String(proof.kind)) || !Array.isArray(proof.replay_ids) ||
       proof.replay_ids.some(id => typeof id !== 'string' || !/^[a-f0-9]{64}$/.test(id)) ||
       proof.kind === 'bootstrap' && (proof.session_id !== null || proof.validation_id !== null || proof.replay_ids.length !== 0) ||
-      proof.kind !== 'bootstrap' && typeof proof.session_id !== 'string') throw new InputError('OPENVIKING_INVALID_VERIFICATION');
+      proof.kind === 'evolved' && typeof proof.session_id !== 'string' ||
+      proof.kind === 'knowledge' && typeof proof.session_id !== 'string' &&
+        !(proof.session_id === null && typeof proof.approval === 'string' && /^[a-f0-9]{64}$/.test(proof.approval) &&
+          proof.replay_ids.length === 0 && proof.validation_id === null)) throw new InputError('OPENVIKING_INVALID_VERIFICATION');
   if (proof.validation_id !== null) digest(proof.validation_id);
   if (proof.kind === 'evolved' && (!proof.validation_id || !proof.replay_ids.length)) throw new InputError('OPENVIKING_INVALID_VERIFICATION');
   return item as unknown as ProjectManifest;

@@ -47,6 +47,7 @@ import { openKnowledgeSources, type KnowledgeSources } from './knowledge-sources
 import { appendRemoteReads } from './openviking/evidence.js';
 import { readProject } from './openviking/config.js';
 import { FrozenMemoryReader } from './openviking/frozen.js';
+import { createOpenVikingSyncTracker, withOpenVikingSync, type OpenVikingSyncTracker } from './openviking/publication-hint.js';
 import { parseRemoteMemoryId } from './openviking/memory.js';
 
 export function knowledgeHelp(invocation: 'evolve' = 'evolve') {
@@ -328,7 +329,11 @@ export async function runKnowledgeCli(argv: string[], invocation: 'evolve' = 'ev
     process.stdout.write(knowledgeHelp(invocation));
     return;
   }
-  const print = (result: unknown, compact = false) => process.stdout.write(JSON.stringify(result, null, compact ? 0 : 2) + '\n');
+  let openvikingSyncTracker: OpenVikingSyncTracker | undefined;
+  const print = (result: unknown, compact = false) => {
+    const output = withOpenVikingSync(result, openvikingSyncTracker);
+    process.stdout.write(JSON.stringify(output, null, compact ? 0 : 2) + '\n');
+  };
   const isHookCommand = command === 'kb' && ['codex-hook', 'host-hook', 'session-start-hook'].includes(action ?? '');
   const hookInput: unknown = isHookCommand ? await readMemoryHookInput() : undefined;
   const rawRoot = values['root-b64'] !== undefined
@@ -375,6 +380,9 @@ export async function runKnowledgeCli(argv: string[], invocation: 'evolve' = 'ev
   if (frozen && command === 'kb' && (action !== undefined && frozenWrites[action] || (action === 'reminders' && args[0] === 'ack'))) {
     throw new InputError('Frozen knowledge is read-only');
   }
+  openvikingSyncTracker = createOpenVikingSyncTracker({
+    command, action, args, apply: values.apply, root, writeScope, wiki, frozen: Boolean(frozen),
+  });
   let activeKnowledge: KnowledgeSources | undefined;
   let readSourcesPending: Promise<KnowledgeSources> | undefined;
   const readSources = () => readSourcesPending ??= openKnowledgeSources(root, {

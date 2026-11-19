@@ -37,7 +37,7 @@ export interface ProjectManifest {
   memory: SharedMemory[];
   verification: {
     kind: 'bootstrap' | 'evolved' | 'knowledge'; session_id: string | null;
-    replay_ids: string[]; validation_id: string | null;
+    replay_ids: string[]; validation_id: string | null; approval?: string;
   };
 }
 export interface ProjectHead {

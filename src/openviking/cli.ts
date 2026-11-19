@@ -9,6 +9,7 @@ import { projectFile, readProject, replaceJson } from './config.js';
 import { loadRelease, readProjectHead } from './assets.js';
 import { selectMemory } from './knowledge.js';
 import { manageEvolutionPolicy } from './policy.js';
+import { previewWikiPublication, publishWikiPublication } from './wiki-publication.js';
 
 export const openVikingHelp = [
   'evolve openviking init [--policy <file>] [--project-id <UUID>] [--root <project>]',
@@ -18,9 +19,13 @@ export const openVikingHelp = [
   'evolve openviking sync --session <id> --actor <actor> --expected-orchestration-revision <n> [--request-id <id>]',
   'evolve openviking finish --session <id> --actor <actor> --expected-orchestration-revision <n> [--candidate-commit <sha>] [--request-id <id>]',
   'evolve openviking memory share|unshare <local-memory-id> [--root <project>]',
+  'evolve openviking knowledge preview [entries/<id> ...] [--root <project>]',
+  'evolve openviking knowledge publish --approval <preview-sha256> [--root <project>]',
   'No project profile: local backend. init enables OpenViking; failure-policy defaults to local.',
   'init defaults to .evolve/evolution.json and creates an empty policy when absent. Empty targets sync assets without evolving Skills.',
   'policy previews by default; --apply creates a local Git commit and never publishes.',
+  'sync prepares/pulls Session assets; finish publishes completed Session assets. Use knowledge for Wiki approved after closeout or without a Session.',
+  'knowledge preview reads remote state without uploading; publish requires authorization for the exact preview and preserves remote Skills/Memory.',
   'Fallback never publishes, bypasses integrity checks, or substitutes local data for an ov: ID.',
 ].join('\n');
 
@@ -28,13 +33,20 @@ export async function runOpenVikingCli(argv: string[]): Promise<void> {
   const string = { type: 'string' } as const;
   const { values, positionals: [action, ...args] } = parseArgs({ args: argv, allowPositionals: true, options: {
     root: string, policy: string, 'project-id': string, session: string, actor: string,
-    entry: string, runner: string, scenarios: string, apply: string,
+    entry: string, runner: string, scenarios: string, apply: string, approval: string,
     'expected-orchestration-revision': string, 'request-id': string, 'candidate-commit': string,
     enabled: string, 'failure-policy': string, help: { type: 'boolean', short: 'h' }, json: { type: 'boolean' },
   } });
   if (!action || values.help) { process.stdout.write(openVikingHelp + '\n'); return; }
   const root = resolve(values.root ?? '.');
   const print = (value: unknown) => { process.stdout.write(JSON.stringify(value, null, 2) + '\n'); };
+  if (action === 'knowledge') {
+    if (values.session !== undefined || values.actor !== undefined || values.policy !== undefined || values.apply !== undefined ||
+        values['candidate-commit'] !== undefined || values['expected-orchestration-revision'] !== undefined) throw new InputError(openVikingHelp);
+    if (args[0] === 'preview' && values.approval === undefined) return print(await previewWikiPublication(root, args.slice(1)));
+    if (args[0] === 'publish' && args.length === 1) return print(await publishWikiPublication(root, requireText(values.approval, 'preview approval SHA-256')));
+    throw new InputError(openVikingHelp);
+  }
   if (action === 'init') {
     if (args.length) throw new InputError(openVikingHelp);
     return print(await initializeProject(root, values.policy, values['project-id']));
