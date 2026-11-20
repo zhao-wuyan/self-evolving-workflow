@@ -28,6 +28,7 @@
   { "id": "ew-impeccable", "path": "skills/ew-impeccable/SKILL.md" },
   { "id": "ew-swarm", "path": "skills/ew-swarm/specs/swarm-protocol.md" },
   { "id": "ew-knowledge", "path": "skills/ew-knowledge/SKILL.md" },
+  { "id": "ew-openviking", "path": "skills/ew-openviking/SKILL.md" },
   { "id": "ew-skill-design", "path": "skills/ew-skill-design/references/package-contract.md" },
   { "id": "workflow-evolve", "path": "skills/workflow-evolve/references/auto-loop.md" }
 ]

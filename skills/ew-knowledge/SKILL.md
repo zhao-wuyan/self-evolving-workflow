@@ -18,6 +18,7 @@ version: 0.2.0
 
 | 用户意图 | 路由 | 默认权限 | 主要入口 |
 | --- | --- | --- | --- |
+| OpenViking 存放分工、全局领域经验、原生 Memory / Resource 与项目同步 | `openviking` | 先识别作用域与现有能力 | 加载 `ew-openviking`（`evolve skill workflows show ew-openviking`）；本 Skill 保留 Wiki 治理职责 |
 | 查约束、查参考、查术语、查 Wiki / 记忆 | `read` | 只读 | `evolve search --mode context` / `kb list --kind constraint` / `kb search --kind reference` / `kb get` / `kb search` |
 | 记录或同步多宿主工作记忆 | `memory` | 显式写入记忆库 | `evolve kb add --kind episodic` / `evolve kb extract\|config\|sync\|reminders` |
 | Session 或独立 Skill/对话完成后的收尾沉淀 | `closeout` | 生成候选（同内容活跃 project `reference` 自动补证并留变更记录） | `evolve kb harvest session\|conversation\|skill\|receipt\|scan`（Skill 收尾可带 `--knowledge-receipt <file>`） |
