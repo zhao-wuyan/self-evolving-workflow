@@ -48,6 +48,8 @@ evolve kb search "<query>" --root <project> --kind episodic --scene <scene> --ty
 
 个人经验在 OpenViking 私有 `resources/evolve/personal-experience` 下独立保存，不是原生会话采集、项目 release、Memory 或正式 Wiki 约束。默认没有配置，不改变现有项目行为。
 
+涉及“全局”含义、原生 Memory / Experience、领域资料、个人经验与项目 release 的存放选择时，先加载 `ew-openviking`（`evolve skill workflows show ew-openviking`）。它补充 Evolve 集成规则，不替代 OpenViking 官方指导；原生 Memory 也能存经验，不能仅凭“技术经验”就搬迁或改写官方存储。
+
 在目标 Git 仓库根目录运行 `evolve experience enable`。它用现有 OpenViking 连接确认身份，自动创建或更新用户级 `~/.evolve/experience.json`，只把当前工作树真实路径加入采集名单，不保存或复制 API key。用 `evolve experience status` 查看开关；`evolve experience disable` 在本地关闭当前仓库，不删除远端经验。隔离测试可用绝对路径的 `EVOLVE_EXPERIENCE_CONFIG` 覆盖配置位置。
 
 未启用的仓库可查询已有参考，但不贡献候选；仓库内文件不能代替用户授权。由执行 `ew-verify` / `ew-test` 的 AI 根据实际通过的检查写入提炼字段，不另起模型；只有完成 Session 后的封存证据可被列入 `evolve experience pending`。候选审阅及发布规则见[收尾协议](closeout-protocol.md)。
