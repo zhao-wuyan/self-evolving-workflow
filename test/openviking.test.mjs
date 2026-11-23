@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, cpSync } from 'node:fs';
 import { join } from 'node:path';
+import { cli } from './evolve-workflow-support.mjs';
 import { protocol, projectFixture, releaseFromProject, seed, fakeAgy, completeSample } from './openviking-support.mjs';
 import { readPolicy, readProject, validateEvolutionPolicy, validateProject } from '../dist/openviking/config.js';
 import { prepareEvolutionScenarios } from '../dist/openviking/evolution-scenarios.js';
@@ -227,7 +228,7 @@ test('CLI and HTTP read the same full Memory bytes and all repository-scoped con
   const envelope = f.evolve('search', 'Deployment', '--mode', 'context', '--include-memory', '--limit', '1', '--reads', reads);
   assert.equal(envelope.constraints.length, 12);
   assert.ok(envelope.constraints.every(item => !/Retired|Not applicable/.test(item.content)));
-  const found = f.evolve('kb', 'search', '00123', '--kind', 'episodic', '--reads', reads);
+  const found = f.evolve('kb', 'search', '00123', '--kind', 'episodic', '--reads', reads, '--verbose');
   assert.equal(found.results.length, 1);
   const id = found.results[0].id;
   assert.match(id, /^ov:[a-f0-9]{64}:/);
@@ -236,6 +237,18 @@ test('CLI and HTTP read the same full Memory bytes and all repository-scoped con
   assert.equal(loaded.content, content); assert.deepEqual(loaded.sourceMessageIds, record.sourceMessageIds);
   assert.equal(loaded.openviking_reads[0].content_sha256, sha256(content));
   assert.equal(loaded.openviking_reads[0].via, 'cache');
+  const picked = f.evolve('kb', 'get', '--pick', '1', '--kind', 'episodic', '--reads', reads);
+  assert.equal(picked.content, content);
+  assert.ok(picked.openviking_reads.some(item => item.record_id === id && item.content_sha256 === sha256(content)));
+  const batch = f.evolve('kb', 'get', `${found.search_id}:1`, id, '--kind', 'episodic', '--reads', reads);
+  assert.deepEqual(batch.results.map(item => item.content), [content, content]);
+  const priorRemoteReads = JSON.parse(readFileSync(reads + '.openviking.json')).reads.length;
+  const compact = f.run(process.execPath, [cli,
+    'kb', 'get', id, '--kind', 'episodic', '--reads', reads, '--format', 'compact']);
+  assert.ok(compact.includes('End of original record.'));
+  const compactRemoteReads = JSON.parse(readFileSync(reads + '.openviking.json')).reads;
+  assert.equal(compactRemoteReads.length, priorRemoteReads + 1);
+  assert.equal(compactRemoteReads.at(-1).record_id, id);
   const sources = await openKnowledgeSources(f.root, { includeMemory: true });
   const http = createSearchServer(sources);
   await new Promise(resolve => http.listen(0, '127.0.0.1', resolve));
@@ -245,7 +258,7 @@ test('CLI and HTTP read the same full Memory bytes and all repository-scoped con
   const httpContext = await (await fetch(`http://127.0.0.1:${http.address().port}/context?q=Deployment&limit=1`)).json();
   assert.equal(httpContext.constraints.length, 12);
   const cliReads = join(f.root, '.agent-memory', 'run-reads.json');
-  const cliFound = f.evolve('kb', 'search', 'Deployment', '--kind', 'episodic', '--reads', cliReads);
+  const cliFound = f.evolve('kb', 'search', 'Deployment', '--kind', 'episodic', '--reads', cliReads, '--verbose');
   const cliLoaded = f.evolve('kb', 'get', id, '--kind', 'episodic', '--reads', cliReads,
     '--from-search', cliFound.knowledge_reads.searches.at(-1).search_id);
   assert.equal(cliLoaded.content, content);

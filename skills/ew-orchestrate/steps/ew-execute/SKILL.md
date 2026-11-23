@@ -73,3 +73,6 @@ session-mode: run
 # Execute
 
 Read [preparation](references/prepare.md), then follow the [workflow](references/workflow.md).
+
+- Dispatch each ready task from `current-plan`'s wave/DAG frontier with a **fresh context window** and **sparse context pointers** (optional shared exploration notes, plan task pointer, Wiki constraints, prior summaries/commits).
+- Isolate concurrent edits in dedicated worktrees/branches (`evolve skill workflows show session-run` for host workspace-isolation mapping) with a dedicated merger step when tasks share files or build state, and use a single fresh fixer subagent for any post-execution diff review fixes.

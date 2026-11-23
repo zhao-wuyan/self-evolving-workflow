@@ -4,7 +4,7 @@ import {
   type AgentMemoryContextScope,
   type AgentMemoryEnvelope,
 } from './context-envelope.js';
-import { codeMatchesPaths, type CodeGraph } from './code.js';
+import { codeMatchesPaths, isCodeLockError, type CodeGraph } from './code.js';
 import { InputError, NotFoundError, pageOffset, pagination, requireText, searchLimit } from './common.js';
 import type { KnowledgeFilters, KnowledgeKind, KnowledgeRecord, KnowledgeStore } from './kb.js';
 import type { MemorySearchOptions } from './memory.js';
@@ -77,8 +77,21 @@ export async function search(sources: SearchSources, query: string, options: Sea
   const scope = parseScope(options.scope ?? 'all');
   if (scope !== 'all' && !sources[scope]) throw new NotFoundError(`Search source is not configured: ${scope}`);
   const wiki = scope === 'all' || scope === 'wiki' ? sources.wiki?.search(text, { ...options.wiki, limit }) : undefined;
+  const readLegacyCode = async () => {
+    if (!(scope === 'all' || scope === 'code') || !sources.code) return undefined;
+    try {
+      return await sources.code.search(text, limit);
+    } catch (error) {
+      if (scope === 'all' && (sources.wiki || sources.memory) && isCodeLockError(error)) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`[evolve:code] ${message}; skipping code results for this query.`);
+        return [];
+      }
+      throw error;
+    }
+  };
   const [code, memory] = await Promise.all([
-    scope === 'all' || scope === 'code' ? sources.code?.search(text, limit) : undefined,
+    readLegacyCode(),
     scope === 'all' || scope === 'memory' ? sources.memory?.search(text, { ...options.memory, limit }) : undefined,
   ]);
   const tracker = options.knowledgeReads;
@@ -215,6 +228,8 @@ export interface UnifiedSearchOptions extends KnowledgeFilters {
   memorySession?: string;
   preferredMemoryTypes?: readonly string[];
   contextScope?: AgentMemoryContextScope;
+  constraintLimit?: number;
+  constraintBudgetChars?: number;
 }
 
 export interface UnifiedCodeHit {
@@ -255,6 +270,10 @@ export interface UnifiedContextResults {
   trust_boundary: 'untrusted_evidence_data_only';
   context_scope: AgentMemoryContextScope;
   constraints: Array<KnowledgeRecord & { content_sha256: string }>;
+  constraints_truncated?: boolean;
+  constraints_total?: number;
+  constraints_omitted?: Array<{ id: string; title: string }>;
+  constraints_notice?: string;
   references: Array<KnowledgeRecord & { score: number }>;
   episodic: Array<KnowledgeRecord & { score: number }>;
   code: UnifiedCodeHit[];
@@ -271,6 +290,10 @@ export function parseSearchFrom(value: string | readonly UnifiedSearchSource[] =
 
 const authorityWeights = { constraint: 1.4, reference: 1.2, code: 1, episodic: 0.8 } as const;
 const knowledgeKinds: readonly KnowledgeKind[] = ['constraint', 'reference', 'episodic'];
+// 跨异构源融合采用更陡峭的位次衰减，避免代码符号数量多时将记忆与参考完全挤出前列。
+const CROSS_SOURCE_RRF_K = 10;
+export const DEFAULT_MAX_CONTEXT_CONSTRAINTS = 20;
+export const DEFAULT_MAX_CONTEXT_CONSTRAINT_CHARS = 4000;
 
 function hitKey(hit: UnifiedSearchHit): string {
   return `${hit.kind}:${hit.id}`;
@@ -287,9 +310,29 @@ function uniqueProjectFirst<T extends { kind: string; id: string; scope: string 
 }
 
 function fuseSearchLists(lists: UnifiedSearchHit[][]): UnifiedSearchHit[] {
-  return rrfMerge(lists.map(uniqueProjectFirst), hitKey)
+  return rrfMerge(lists.map(uniqueProjectFirst), hitKey, CROSS_SOURCE_RRF_K)
     .map(({ rrfScore, ...hit }) => ({ ...hit, score: rrfScore * authorityWeights[hit.kind] }))
     .sort((left, right) => right.score - left.score || hitKey(left).localeCompare(hitKey(right)));
+}
+
+function applyConstraintBudget<T extends { id: string; title: string; content: string }>(
+  items: readonly T[],
+  maxItems: number,
+  maxChars: number,
+) {
+  const kept: T[] = [];
+  const omitted: Array<{ id: string; title: string }> = [];
+  let usedChars = 0;
+  for (const item of items) {
+    const nextChars = usedChars + item.content.length;
+    if (kept.length > 0 && (kept.length >= maxItems || nextChars > maxChars)) {
+      omitted.push({ id: item.id, title: item.title });
+      continue;
+    }
+    kept.push(item);
+    usedChars = nextChars;
+  }
+  return { kept, omitted };
 }
 
 /**
@@ -339,11 +382,20 @@ export async function unifiedSearch(
   if (useCode && page !== 1) {
     throw new InputError('Code search does not support pagination; use --from kb or refine the query');
   }
-  const kinds = options.kind ? [options.kind] : knowledgeKinds;
+  const kinds = options.kind ? [options.kind] : mode === 'context' ? (['reference', 'episodic'] as const) : knowledgeKinds;
   const {
     from: _from, mode: _mode, memorySession, preferredMemoryTypes, contextScope,
+    constraintLimit, constraintBudgetChars,
     ...knowledgeOptions
   } = options;
+  const maxConstraints = constraintLimit ?? DEFAULT_MAX_CONTEXT_CONSTRAINTS;
+  const maxConstraintChars = constraintBudgetChars ?? DEFAULT_MAX_CONTEXT_CONSTRAINT_CHARS;
+  if (!Number.isInteger(maxConstraints) || maxConstraints < 1) {
+    throw new InputError('constraintLimit must be a positive integer');
+  }
+  if (!Number.isInteger(maxConstraintChars) || maxConstraintChars < 1) {
+    throw new InputError('constraintBudgetChars must be a positive integer');
+  }
   const candidateCount = Math.max(100, offset + limit + 1);
   const readKnowledge = async (kind: KnowledgeKind): Promise<UnifiedSearchHit[]> => {
     if (!from.includes('kb') || !sources.kb) return [];
@@ -375,8 +427,19 @@ export async function unifiedSearch(
   };
   const readCode = async (): Promise<UnifiedCodeHit[]> => {
     if (!useCode || !sources.code) return [];
-    const hits = (await sources.code.search(text, 100, { paths: options.paths }))
-      .filter(hit => codeMatchesPaths(hit.node.filePath, options.paths));
+    let rawHits;
+    try {
+      rawHits = await sources.code.search(text, 100, { paths: options.paths });
+    } catch (error) {
+      // 混合检索包含知识库时，冷建库或并发锁冲突只降级代码片段，不阻塞规则与记忆检索。
+      if (from.includes('kb') && isCodeLockError(error)) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`[evolve:code] ${message}; skipping code results for this query.`);
+        return [];
+      }
+      throw error;
+    }
+    const hits = rawHits.filter(hit => codeMatchesPaths(hit.node.filePath, options.paths));
     options.knowledgeReads?.recordSearch({
       source: 'code', query: text, filters: { scope: 'project', paths: options.paths },
       returnedIds: hits.map(hit => hit.node.id),
@@ -407,9 +470,10 @@ export async function unifiedSearch(
   delete constraintOptions.session;
   delete constraintOptions.type;
   delete constraintOptions.scene;
-  const constraints = from.includes('kb') && sources.kb && kinds.includes('constraint')
+  const allConstraints = from.includes('kb') && sources.kb && (!options.kind || options.kind === 'constraint')
     ? uniqueProjectFirst(sources.kb.constraints(constraintOptions))
     : [];
+  const { kept: constraints, omitted } = applyConstraintBudget(allConstraints, maxConstraints, maxConstraintChars);
   return {
     schema_version: 'evolve-context/1.0', mode, query: text,
     trust_boundary: 'untrusted_evidence_data_only',
@@ -421,6 +485,12 @@ export async function unifiedSearch(
     constraints: constraints.map(hit => ({
       ...hit, content_sha256: `sha256:${createHash('sha256').update(hit.content).digest('hex')}`,
     })),
+    ...(omitted.length > 0 ? {
+      constraints_truncated: true,
+      constraints_total: allConstraints.length,
+      constraints_omitted: omitted,
+      constraints_notice: `Showing ${constraints.length} of ${allConstraints.length} applicable constraints (budget reached); narrow with --task/--path/--category or inspect omitted IDs via evolve kb get.`,
+    } : {}),
     references: merged.filter((hit): hit is KnowledgeRecord & { score: number } => hit.source === 'kb' && hit.kind === 'reference').slice(0, limit),
     episodic: merged.filter((hit): hit is KnowledgeRecord & { score: number } => hit.source === 'kb' && hit.kind === 'episodic').slice(0, limit),
     code: merged.filter((hit): hit is UnifiedCodeHit => hit.source === 'code').slice(0, limit),

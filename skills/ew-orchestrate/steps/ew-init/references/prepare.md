@@ -6,7 +6,8 @@ Confirm repository state, bootstrap prerequisites, and Evolve-native boundaries 
 
 - **Interactive (default)**: auto-detects greenfield vs initialized vs legacy Maestro vs brownfield, then collects missing project context.
 - **`-y`**: auto-initializes from `--from`, `@file`/prompt text, or brownfield codebase scan without interactive interviews (`-y` still NEVER authorizes unapproved Wiki publication).
-- **`--refresh`**: when Path D (`initialized`) is detected, re-scans codebase / CodeGraph and refreshes `outputs/init-report.json` + `outputs/context-package.json` without mutating existing active Wiki entries or Session state.
+- **`--refresh`**: when Path D (`initialized`) is detected, re-scans codebase / CodeGraph, domain assets, and guardrail baseline, refreshing `outputs/init-report.json`, `outputs/project-brief.md`, and `outputs/context-package.json` without mutating existing active Wiki entries or Session state.
+- **`--visual`**: generate a self-contained HTML onboarding & architecture visual report (`outputs/visual-report.html` per `evolve skill workflows show visual-report`) alongside the Markdown Mermaid map in `outputs/project-brief.md`.
 - **`--from <alias>`**: consume bound `upstream-context` (`context-package.json`) to populate vision, goals, locked constraints, non-goals, and terminology without repeating discovery.
 
 ## State Detection Rules (`state-detected` gate)

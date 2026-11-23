@@ -59,6 +59,13 @@ try {
     "  assert.ok(replayCli && configPath);",
     "  assert.match(prompt, /memory-search/);",
     "  assert.match(prompt, /skill-read/);",
+    "  const staging = call('memory-search', 'canary');",
+    "  const shortHexHit = staging.results.find(item => item.id.length === 8);",
+    "  assert.ok(shortHexHit);",
+    "  const hexRecord = call('memory-get', shortHexHit.id);",
+    "  assert.equal(hexRecord.id, 'deadbeef'.repeat(8));",
+    "  const byHandle = call('memory-get', `${staging.search_id}:${shortHexHit.idx}`);",
+    "  assert.equal(byHandle.id, 'deadbeef'.repeat(8));",
     "  call('memory-search', 'staging');",
     "  call('memory-search', 'migration');",
     "  call('memory-get', 'migration-check');",
@@ -71,7 +78,9 @@ try {
     "});",
   ].join('\n'));
   const db = join(fixture, 'memory.db');
+  const shaHexId = 'deadbeef'.repeat(8);
   run(process.execPath, [cli, 'kb', 'add', 'Staging migration checks', '--db', db, '--id', 'migration-check']);
+  run(process.execPath, [cli, 'kb', 'add', 'Staging canary rollout gate', '--db', db, '--id', shaHexId]);
   const env = { ...process.env, CODEX_REPLAY_EXECUTABLE: fakeCodex, AGENT_MEMORY_DB: db, FIXTURE_ENTRY: entry,
     MAESTRO_REPLAY_CLI: join(fixture, 'unused-host.js'), AGENT_MEMORY_REPLAY_CLI: join(fixture, 'unused-alias.js') };
   const replay = (options = {}) => run(process.execPath, [runner], {
@@ -97,9 +106,9 @@ try {
   assert.deepEqual(result.loaded, [
     { path: entry, sha256: sha256(baseline) }, { path: reference, sha256: sha256(guidance) },
   ]);
-  assert.deepEqual(result.knowledge_reads.searches.map(search => search.search_id), ['search-1', 'search-2']);
-  assert.equal(result.knowledge_reads.reads[0].id, 'migration-check');
-  assert.equal(result.knowledge_reads.reads[0].from_search_id, 'search-2');
+  assert.deepEqual(result.knowledge_reads.searches.map(search => search.search_id), ['search-1', 'search-2', 'search-3']);
+  assert.ok(result.knowledge_reads.reads.some(read => read.id === shaHexId && read.from_search_id === 'search-1'));
+  assert.ok(result.knowledge_reads.reads.some(read => read.id === 'migration-check' && read.from_search_id === 'search-3'));
   assert.throws(() => replay({ env: { FIXTURE_OMIT_LINK: '1' } }), /needs Skill reads/);
   assert.throws(() => replay({ commit: 'a'.repeat(40) }), /checkout must match/);
   console.log('Native replay verified Git-bound Skill reads and Agent Memory search provenance.');

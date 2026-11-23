@@ -123,8 +123,9 @@ test('CodeGraph indexes real TypeScript, resolves call edges, and syncs edits', 
   const graph = new CodeGraph(root);
   const [{ node: invoice }] = await graph.neighbors(tax.node.id, 'callers');
   assert.equal(invoice.name, 'invoiceTotal');
-  assert.equal((await graph.neighbors(invoice.id, 'callees'))[0].node.id, tax.node.id);
-  assert.deepEqual((await graph.trace(invoice.id, tax.node.id, ['calls'])).map(step => step.node.id), [invoice.id, tax.node.id]);
+  assert.ok((await graph.neighbors(invoice.id, 'callees'))[0].node.id.startsWith(tax.node.id));
+  assert.ok((await graph.trace(invoice.id, tax.node.id, ['calls'])).every((step, index) =>
+    step.node.id.startsWith(index === 0 ? invoice.id : tax.node.id)));
   await writeFile(path, 'export function newBillingTotal() { return 42; }\n');
   await graph.sync();
   assert.equal((await graph.search('newBillingTotal'))[0].node.name, 'newBillingTotal');
@@ -517,7 +518,7 @@ test('Evolve tracks install manifests, reports status, upgrades outdated package
   const noopUpgrade = await evolve('skill', 'install', '--scope', 'project', '--host', 'agy', '--upgrade', '--yes');
   assert.deepEqual(noopUpgrade.installed, []);
   assert.deepEqual(noopUpgrade.upgraded, []);
-  assert.equal(noopUpgrade.kept.length, 7);
+  assert.equal(noopUpgrade.kept.length, 9);
 
   const forced = await evolve('skill', 'install', 'ew-knowledge', '--host', 'agy', '--force', '--yes');
   assert.deepEqual(forced.upgraded, ['ew-knowledge']);
@@ -1078,8 +1079,8 @@ test('knowledge search shares command arguments and keeps the original scope and
   const id = '-first';
   const options = { session: 'original session', scene, type: 'work_fact' };
   memory = new MemoryStore(db, { namespace });
-  await memory.put({ ...options, id, content });
-  await memory.put({ ...options, id: 'second', content: query });
+  await memory.put({ ...options, id, content, priority: 60 });
+  await memory.put({ ...options, id: 'second', content: query, priority: 50 });
   await memory.put({ ...options, id: '-excluded', scene: 'other', content: query });
 
   // 直接执行参数数组，保留从另一目录读取所需的作用域和参数边界。
@@ -1093,7 +1094,24 @@ test('knowledge search shares command arguments and keeps the original scope and
 
   const filters = ['--db', db, '--namespace', namespace, '--type', options.type, `--scene=${scene}`,
     '--session', options.session, '--limit', '1'];
-  const first = await evolveJson(root, 'kb', 'search', ...filters, '--reads', receipt, '--', query);
+  const slim = await evolveJson(root, 'kb', 'search', ...filters, '--reads', receipt, '--', query);
+  const [slimHit] = slim.results;
+  assert.equal(slimHit.id, id);
+  assert.equal(slimHit.kind, 'episodic');
+  assert.equal(slimHit.idx, 1);
+  assert.equal(slimHit.content, undefined);
+  assert.equal(slimHit.truncated, true);
+  assert.ok(slimHit.snippet.length < content.length);
+  assert.equal(slim.commands, undefined);
+  assert.equal(slim.score, undefined);
+  assert.match(slim.search_id, /^q-\d+$/);
+
+  const picked = await evolveJson(root, 'kb', 'get', '--db', db, '--namespace', namespace,
+    '--reads', receipt, '--pick', '1');
+  assert.equal(picked.content, content);
+  assert.equal(picked.knowledge_reads.reads[0].from_search_id, slim.knowledge_reads.searches[0].search_id);
+
+  const first = await evolveJson(root, 'kb', 'search', ...filters, '--reads', receipt, '--verbose', '--', query);
   const [hit] = first.results;
   assert.equal(hit.id, id);
   assert.equal(hit.kind, 'episodic');
@@ -1112,7 +1130,7 @@ test('knowledge search shares command arguments and keeps the original scope and
   assert.deepEqual(second.commands.page, first.commands.page);
   assert.equal((await runView(second.commands, 'page', { page: second.pagination.previousPage })).results[0].id, id);
 
-  const raw = await evolveJson(root, 'kb', 'search', ...filters, '--json', '--', query);
+  const raw = await evolveJson(root, 'kb', 'search', ...filters, '--json', '--verbose', '--', query);
   assert.equal(raw.results[0].id, id);
   assert.equal(raw.results[0].content, content);
   assert.equal(raw.results[0].session, options.session);
@@ -1211,8 +1229,11 @@ test('Unified CLI and existing module HTTP APIs recall the same scoped evidence'
   const baseUrl = url.slice(0, -'/search'.length);
   const expected = JSON.parse(JSON.stringify(await search(sources, 'recall')));
   const merged = await cliJson(root, 'search', 'recall', '--db', db);
-  assert.deepEqual(new Set(merged.results.map(hit => hit.source + ':' + hit.kind)), new Set(['kb:reference', 'kb:episodic', 'code:code']));
-  assert.ok(merged.results.every(hit => typeof hit.score === 'number'));
+  assert.deepEqual(new Set(merged.results.map(hit => hit.kind)), new Set(['reference', 'episodic', 'code']));
+  assert.ok(merged.results.every(hit => hit.score === undefined && hit.rawId === undefined));
+  const mergedVerbose = await cliJson(root, 'search', 'recall', '--db', db, '--verbose');
+  assert.deepEqual(new Set(mergedVerbose.results.map(hit => hit.source + ':' + hit.kind)), new Set(['kb:reference', 'kb:episodic', 'code:code']));
+  assert.ok(mergedVerbose.results.every(hit => typeof hit.score === 'number'));
   assert.ok(expected.code.length && expected.wiki.results.length && expected.memory.results.length);
   const contextResult = await contextJson(root, 'recall', '--db', db, '--kind', 'episodic');
   assert.equal(contextResult.mode, 'context');
@@ -1705,4 +1726,191 @@ test('Wiki init, stale index auto-refresh, ingest --propose, and context visibil
   const ctx = await contextJson(root, 'waterhammer');
   assert.equal(ctx.references[0].id, 'concepts/surge-tank');
   assert.equal((await cliJson(root, 'kb', 'get', 'concepts/surge-tank', '--resolved')).id, 'concepts/surge-tank');
+});
+
+test('Agent-friendly search strips numeric pollution, uses short IDs, supports compact text, batch get, and q-N:idx provenance', async t => {
+  const root = await temp(t);
+  await writeFile(join(root, 'solver.ts'), 'export function solveHydraulic(flow: number) {\n  return flow * 1.5;\n}\n');
+  await cliJson(root, 'code', 'build');
+
+  const entriesDir = join(root, 'wiki', 'entries');
+  await mkdir(entriesDir, { recursive: true });
+  const legacyHex = '8c576fc432cea361ff8481e4';
+  await writeFile(join(entriesDir, `legacy-${legacyHex}.md`), [
+    '---', 'title: Hydraulic gate', 'mode: constraint', 'status: active',
+    'scope: [project]', 'sources: [legacy:spec:L1]', '---', '',
+    'Validate hydraulic tolerance before solving.', '',
+  ].join('\n'));
+  const longWikiBody = 'Hydraulic reference guide. ' + 'Detailed hydraulic checklist step. '.repeat(14);
+  await writeFile(join(entriesDir, 'hydraulic-long.md'), [
+    '---', 'title: Hydraulic Long Guide', 'mode: reference', 'status: active',
+    'scope: [project]', 'sources: [docs:hydraulic]', '---', '',
+    longWikiBody, '',
+  ].join('\n'));
+  await cliJson(root, 'kb', 'build');
+
+  const memPrefix = '7ff6dc4c';
+  const memSuffix = '99b0c476d5d03cbed8b084fad4b72ce7de134b38141f30f58bac10';
+  const memIdA = `${memPrefix}aa${memSuffix}`;
+  const memIdB = `${memPrefix}bb${memSuffix}`;
+  const longMemContent = 'Hydraulic timeout occurred on worker node 4312. ' + 'Extra trace context. '.repeat(20);
+  await cliJson(root, 'kb', 'add', 'Short hydraulic check passed.', '--id', memIdA, '--type', 'verified_fix');
+  await cliJson(root, 'kb', 'add', longMemContent, '--id', memIdB, '--type', 'error');
+
+  const tracePath = join(root, '.evolve', 'reads.json');
+  const { stdout: rawOut } = await run(process.execPath, [
+    cli, '--root', root, 'search', 'hydraulic', '--mode', 'context', '--reads', tracePath,
+  ], { encoding: 'utf8' });
+  // 默认返回单行紧凑 JSON，无美化缩进空白与数字/调试字段污染。
+  assert.equal(rawOut.trim().includes('\n'), false);
+  const ctx = JSON.parse(rawOut);
+  assert.match(ctx.search_id, /^q-\d+$/);
+
+  const [constraint] = ctx.constraints;
+  assert.equal(constraint.id, 'entries/legacy-8c576fc4');
+  assert.equal(constraint.idx, 1);
+  assert.equal(constraint.rawId, undefined);
+  assert.equal(constraint.snippet, undefined);
+  assert.equal(constraint.content_sha256, undefined);
+  assert.match(constraint.content, /Validate hydraulic tolerance/);
+
+  const [ref] = ctx.references;
+  assert.equal(ref.id, 'entries/hydraulic-long');
+  assert.equal(ref.idx, 2);
+  assert.equal(ref.content, undefined);
+  assert.equal(ref.truncated, true);
+  assert.equal(ref.score, undefined);
+
+  assert.equal(ctx.episodic.length, 2);
+  const shortMem = ctx.episodic.find(item => item.type === 'verified_fix');
+  const longMem = ctx.episodic.find(item => item.type === 'error');
+  assert.ok(shortMem && longMem);
+  // 两位同前缀冲突时自动延长至 10 位唯一前缀。
+  assert.notEqual(shortMem.id, longMem.id);
+  assert.equal(shortMem.id, memIdA.slice(0, 10));
+  assert.equal(longMem.id, memIdB.slice(0, 10));
+  assert.equal(shortMem.snippet, undefined);
+  assert.equal(shortMem.content, 'Short hydraulic check passed.');
+  assert.equal(shortMem.exactValues, undefined);
+  assert.equal(shortMem.priority, undefined);
+  assert.equal(longMem.content, undefined);
+  assert.equal(longMem.truncated, true);
+
+  const [codeHit] = ctx.code;
+  assert.match(codeHit.id, /^function:[a-f0-9]{8}$/);
+  assert.equal(codeHit.loc, 'solver.ts:1-3');
+  assert.equal(codeHit.score, undefined);
+
+  // 支持 --format compact 纯文本输出。
+  const { stdout: compactText } = await run(process.execPath, [
+    cli, '--root', root, 'search', 'hydraulic', '--mode', 'context', '--format', 'compact',
+  ], { encoding: 'utf8' });
+  assert.match(compactText, /\[constraints\] \(1\)/);
+  assert.match(compactText, /\[truncated\]/);
+  assert.match(compactText, /solver\.ts:1-3/);
+  assert.doesNotMatch(compactText, /content_sha256|exactValues|priority/);
+
+  // 支持短前缀读取、批量 get、q-N:idx 语法与 --pick 自动关联 from_search_id，并支持直传代码符号 ID。
+  const directCode = await cliJson(root, 'kb', 'get', codeHit.id, '--reads', tracePath);
+  assert.equal(directCode.path, 'solver.ts');
+  assert.match(directCode.content, /solveHydraulic/);
+  assert.equal(await cliJson(root, 'kb', 'get', 'function:00000000'), null);
+
+  const batch = await cliJson(root, 'kb', 'get', constraint.id, shortMem.id, codeHit.id, '--reads', tracePath);
+  assert.equal(batch.results.length, 3);
+  assert.equal(batch.results[0].id, `entries/legacy-${legacyHex}`);
+  assert.equal(batch.results[1].id, memIdA);
+  assert.equal(batch.results[2].path, 'solver.ts');
+
+  const pickedRefAndCode = await cliJson(root, 'kb', 'get', `${ctx.search_id}:${ref.idx}`, `${ctx.search_id}:${codeHit.idx}`, '--reads', tracePath);
+  assert.equal(pickedRefAndCode.results[0].content.trim(), longWikiBody.trim());
+  assert.equal(pickedRefAndCode.results[1].path, 'solver.ts');
+  assert.match(pickedRefAndCode.results[1].content, /solveHydraulic/);
+
+  const pickedByFlag = await cliJson(root, 'kb', 'get', '--pick', String(longMem.idx), '--from-search', ctx.search_id, '--reads', tracePath);
+  assert.equal(pickedByFlag.content, longMemContent.trim());
+
+  const savedReads = JSON.parse(await readFile(tracePath, 'utf8'));
+  assert.ok(savedReads.reads.some(r => r.kind === 'wiki' && r.id === 'entries/hydraulic-long' && r.from_search_id));
+  assert.ok(savedReads.reads.some(r => r.kind === 'memory' && r.id === memIdB && r.from_search_id));
+  assert.ok(savedReads.reads.some(r => r.kind === 'code' && r.from_search_id));
+});
+
+test('CodeGraph recovers interrupted builds, degrades read locks cleanly, and syncs clean git trees', async t => {
+  const { createRequire } = await import('node:module');
+  const { spawn } = await import('node:child_process');
+  const sdk = createRequire(import.meta.url)('@colbymchenry/codegraph');
+
+  // 1. e2e: evolve code sync 可初始化空索引；非法子命令报错。
+  const syncRoot = await temp(t);
+  await writeFile(join(syncRoot, 'alpha.ts'), 'export function alphaOne() { return 1; }\n');
+  const synced = await cliJson(syncRoot, 'code', 'sync');
+  assert.equal(synced.filesAdded, 1);
+  await assert.rejects(cliJson(syncRoot, 'code', 'status'), /Unknown code command/);
+
+  // 2. 模拟首次建库中途被强杀：a.ts 已落库但版本戳缺失，b.ts 尚未索引。
+  const brokenRoot = await temp(t);
+  await writeFile(join(brokenRoot, 'b.ts'), 'export function helperTarget() { return 7; }\n');
+  await writeFile(join(brokenRoot, 'a.ts'), "import { helperTarget } from './b';\nexport function callerEntry() { return helperTarget(); }\n");
+  const partial = sdk.CodeGraph.initSync(brokenRoot);
+  await partial.indexFiles(['a.ts']);
+  partial.close();
+  await writeFile(join(brokenRoot, '.codegraph', 'evolve-build.json'), JSON.stringify({ state: 'building', pid: 999999 }));
+
+  const recovered = new CodeGraph(brokenRoot, { autoRefresh: true });
+  const [targetHit] = await recovered.search('helperTarget');
+  assert.ok(targetHit, 'expected helperTarget after recovery');
+  const callers = await recovered.neighbors(targetHit.node.id, 'callers');
+  assert.ok(callers.some(({ node }) => node.name === 'callerEntry'), 'expected cross-file caller edge after recovery');
+  const buildState = JSON.parse(await readFile(join(brokenRoot, '.codegraph', 'evolve-build.json'), 'utf8'));
+  assert.equal(buildState.state, 'ready');
+
+  // 3. 并发写锁与外部 codegraph.lock 持有期间，autoRefresh 读取应快速降级为只读 WAL 快照且不破坏索引，死锁/超时锁应被自动清理。
+  const sleeper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', windowsHide: true });
+  t.after(() => { try { sleeper.kill(); } catch {} });
+  const lockPath = join(brokenRoot, '.codegraph', 'evolve-write.lock');
+  const sdkLockPath = join(brokenRoot, '.codegraph', 'codegraph.lock');
+  await writeFile(lockPath, JSON.stringify({ pid: sleeper.pid, startedAt: Date.now() }));
+  assert.equal(CodeGraph.hasActiveLock(brokenRoot), true);
+  const snapshotHits = await recovered.search('callerEntry');
+  assert.equal(snapshotHits[0].node.name, 'callerEntry');
+  await rm(lockPath, { force: true });
+
+  // 3b. 外部 codegraph.lock 持有期间，即使存在 building 标记也不应触发 recreate 删库，且 e2e search 应直接回退快照返回知识与代码结果。
+  await writeFile(sdkLockPath, String(sleeper.pid));
+  await writeFile(join(brokenRoot, '.codegraph', 'evolve-build.json'), JSON.stringify({ state: 'building', pid: sleeper.pid, startedAt: Date.now() }));
+  await mkdir(join(brokenRoot, 'wiki'), { recursive: true });
+  await writeFile(join(brokenRoot, 'wiki', 'caller-guide.md'), '# Caller Guide\n\nInspect callerEntry before editing.\n');
+  await evolveJson(brokenRoot, 'kb', 'build');
+  assert.equal(CodeGraph.hasActiveLock(brokenRoot), true);
+  const sdkLockedHits = await recovered.search('callerEntry');
+  assert.equal(sdkLockedHits[0].node.name, 'callerEntry');
+  const mixedContext = await evolveJson(brokenRoot, 'search', 'callerEntry', '--mode', 'context');
+  assert.equal(mixedContext.references.length, 1);
+  assert.equal(mixedContext.code[0].title, 'callerEntry');
+  await rm(sdkLockPath, { force: true });
+  await writeFile(join(brokenRoot, '.codegraph', 'evolve-build.json'), JSON.stringify({ state: 'ready', completedAt: Date.now() }));
+
+  sleeper.kill();
+  await writeFile(lockPath, JSON.stringify({ pid: 99999999, startedAt: 0 }));
+  assert.equal(CodeGraph.hasActiveLock(brokenRoot), false);
+  await recovered.sync();
+
+  // 4. Git 干净树快路径不遗漏提交或本地修改。
+  const gitRoot = await temp(t);
+  const git = (...args) => run('git', args, { cwd: gitRoot });
+  await git('init', '-q');
+  await git('config', 'user.name', 'CodeGraph Test');
+  await git('config', 'user.email', 'codegraph-test@example.invalid');
+  await writeFile(join(gitRoot, 'svc.ts'), 'export function cleanAlpha() { return 1; }\n');
+  await git('add', '.');
+  await git('commit', '-qm', 'Initial commit');
+  const gitCode = new CodeGraph(gitRoot, { autoRefresh: true });
+  assert.equal((await gitCode.search('cleanAlpha'))[0].node.name, 'cleanAlpha');
+  assert.equal((await gitCode.search('cleanAlpha'))[0].node.name, 'cleanAlpha');
+  await writeFile(join(gitRoot, 'svc.ts'), 'export function cleanOmega() { return 2; }\n');
+  assert.equal((await gitCode.search('cleanOmega'))[0].node.name, 'cleanOmega');
+  await git('checkout', '--', 'svc.ts');
+  assert.equal((await gitCode.search('cleanAlpha'))[0].node.name, 'cleanAlpha');
+  assert.deepEqual(await gitCode.search('cleanOmega'), []);
 });

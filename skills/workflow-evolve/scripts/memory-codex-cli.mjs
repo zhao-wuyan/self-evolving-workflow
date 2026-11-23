@@ -94,13 +94,51 @@ function readSkill(config, args) {
 }
 
 function getMemory(config, id) {
-  if (!id || !id.trim()) throw new Error('Supply a memory ID');
+  const target = id?.trim();
+  if (!target) throw new Error('Supply a memory ID');
   const trace = existsSync(config.tracePath)
     ? JSON.parse(readFileSync(config.tracePath, 'utf8').replace(/^\uFEFF/, ''))
     : { searches: [] };
-  const search = (trace.searches ?? []).findLast(item => Array.isArray(item.returned_ids) && item.returned_ids.includes(id));
-  if (!search) throw new Error('Select a memory ID returned by a search in this replay');
-  return callMemory(config, 'kb', 'get', id, '--from-search', search.search_id);
+  const handleMatch = /^(q-\d+|search-\d+):(\d+)$/i.exec(target);
+  if (handleMatch) {
+    const handleId = handleMatch[1].toLowerCase();
+    const idx = Number(handleMatch[2]);
+    if (handleId.startsWith('q-')) {
+      const query = (trace.queries ?? []).findLast(entry => entry.query_id === handleId);
+      const item = query?.items?.find(entry => entry.idx === idx && entry.kind === 'memory');
+      const searchId = item?.from_search_id ?? (item && (trace.searches ?? []).findLast(s => Array.isArray(s.returned_ids) && s.returned_ids.includes(item.id))?.search_id);
+      if (!item || !searchId) throw new Error('Select a memory ID returned by a search in this replay');
+      return callMemory(config, 'kb', 'get', item.id, '--from-search', searchId);
+    }
+    const search = (trace.searches ?? []).find(entry => entry.search_id === handleId);
+    const resolvedId = idx >= 1 ? search?.returned_ids?.[idx - 1] : undefined;
+    if (!search || !resolvedId) throw new Error('Select a memory ID returned by a search in this replay');
+    return callMemory(config, 'kb', 'get', resolvedId, '--from-search', search.search_id);
+  }
+  const exactSearch = (trace.searches ?? []).findLast(item => Array.isArray(item.returned_ids) && item.returned_ids.includes(target));
+  if (exactSearch) {
+    return callMemory(config, 'kb', 'get', target, '--from-search', exactSearch.search_id);
+  }
+  if (/^[a-f0-9-]{8,}$/i.test(target)) {
+    const lower = target.toLowerCase();
+    const matchedIds = new Set();
+    let matchedSearch;
+    let matchedFullId;
+    for (const item of trace.searches ?? []) {
+      for (const candidate of item.returned_ids ?? []) {
+        if (typeof candidate === 'string' && candidate.toLowerCase().startsWith(lower)) {
+          matchedIds.add(candidate);
+          matchedSearch = item;
+          matchedFullId = candidate;
+        }
+      }
+    }
+    if (matchedIds.size > 1) throw new Error('Ambiguous memory ID prefix: ' + target);
+    if (matchedSearch && matchedFullId) {
+      return callMemory(config, 'kb', 'get', matchedFullId, '--from-search', matchedSearch.search_id);
+    }
+  }
+  throw new Error('Select a memory ID returned by a search in this replay');
 }
 
 const { config, rest } = parseCliArgs(process.argv.slice(2));

@@ -23,7 +23,7 @@ Full mode (`-q` and `--gaps` absent):
 In macro / Session-scoped mode, Step 5 sets `scope_verdict` (`small | medium | large | unknown`):
 - `large`: `3+` independent subsystems (`> 3` modules) or hard serial barrier -> downstream `ew-plan` with `2+1` multi-subsystem decomposition (or `ew-roadmap` first if multi-Session release boundary holds)
 - `medium`: `1–2` parallelizable subsystems (`<= 3` modules) -> downstream `ew-plan` (single planner)
-- `small`: single or few-file change (`<= 2` files / single concern) -> downstream `ew-plan` (or `ew-companion` when single-concern)
+- `small`: single-concern / bounded change (file count irrelevant when scope is clear) -> downstream `ew-plan` (or `ew-companion` when no typed plan/gate is needed)
 - `unknown`: exploration confidence `< 60%`, conflicting module ownership, or unresolved architectural ambiguity prevents reliable sizing (`-y` MUST emit `unknown` rather than guessing) -> triggers `post-analyze-scope` decision / user clarification before `ew-plan`
 
 ## Blocking Step Gates

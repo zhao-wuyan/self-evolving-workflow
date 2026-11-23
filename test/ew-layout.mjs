@@ -81,7 +81,7 @@ for (const file of walk(orchestrator)) {
 }
 
 for (const file of [orchestrator, knowledge, join(project, 'skills', 'ew-odyssey'), join(project, 'skills', 'ew-skill-design'),
-  join(project, 'skills', 'ew-swarm'), join(project, 'skills', 'ew-impeccable')].flatMap(walk)) {
+  join(project, 'skills', 'ew-swarm'), join(project, 'skills', 'ew-impeccable'), join(project, 'skills', 'ew-prototype')].flatMap(walk)) {
   if (!file.endsWith('.md')) continue;
   const directory = dirname(file);
   for (const match of readFileSync(file, 'utf8').matchAll(/\]\(([^)]+)\)/g)) {

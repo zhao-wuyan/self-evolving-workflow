@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import {
@@ -141,13 +141,34 @@ export function workflowId(value: unknown, label: string) {
 }
 
 function changed(id: string, expected: number | undefined, actual: number) {
-  if (expected !== actual) throw new InputError('REVISION_CONFLICT ' + id + ': expected ' + expected + ', current ' + actual);
+  if (expected !== undefined && expected !== actual) {
+    throw new InputError('REVISION_CONFLICT ' + id + ': expected ' + expected + ', current ' + actual);
+  }
 }
 
 function findRun(session: Session, runId: string) {
   const run = session.runs.find(item => item.id === runId);
   if (!run) throw new InputError('Run not found: ' + runId);
   return run;
+}
+
+/** 生成 Session 内递增的 Run 编号（run-001 起），兼容历史 run-<uuid> 记录与已有目录。 */
+function nextRunId(session: Session, dirExists: (runId: string) => boolean): string {
+  let max = 0;
+  for (const run of session.runs) {
+    const match = /^run-(\d+)$/.exec(run.id);
+    if (match) {
+      const n = Number(match[1]);
+      if (Number.isSafeInteger(n) && n > max) max = n;
+    }
+  }
+  let next = max + 1;
+  let candidate = `run-${String(next).padStart(3, '0')}`;
+  while (session.runs.some(run => run.id === candidate) || dirExists(candidate)) {
+    next++;
+    candidate = `run-${String(next).padStart(3, '0')}`;
+  }
+  return candidate;
 }
 
 function findStep(session: Session, id: string) {
@@ -192,6 +213,19 @@ function safeFile(root: string, path: string) {
   const bytes = readFileSync(file);
   if (bytes.length > maxArtifactBytes) throw new InputError('Workflow file exceeds 5 MiB: ' + path);
   return bytes;
+}
+
+function hasFiles(dir: string): boolean {
+  const rootInfo = lstatSync(dir, { throwIfNoEntry: false });
+  if (!rootInfo || !rootInfo.isDirectory()) return Boolean(rootInfo);
+  for (const name of readdirSync(dir)) {
+    const child = join(dir, name);
+    const info = lstatSync(child, { throwIfNoEntry: false });
+    if (!info) continue;
+    if (info.isSymbolicLink() || !info.isDirectory()) return true;
+    if (hasFiles(child)) return true;
+  }
+  return false;
 }
 
 function expandSlot(directory: string, slot: string) {
@@ -357,7 +391,8 @@ export class WorkflowStore {
   private change<T extends object>(id: string, operation: string, mutation: Mutation, input: unknown, apply: () => T) {
     const actor = workflowId(mutation.actor, 'actor');
     const fingerprint = workflowHash(JSON.stringify([operation, actor, mutation.revision, mutation.runRevision, mutation.evidence, mutation.reason, input]));
-    const requestId = mutation.requestId ? workflowId(mutation.requestId, 'request ID') : fingerprint.slice(7);
+    const requestId = mutation.requestId ? workflowId(mutation.requestId, 'request ID')
+      : (mutation.revision === undefined && operation !== 'session.open' ? 'req-' + randomUUID() : fingerprint.slice(7));
     type Receipt = T & { receipt: { request_id: string; action: string; actor: string; recorded_at: string; evidence: string[]; reason?: string } };
     return transaction(this.db, () => {
       const saved = this.db.prepare('SELECT fingerprint, receipt FROM requests WHERE session = ? AND id = ?').get(id, requestId);
@@ -552,7 +587,8 @@ export class WorkflowStore {
       session_id: session.id, run_id: run.id, run_dir: this.runDir(session.id, run.id),
       status: run.status, revision: run.revision, orchestration_revision: session.revision,
       task: { ...run.task, input_refs: run.inputs },
-      skill_ref: run.skill, gates: run.skill.gates, upstream_aliases: run.input_aliases,
+      skill_ref: run.skill, skill_entry_path: run.skill.package_path + '/' + run.skill.entry,
+      gates: run.skill.gates, upstream_aliases: run.input_aliases,
       knowledge_profile: knowledgeProfile,
       upstream: Object.fromEntries(run.inputs.map(id => [id, session.artifacts[id]])),
       skill_reads: this.readProof(run), retry_of_run_id: run.retry_of_run_id,
@@ -581,8 +617,9 @@ export class WorkflowStore {
       const missing = skill.gates.entry.filter(gate => !gates.includes(gate));
       if (missing.length) throw new InputError('Missing entry gates: ' + missing.join(', '));
       const args = step.args.map(arg => arg.replaceAll('{session}', session.id).replaceAll('{intent}', session.objective));
+      const runId = nextRunId(session, candidate => existsSync(this.runDir(session.id, candidate)));
       const run: Run = {
-        id: 'run-' + randomUUID(), owner: change.actor, step_id: step.id, status: 'running', revision: 0, skill,
+        id: runId, owner: change.actor, step_id: step.id, status: 'running', revision: 0, skill,
         task: { command, args, goal: session.objective },
         inputs: [], input_aliases: {}, reads: {},
         ...(step.run_id ? { retry_of_run_id: step.run_id } : {}),
@@ -609,14 +646,18 @@ export class WorkflowStore {
       step.run_id = run.id;
       return this.packet(session, run);
     });
-    mkdirSync(join(packet.run_dir, 'outputs'), { recursive: true });
+    if (packet.skill_ref.produces.some(slot => slot.required)) {
+      mkdirSync(join(packet.run_dir, 'outputs'), { recursive: true });
+    }
     return packet;
   }
 
   brief(id: string, runId: string) {
     const session = this.status(id);
     const packet = this.packet(session, findRun(session, runId));
-    if (packet.status !== 'sealed') mkdirSync(join(packet.run_dir, 'outputs'), { recursive: true });
+    if (packet.status !== 'sealed' && packet.skill_ref.produces.some(slot => slot.required)) {
+      mkdirSync(join(packet.run_dir, 'outputs'), { recursive: true });
+    }
     return { ...packet, continuation: nextAction(session) };
   }
 
@@ -714,7 +755,7 @@ export class WorkflowStore {
 
   private outputs(session: Session, run: Run, gates: string[]) {
     const directory = this.runDir(session.id, run.id);
-    const errors = this.readProof(run).missing.map(path => 'Required Skill read: ' + path);
+    const errors: string[] = [];
     errors.push(...run.skill.gates.exit.filter(gate => !gates.includes(gate)).map(gate => 'Required exit gate: ' + gate));
     if (run.status !== 'running') errors.push('Complete a running Run');
     for (const item of Object.values(run.assignments ?? {})) {
@@ -824,7 +865,7 @@ export class WorkflowStore {
   }
 
   transition(id: string, runId: string, status: 'running' | 'blocked' | 'failed' | 'cancelled', reason: string, change: Mutation) {
-    return this.mutate(id, 'run.transition', change, { runId, status, reason }, session => {
+    const packet = this.mutate(id, 'run.transition', change, { runId, status, reason }, session => {
       const run = findRun(session, runId);
       changed(runId, change.runRevision, run.revision);
       if ((run.status !== 'blocked' && run.status !== 'running') || run.status === status) throw new InputError('Invalid Run transition');
@@ -837,6 +878,13 @@ export class WorkflowStore {
       }
       return this.packet(session, run);
     });
+    if (status === 'cancelled' && !packet.knowledge_reads) {
+      const dir = this.runDir(id, runId);
+      if (existsSync(dir) && !hasFiles(dir)) {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+    return packet;
   }
 
   decide(id: string, decisionId: string, verdict: 'proceed' | 'fix' | 'escalate', summary: string, change: Mutation,

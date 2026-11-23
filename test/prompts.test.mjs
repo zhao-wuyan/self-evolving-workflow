@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,6 +17,8 @@ import {
   buildWikiRelationPrompt,
 } from 'self-evolving-workflow';
 import { harvestCompletion } from '../dist/closeout.js';
+import { memoryModelSettings } from '../dist/memory-config.js';
+import { stripThinkingBlocks } from '../dist/upstream/llm.js';
 import { Wiki } from '../dist/wiki.js';
 import { applyWikiChange, proposeWikiChange } from '../dist/wiki-change.js';
 
@@ -151,10 +153,20 @@ test('CLI model client reports truncated or reasoning-only empty content clearly
   ]));
 
   let mode = 'length';
+  let hits = 0;
   const server = createServer((_req, res) => {
+    hits++;
     res.setHeader('Content-Type', 'application/json');
     if (mode === 'length') {
       res.end(JSON.stringify({ choices: [{ finish_reason: 'length', message: { content: '' } }] }));
+      return;
+    }
+    if (mode === 'length-partial') {
+      res.end(JSON.stringify({ choices: [{ finish_reason: 'length', message: { content: '[{"memories":[' } }] }));
+      return;
+    }
+    if (mode === 'error') {
+      res.end(JSON.stringify({ error: { message: 'upstream overloaded' } }));
       return;
     }
     res.end(JSON.stringify({ choices: [{ finish_reason: 'stop', message: { content: null, reasoning_content: 'thinking...' } }] }));
@@ -172,9 +184,46 @@ test('CLI model client reports truncated or reasoning-only empty content clearly
     execFileAsync(process.execPath, [cliPath, '--root', root, 'kb', 'extract', messagesFile, '--session', 's1'], { env }),
     err => /finish_reason=length/.test(err.stderr),
   );
+  hits = 0;
+  mode = 'length-partial';
+  await assert.rejects(
+    execFileAsync(process.execPath, [cliPath, '--root', root, 'kb', 'extract', messagesFile, '--session', 's1'], { env }),
+    err => /finish_reason=length/.test(err.stderr),
+  );
+  assert.equal(hits, 1);
+  mode = 'error';
+  await assert.rejects(
+    execFileAsync(process.execPath, [cliPath, '--root', root, 'kb', 'extract', messagesFile, '--session', 's1'], { env }),
+    err => /upstream overloaded/.test(err.stderr),
+  );
   mode = 'reasoning';
   await assert.rejects(
     execFileAsync(process.execPath, [cliPath, '--root', root, 'kb', 'extract', messagesFile, '--session', 's1'], { env }),
     err => /only reasoning output/.test(err.stderr),
   );
+});
+
+test('stripThinkingBlocks strips unclosed thinking blocks and preserves JSON arrays', () => {
+  assert.equal(stripThinkingBlocks('<think>unclosed reasoning'), '');
+  assert.equal(stripThinkingBlocks('Prefix <thought>unclosed reasoning'), 'Prefix');
+  assert.equal(stripThinkingBlocks('[{"a":"<think>"}]'), '[{"a":"<think>"}]');
+});
+
+test('memoryModelSettings ignores empty AGENT_MEMORY_LLM_TIMEOUT_MS and floors numeric env timeout', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'evolve-timeout-env-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, '.evolve'), { recursive: true });
+  await writeFile(join(root, '.evolve', 'config.json'), JSON.stringify({ timeoutMs: 45000 }));
+
+  const previous = process.env.AGENT_MEMORY_LLM_TIMEOUT_MS;
+  t.after(() => {
+    if (previous === undefined) delete process.env.AGENT_MEMORY_LLM_TIMEOUT_MS;
+    else process.env.AGENT_MEMORY_LLM_TIMEOUT_MS = previous;
+  });
+
+  process.env.AGENT_MEMORY_LLM_TIMEOUT_MS = '   ';
+  assert.equal(memoryModelSettings(root).timeoutMs, 45000);
+
+  process.env.AGENT_MEMORY_LLM_TIMEOUT_MS = '1234.9';
+  assert.equal(memoryModelSettings(root).timeoutMs, 1234);
 });

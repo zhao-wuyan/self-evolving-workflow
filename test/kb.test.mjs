@@ -326,3 +326,24 @@ test('memory content edits reindex exact values while retaining original provena
   assert.deepEqual(memory.sources(original.id), sources);
 });
 
+test('Memory exact search ranks by priority then recency and get resolves unique short hex prefixes', async t => {
+  const { kb, memory } = await fixture(t);
+  const lowId = 'aaaa1111bbbb2222cccc3333dddd4444eeee5555ffff66667777888899990001';
+  const highId = 'bbbb1111bbbb2222cccc3333dddd4444eeee5555ffff66667777888899990002';
+  await memory.put({ id: lowId, content: 'Server runs on port 9090.', priority: 40 });
+  await memory.put({ id: highId, content: 'Server moved to port 9090.', priority: 90 });
+
+  const exact = await memory.search('9090');
+  assert.deepEqual(exact.results.map(item => item.id), [highId, lowId]);
+
+  assert.equal(kb.get(highId.slice(0, 8))?.id, highId);
+  assert.equal(kb.get(lowId.slice(0, 8))?.id, lowId);
+
+  const collide1 = 'deadbeef0000111122223333444455556666777788889999aaaabbbbcccc0001';
+  const collide2 = 'deadbeef0000111122223333444455556666777788889999aaaabbbbcccc0002';
+  await memory.put({ id: collide1, content: 'First colliding record.' });
+  await memory.put({ id: collide2, content: 'Second colliding record.' });
+  assert.throws(() => kb.get('deadbeef'), /Ambiguous memory ID prefix/);
+  assert.equal(kb.get(collide2)?.id, collide2);
+});
+

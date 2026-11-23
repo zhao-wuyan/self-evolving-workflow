@@ -55,6 +55,7 @@ export interface KnowledgeMutationOptions {
 export interface KnowledgeFilters {
   scope?: KnowledgeScope;
   kind?: KnowledgeKind;
+  storageKind?: KnowledgeStorageKind;
   status?: KnowledgeStatus | 'all';
   task?: string;
   paths?: string[];
@@ -318,8 +319,8 @@ export class KnowledgeStore {
     const key = requireText(id, 'record ID');
     const { wikiContext } = validateFilters(filters);
     const readOpts = { knowledgeReads: filters.knowledgeReads, fromSearchId: filters.fromSearchId };
-    const wantWiki = filters.kind !== 'episodic';
-    const wantMemory = filters.kind === undefined || filters.kind === 'episodic';
+    const wantWiki = filters.kind !== 'episodic' && filters.storageKind !== 'memory';
+    const wantMemory = (filters.kind === undefined || filters.kind === 'episodic') && filters.storageKind !== 'wiki';
 
     for (const layer of this.layersForScope(filters.scope ?? 'local')) {
       let wikiRecord: KnowledgeRecord | undefined;
@@ -485,7 +486,7 @@ export class KnowledgeStore {
 
   constraints(filters: KnowledgeFilters = {}): KnowledgeRecord[] {
     const { wikiContext } = validateFilters(filters);
-    const results: KnowledgeRecord[] = [];
+    const matched: Array<{ page: ReturnType<Wiki['constraints']>[number]; scope: KnowledgeLayerScope; specificity: number }> = [];
     const seen = new Set<string>();
     const lookupScope = lookupScopeRecord(filters);
 
@@ -494,18 +495,33 @@ export class KnowledgeStore {
       for (const page of layer.wiki.constraints(wikiContext)) {
         if (seen.has(page.id)) continue;
         seen.add(page.id);
-        if (filters.knowledgeReads) {
-          filters.knowledgeReads.bindConstraint({
-            knowledgeId: page.id,
-            scope: page.entry?.scope ?? [],
-            categories: page.entry?.categories,
-            content: page.body,
-            storageScope: layer.scope,
-            lookupScope,
-          });
-        }
-        results.push(wikiEntryToRecord(page, layer.scope));
+        matched.push({
+          page,
+          scope: layer.scope,
+          specificity: page.entry ? contextSpecificity(page.entry, wikiContext) : 0,
+        });
       }
+    }
+
+    matched.sort((left, right) =>
+      right.specificity - left.specificity ||
+      Number(right.scope === 'project') - Number(left.scope === 'project') ||
+      left.page.id.localeCompare(right.page.id),
+    );
+
+    const results: KnowledgeRecord[] = [];
+    for (const { page, scope } of matched) {
+      if (filters.knowledgeReads) {
+        filters.knowledgeReads.bindConstraint({
+          knowledgeId: page.id,
+          scope: page.entry?.scope ?? [],
+          categories: page.entry?.categories,
+          content: page.body,
+          storageScope: scope,
+          lookupScope,
+        });
+      }
+      results.push(wikiEntryToRecord(page, scope));
     }
 
     return results;
@@ -639,6 +655,10 @@ export class KnowledgeStore {
               };
           layerWikiHits.push(record);
         }
+
+        // 叠加上下文专属性加分后重新排序，确保高匹配条目在 RRF 融合时占据更靠前名次。
+        layerWikiHits.sort((left, right) =>
+          (right.score ?? 0) - (left.score ?? 0) || left.id.localeCompare(right.id));
 
         if (filters.knowledgeReads) {
           filters.knowledgeReads.recordSearch({

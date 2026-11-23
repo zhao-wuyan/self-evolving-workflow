@@ -8,6 +8,14 @@ Protocol for `plan --tdd`: decompose each behavior into a test-first task triple
 
 Every behavior's GREEN task must `depends_on` its RED task. A plan that ships an implementation task with no preceding test task violates TDD and must be re-generated.
 
+## Pre-Agreed Seams & Test Quality
+
+- **Test only at pre-agreed seams**: a **seam** is the public boundary where observable behavior is verified without reaching into internals. Before emitting RED tasks, define the seams under test (each with a one-line note on what it catches and what it misses) and confirm them in `clarificationContext` / `plan.json` constraints (under `-y`, anchor seams on existing public APIs). Mock only at system boundaries (external APIs, time/randomness, DB/FS boundary via DI or SDK-style interfaces), never internal collaborators.
+- **Avoid anti-patterns in RED/GREEN design**:
+  - **Tautological assertions**: never recompute the expected value the same way production code does (e.g., `items.reduce(...)` vs `calculateTotal(items)`). Expected values must come from an independent source of truth (known-good literal, worked example, or spec).
+  - **Implementation-coupled tests**: never assert internal call counts/order, test private methods, or bypass the public interface via side-channel DB checks.
+  - **Horizontal bulk slicing**: never batch all RED tasks ahead of all GREEN tasks; keep vertical one-seam, one-test, one-minimal-implementation tracer bullets.
+
 ## Red-Green-Refactor Triplet
 
 For each behavior `B` (derived from requirements or convergence criteria), emit up to three tasks:
@@ -18,7 +26,7 @@ TASK-{N}b  GREEN     Write minimal code to make B pass   (depends_on {N}a)
 TASK-{N}c  REFACTOR  Clean up B's implementation         (depends_on {N}b, optional)
 ```
 
-REFACTOR is omitted when there is nothing to clean. RED and GREEN are never merged or skipped.
+REFACTOR is omitted when there is nothing to clean. RED and GREEN are never merged or skipped. **Keep refactoring strictly separate from the Red -> Green cycle**: `GREEN` writes only minimal code to pass `RED`, while structural cleanup belongs exclusively to the separate `TASK-{N}c` (`type: refactor`) task or post-implementation `ew-review` stage.
 
 ## Per-task requirements
 

@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
-import { parse } from 'yaml';
+import { parseDocument } from 'yaml';
 import { InputError, requireText } from './common.js';
 import { isWikiCategory, type WikiCategory } from './wiki-entry.js';
 import { historicalWorkflowName, odysseyModes, orchestrationSteps, workflowName } from './workflow-names.js';
@@ -88,7 +88,12 @@ export function workflowBlob(root: string, commit: string, path: string) {
 export function workflowHeader(text: string): Record<string, unknown> {
   const header = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text.replace(/^\uFEFF/, ''));
   if (!header) return {};
-  return workflowRecord(parse(header[1]), 'YAML frontmatter');
+  const doc = parseDocument(header[1], { strict: true, uniqueKeys: true });
+  if (doc.errors.length > 0) {
+    const detail = doc.errors[0].message.split('\n')[0];
+    throw new InputError(`Invalid YAML frontmatter: ${detail}`, { cause: doc.errors[0] });
+  }
+  return workflowRecord(doc.toJS(), 'YAML frontmatter');
 }
 
 export function workflowRecord(value: unknown, label: string): Record<string, unknown> {

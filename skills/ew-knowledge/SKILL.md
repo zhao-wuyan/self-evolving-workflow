@@ -10,9 +10,9 @@ version: 0.2.0
 
 本 Skill 独立承担项目知识全生命周期治理，覆盖检索门禁、工作记忆、收尾沉淀、候选审查、Wiki 变更、历史迁移以及向 `workflow-evolve` / `ew-skill-design` 的分流。详细规范按需加载：
 
-- [知识路由与规则](references/knowledge-route.md) — 统一 Wiki 模型（`mode: constraint|reference`）、ID 边界、`knowledge-reads/1.0` 回执、L3 初始化、旧知识迁移与分流标准。
+- [知识路由与规则](references/knowledge-route.md) — 统一 Wiki 模型（`mode: constraint|reference`）、ID 边界、`knowledge-reads/1.0` 回执、L3 初始化、日期/SHA 锚点、`.out-of-scope/` 治理与旧知识迁移分流标准。
 - [收尾与候选晋升协议](references/closeout-protocol.md) — `Read → Refresh → Present → Ask → Execute → Verify` 收尾流程与权限边界。
-- [Wiki 与记忆维护参考](references/wiki-maintenance.md) — `evolve kb` 常用维护与多宿主历史提取命令。
+- [Wiki 与记忆维护参考](references/wiki-maintenance.md) — `evolve kb` 常用维护、定期 Wiki Lint 巡检与多宿主历史提取命令。
 
 ## 意图路由
 

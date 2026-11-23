@@ -99,7 +99,13 @@ function findEntry(pages: PageFile[], id: string) {
     page.entry.aliases.some(alias => alias.toLowerCase() === key)
   ));
   if (managedMatches.length > 1) throw new InputError(`Ambiguous Wiki entry ID: ${id}`);
-  const page = managedMatches[0] ?? pages.find(item => !item.entry && item.id.toLowerCase() === key);
+  let page = managedMatches[0] ?? pages.find(item => !item.entry && item.id.toLowerCase() === key);
+  if (!page && /^(?:entries\/)?legacy-[a-f0-9]{8,}$/i.test(key)) {
+    const prefix = key.startsWith('entries/') ? key : `entries/${key}`;
+    const prefixMatches = pages.filter(item => item.entry && item.id.toLowerCase().startsWith(prefix));
+    if (prefixMatches.length > 1) throw new InputError(`Ambiguous Wiki entry ID: ${id}`);
+    page = prefixMatches[0];
+  }
   if (!page) return null;
   const { links: _links, tags: _tags, ...entry } = page;
   return entry;

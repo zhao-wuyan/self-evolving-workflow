@@ -2,6 +2,59 @@
 
 All notable changes to `self-evolving-workflow` are documented in this file.
 
+## [Unreleased]
+
+- 同步上游 v0.3.1，保留 OpenViking 集成与 OMP 原生安装目录支持。
+- OpenViking 远端 Memory 支持 `kb get --pick`、`q-N:idx` 和批量读取，文本输出继续保存远端读取证据。
+- 共用模型客户端接纳上游响应校验，正确报告截断、仅推理输出和服务端错误。
+
+## [0.3.1] - 2026-11-23
+
+### Highlights
+
+- **Sequential Run IDs & Lazy Run Directories (`src/workflow-runtime.ts`)**:
+  - Replaced `run-<uuid>` generation in `WorkflowStore.next()` with Session-scoped sequential IDs (`run-001`, `run-002`, ...) via `nextRunId()`, preserving compatibility with historical `run-<uuid>` records and skipping existing/orphan directories.
+  - Made `run_dir/outputs/` creation lazy in `next()` and `brief()` (pre-created only when `produces` declares a `required: true` slot), and automatically cleaned up empty `cancelled` Run directories that have no files or `knowledge_reads`.
+  - Added `skill_entry_path` to Run packets so hosts can read bound Skill entry documents directly.
+- **Streamlined Run State Progression & CLI Ergonomics (`src/workflow-runtime.ts`, `src/workflow-cli.ts`)**:
+  - Decoupled `evolve run read skill` from blocking `run complete` (`readProof` missing links remain informational in `skill_reads`), keeping `run read skill` as an optional pinned-commit reader.
+  - Made `--actor` (defaulting to `EVOLVE_ACTOR` or `'agent'`) and `--expected-orchestration-revision` / `--expected-run-revision` optional in single-coordinator flows while keeping strict `REVISION_CONFLICT` checks whenever revision fences are supplied, and ensured omitted `--request-id` + omitted revision mutations do not collide in the `requests` idempotency cache.
+  - Added `evolve run complete --next` to seal the current Run and immediately dispatch the next pending Run in one CLI call.
+- **Converged Session Thresholds & Topic Reuse (`skills/ew-orchestrate/`)**:
+  - Tightened `END` vs `ew-companion` thresholds in `SKILL.md`, `ew-orchestrate.md`, `planning.md`, `companion-route.md`, `orchestrator-run-loop.md`, `auto-policy.md`, `goal.md`, and `steps/ew-companion/SKILL.md`: zero-deliverable-mutation diagnostics/probes and trivial 1-turn tweaks route to `END`; multi-turn topic work reuses `open` Topic Sessions via `session step add` and defers `session complete` until topic wrap-up.
+
+### Verification
+
+- `npm run build`: passed
+- `npm test` (`node --test test/*.test.mjs`): 124/124 passed
+- `npm run test:ew-layout`: passed
+- `npm run test:release-gate-flow`: passed (`candidate_passed: true`, `rollback: verified`)
+
+## [0.3.0] - 2026-11-22
+
+### Highlights
+
+- **Compact Search & Provenance Receipts (`src/search-format.ts`, `src/knowledge-reads.ts`, `src/knowledge-cli.ts`)**:
+  - Updated `evolve search` / `evolve kb search` to emit compact JSON by default (plus `--format compact` terse plain text and `--verbose` for full fields), with collision-safe short prefix IDs, `300`-char inline bodies, and `snippet` + `truncated: true` for longer entries.
+  - Added `q-N` query receipts (`q-N:idx`) and batch `evolve kb get <id|q-N:idx>...` / `--pick <n,...>` resolution, automatically linking `from_search_id` when reusing `--reads`.
+  - Refined `search` two-stage path filtering and stripped numeric-pollution tokens for cleaner agent-facing queries.
+- **CodeGraph Resilience & Node 22+ Liftoff (`src/code.ts`, `src/workflow-cli.ts`)**:
+  - Added automatic `--liftoff-only` relaunch on Node `>= 22` for WASM CodeGraph indexing/syncing (`code build|sync`, `search` unindexed local code, `session open|create`), plus stderr progress reporting.
+  - Added `CodeIndexLockedError`, `evolve-write.lock` / `evolve-build.json` incomplete-build detection and recovery, read-lock graceful degradation, prefix-based symbol resolution, and clean Git snapshot incremental sync.
+- **New `ew-prototype` Skill & `ew-odyssey` `arch` Mode**:
+  - Added top-level `skills/ew-prototype/` (`prototype` alias, `session-mode: none`) for throwaway logic/state HTML demos and multi-variant UI exploration before folding into production.
+  - Added `--mode arch` (`odyssey-arch.md`, `prepare/odyssey-arch.md`) to `skills/ew-odyssey` for iterative module deepening, seam decoupling, and boundary hardening.
+- **Visual Reports, Agent Usage Spec & Skill Package Hardening**:
+  - Added `skills/ew-orchestrate/references/visual-report.md` (`--visual` HTML/Mermaid inspection standard) and `skills/ew-orchestrate/references/agent-usage.md` (subagent / swarm / `evolve agent` delegation spec + dedicated `evolve agent --help`).
+  - Enforced strict YAML frontmatter parsing (`strict: true`, `uniqueKeys: true`) in `src/workflow-skills.ts` and refreshed managed instructions and Skill packages (`AGENTS.md`, `agents/`, `skills/`, `workflows/index.json`).
+
+### Verification
+
+- `npm run build`: passed
+- `npm test` (`node --test test/*.test.mjs`): 123/123 passed
+- `npm run test:ew-layout`: passed
+- `npm run test:release-gate-flow`: passed (`candidate_passed: true`, `rollback: verified`)
+
 ## [0.2.0] - 2026-11-18
 
 ### Highlights

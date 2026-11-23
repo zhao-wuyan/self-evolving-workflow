@@ -8,16 +8,16 @@ Mode workflows describe host-neutral capabilities (parallel agents, structured u
 |---|---|---|---|
 | Parallel review / audit / archaeology / generalization scan | `invoke_subagent` (parallel), `swarm`, or `run_workflow` | `spawn_agent` (`agent_type`) / `spawn_agents_on_csv` + `wait_agent` | Native `task` (`context` + `tasks[]`) or eval `agent()`; `scout` research / `reviewer` review / `task` implementation |
 | Lifecycle rule | **Always join, complete, or cancel every spawned subagent before advancing or ending scope** | Collect all batch CSV/agent outputs before merging; join/cancel children | Results auto-deliver; join at barriers or cancel before ending; never poll; use host `wait` only when fully blocked |
-| Cross-angle CLI verification | `evolve agent exec "<prompt>" --to codex\|agy\|claude\|omp --mode analysis\|write` (pass `--session <id> --run <run>` only with `--to codex` or `--to omp`) | Same (bound Session/Run identifiers and CLI read instructions are passed to the Agent) | Bound Run supported for Codex and OMP; OMP strict analysis uses the one-shot restricted worker, not native children |
+| Cross-angle CLI verification | `evolve agent exec "<prompt>" --to codex\|agy\|claude\|omp --mode analysis\|write` (pass `--session <id> --run <run>` only with `--to codex` or `--to omp`; for full flags, prompt template, and retry rules, read `evolve skill workflows show agent-usage`) | Same (bound Session/Run identifiers and CLI read instructions are passed to the Agent) | Bound Run supported for Codex and OMP; OMP strict analysis uses the one-shot restricted worker, not native children |
 
 ### Recommended Installed `agent_type` Mapping
 
 When `evolve skill install` provisions `agents/` for the active host, dispatch Odyssey roles using these named definitions (falling back to inline role instructions when absent):
 - **Archaeology / exploration**: `cli-explore-agent` (`cli_explore_agent` in Codex)
 - **Debug hypothesis / fix**: `workflow-debugger` (`workflow_debugger`)
-- **Audit / review dimensions** (`improve`, `review`, `security`, `defensive`, `ui`): `workflow-reviewer` (`workflow_reviewer`)
-- **Planex planning & checking**: `workflow-planner` (`workflow_planner`), `workflow-plan-checker` (`workflow_plan_checker`)
-- **Fix / execution**: `workflow-executor` (`workflow_executor`) or `impeccable-agent` (`impeccable_agent` for non-interactive `ew-impeccable` passes in `ui` mode)
+- **Audit / review dimensions** (`improve`, `review`, `security`, `defensive`, `ui`, `arch`): `workflow-reviewer` (`workflow_reviewer`)
+- **Planex / Arch planning & interface design**: `workflow-planner` (`workflow_planner`), `workflow-plan-checker` (`workflow_plan_checker`)
+- **Fix / execution / deepening**: `workflow-executor` (`workflow_executor`) or `impeccable-agent` (`impeccable_agent` for non-interactive `ew-impeccable` passes in `ui` mode)
 - **Verification**: `workflow-verifier` (`workflow_verifier`), `workflow-integration-checker` (`workflow_integration_checker`)
 - **OMP hosts**: map the same roles to native `scout`, `reviewer`, and `task` (or eval `agent()` with the same role instructions).
 
@@ -42,7 +42,7 @@ Pass `--session` and `--run` together for Codex/OMP Run binding; Agy stays stand
 
 ## 4. Run Artifact Metadata & Sealing
 
-- Every mode stores artifacts exclusively under `{run_dir}/outputs/` (or workspace source files in mutable `FIX`/`EXECUTE` phases). `outputs/session.json` is `required: true` in all modes; `evidence.ndjson`, `understanding.md`, `explore.json` (`debug`/`review`), and `anchors.json` (`defensive`) follow each mode's `contract.produces` in `references/prepare/odyssey-<mode>.md` (`evidence.ndjson` and `understanding.md` are `required: true` in `debug`/`security`/`defensive`, and produced during full campaigns while `required: false` in `improve`/`planex`/`review`/`ui`).
+- Every mode stores artifacts exclusively under `{run_dir}/outputs/` (or workspace source files in mutable `FIX`/`DEEPEN`/`EXECUTE` phases). `outputs/session.json` is `required: true` in all modes; `evidence.ndjson`, `understanding.md`, `explore.json` (`debug`/`review`/`arch`), and `anchors.json` (`defensive`) follow each mode's `contract.produces` in `references/prepare/odyssey-<mode>.md` (`evidence.ndjson` and `understanding.md` are `required: true` in `debug`/`security`/`defensive`, and produced during full campaigns while `required: false` in `improve`/`planex`/`review`/`ui`/`arch`).
 - Attach matching `kind`, `schema`, `role`, and `alias` from `references/prepare/odyssey-<mode>.md` `contract.produces` to:
   - Top-level `_meta` in JSON outputs (`session.json`, plus `explore.json` or `anchors.json`)
   - First record's `_meta` in `evidence.ndjson` (append-only NDJSON lines thereafter)

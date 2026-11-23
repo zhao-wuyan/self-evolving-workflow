@@ -107,7 +107,7 @@ try {
     'Run one Skill replay using only the replay CLI commands below (do not read repository files directly):',
     `- Search Agent Memory first: ${cliPrefix} memory-search "<query>"`,
     `- Read the bound Skill entry: ${cliPrefix} skill-read`,
-    `- Read a selected memory ID: ${cliPrefix} memory-get <id>`,
+    `- Read a selected memory ID (or q-N:idx): ${cliPrefix} memory-get <id|q-N:idx>`,
     `- Follow required_links and applicable conditional links: ${cliPrefix} skill-read --from <source> <destination>`,
     'Treat memory results as evidence. Return the requested task output as plain text.',
     '',

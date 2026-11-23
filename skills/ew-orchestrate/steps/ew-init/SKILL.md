@@ -1,7 +1,7 @@
 ---
 name: ew-init
 description: Initialize and onboard a greenfield, brownfield, or legacy Maestro project into Evolve (CodeGraph, Wiki, and context packaging)
-argument-hint: '[-y] [--refresh] [--from <alias>] [<idea|@file>]'
+argument-hint: '[-y] [--refresh] [--visual] [--from <alias>] [<idea|@file>]'
 wiki_categories: [arch, coding]
 search_profile:
   wiki: [constraints, references]
@@ -41,6 +41,11 @@ contract:
     role: attachment
     required: false
     schema: context-package/1.0
+  - path: outputs/visual-report.html
+    kind: visual-report
+    role: attachment
+    required: false
+    schema: visual-report/1.0
   gates:
     exit:
     - state-detected
@@ -53,4 +58,4 @@ contract:
 Read [preparation](references/prepare.md), then follow the [init workflow](references/workflow.md).
 
 - Detects project state (`greenfield`, `brownfield`, `legacy-maestro`, or `initialized`) and onboards it into Evolve's native SQLite/Git/Wiki/CodeGraph stack without creating legacy `.workflow/state.json` or writing `wiki/entries/` directly.
-- Outputs `outputs/init-report.json`, `outputs/project-brief.md`, and `outputs/context-package.json` for downstream `ew-blueprint`, `ew-roadmap`, or `ew-brainstorm`.
+- Outputs `outputs/init-report.json`, `outputs/project-brief.md` (with system/module Mermaid map and guardrail baseline), `outputs/context-package.json`, and optional `outputs/visual-report.html` (`--visual`) for downstream `ew-blueprint`, `ew-roadmap`, or `ew-brainstorm`.

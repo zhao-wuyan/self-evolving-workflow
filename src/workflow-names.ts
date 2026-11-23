@@ -2,7 +2,7 @@ export const orchestrationSteps = [
   'companion', 'init', 'brainstorm', 'grill', 'blueprint', 'roadmap', 'analyze', 'plan', 'execute',
   'verify', 'test', 'auto-test', 'review', 'debug', 'retrospective',
 ];
-export const odysseyModes = ['debug', 'improve', 'planex', 'review', 'security', 'defensive', 'ui'];
+export const odysseyModes = ['debug', 'improve', 'planex', 'review', 'security', 'defensive', 'ui', 'arch'];
 
 const historicalPairs: Array<readonly [string, string]> = [
   ['maestro', 'ew-orchestrate'],
@@ -25,6 +25,7 @@ const aliases = new Map<string, string>([
   ['swarm', 'ew-swarm'],
   ['skill-design', 'ew-skill-design'],
   ['impeccable', 'ew-impeccable'],
+  ['prototype', 'ew-prototype'],
   ['knowledge', 'ew-knowledge'],
   ...orchestrationSteps.map(step => ['maestro-' + step, 'ew-' + step] as const),
 ]);
