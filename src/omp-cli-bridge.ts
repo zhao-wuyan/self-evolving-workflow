@@ -3,7 +3,7 @@ import { basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { InputError } from './common.js';
 
-const commands: Record<string, true> = { session: true, run: true, skill: true, experience: true, openviking: true };
+const commands: Record<string, true> = { session: true, run: true, skill: true, experience: true, openviking: true, kb: true };
 const skillActions: Record<string, true> = { list: true, install: true, status: true, validate: true, inspect: true, workflows: true };
 
 export async function runBundledWorkflow(root: string, argv: unknown, signal?: AbortSignal, agentKind?: 'main' | 'sub') {
@@ -17,6 +17,10 @@ export async function runBundledWorkflow(root: string, argv: unknown, signal?: A
   if (argv[0] === 'experience' && !['status', 'search', 'get'].includes(argv[1])) {
     throw new InputError('OMP may only read personal experience (status/search/get)');
   }
+  if (argv[0] === 'kb' && !(argv[1] === 'harvest' && ['session', 'receipt', 'conversation', 'skill'].includes(argv[2]) ||
+      argv[1] === 'candidates' && argv[2] === 'show')) {
+    throw new InputError('OMP knowledge closeout supports harvest and candidates show only; publication requires explicit approval');
+  }
   if (argv[0] === 'openviking' && argv[1] !== 'policy') throw new InputError('OMP Agent may only manage OpenViking policy');
   if (argv[0] === 'openviking' && argv.slice(2).some(arg => !/^(?:--(?:entry|runner|scenarios|apply)(?:=|$))/.test(arg) && arg.startsWith('-'))) {
     throw new InputError('Invalid OpenViking policy option');
@@ -27,7 +31,8 @@ export async function runBundledWorkflow(root: string, argv: unknown, signal?: A
   const node = /^node(?:\.exe)?$/i.test(basename(process.execPath)) ? process.execPath : 'node';
   const cli = fileURLToPath(new URL('./workflow-cli.js', import.meta.url));
   const child = spawn(node, [cli, '--root', root, ...argv], {
-    env: agentKind ? { ...process.env, EVOLVE_OMP_AGENT_KIND: agentKind } : process.env,
+    env: { ...process.env, EVOLVE_OMP_AGENT_KIND: agentKind ?? 'main',
+      ...(/^omp(?:\.exe)?$/i.test(basename(process.execPath)) && !process.env.OMP_EXECUTABLE ? { OMP_EXECUTABLE: process.execPath } : {}) },
     cwd: root, shell: false, windowsHide: true, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stdout = '';

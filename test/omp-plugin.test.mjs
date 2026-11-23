@@ -290,9 +290,40 @@ test('OMP workflow control uses the bundled CLI, rejects root escape and reports
   assert.equal(nativeStatus.targets.find(target => target.host === 'omp').skills_dir, join(f.root, '.omp/skills'));
   assert.equal(nativeStatus.targets.find(target => target.host === 'omp').skills.find(skill => skill.name === 'ew-knowledge').status, 'up_to_date');
   await assert.rejects(runBundledWorkflow(f.root, ['skill', 'status', '--root', '..']), /root is fixed/);
-  await assert.rejects(runBundledWorkflow(f.root, ['kb', 'get', 'anything']), /workflow control argv/);
+  await assert.rejects(runBundledWorkflow(f.root, ['kb', 'get', 'anything']), /knowledge closeout supports/);
   await assert.rejects(runBundledWorkflow(f.root, ['experience', 'publish', 'x']), /only read personal experience/);
   await assert.rejects(runBundledWorkflow(f.root, ['experience', 'review', 'x']), /only read personal experience/);
+  await assert.rejects(runBundledWorkflow(f.root, ['kb', 'apply', 'x']), /publication requires explicit approval/);
+  await assert.rejects(runBundledWorkflow(f.root, ['kb', 'candidates', 'publish', 'x']), /publication requires explicit approval/);
+  const worker = join(f.root, 'memory-worker.mjs');
+  writeFileSync(worker, `import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+const request=JSON.parse(readFileSync(0,'utf8').slice('/evolve-worker '.length));
+assert.equal(request.mode,'memory'); assert.equal(request.model,'@memory');
+console.log(JSON.stringify({type:'evolve_worker_result',request_id:request.request_id,output:JSON.stringify([{type:'work_method',content:'Review the plugin closeout before publication.',source_message_ids:['m1']}])}));`);
+  const receipt = join(f.root, 'completion.json');
+  writeFileSync(receipt, JSON.stringify({schema_version:'skill-completion/1.0',id:'plugin-memory',execution_id:'plugin-memory',
+    status:'succeeded',recorded_at:'2026-11-23T00:00:00Z',messages:[{id:'m1',role:'user',timestamp:'2026-11-23T00:00:00Z',
+      content:'Review the plugin closeout before publication.'}]}));
+  const saved = Object.fromEntries(['OMP_EXECUTABLE','EVOLVE_MODEL_PROVIDER','AGENT_MEMORY_LLM_BASE_URL','AGENT_MEMORY_LLM_MODEL']
+    .map(key => [key, process.env[key]]));
+  try {
+    process.env.OMP_EXECUTABLE = worker;
+    delete process.env.EVOLVE_MODEL_PROVIDER;
+    delete process.env.AGENT_MEMORY_LLM_BASE_URL;
+    delete process.env.AGENT_MEMORY_LLM_MODEL;
+    const generated = await h.call('workflow', {argv:['kb','harvest','receipt',receipt,'--project','fixture']});
+    assert.equal(generated.exit_code, 0);
+    const candidates = JSON.parse(generated.stdout);
+    assert.equal(candidates.candidates[0].content, 'Review the plugin closeout before publication.');
+    assert.equal(existsSync(join(f.root, 'wiki', 'entries')), false);
+    const shown = await h.call('workflow', {argv:['kb','candidates','show','plugin-memory','--project','fixture']});
+    assert.equal(JSON.parse(shown.stdout).candidates[0].id, candidates.candidates[0].id);
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
   const failure = await h.call('workflow', { argv: ['session', 'status', '--session', 'missing'] });
   assert.equal(failure.isError, true);
   assert.match(failure.content[0].text, /Session not found/);
