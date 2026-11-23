@@ -62,7 +62,7 @@ async function runOmp(cwd: string, request: OmpWorkerRequest, timeoutMs: number)
       'opencode', 'cursor', 'windsurf', 'vscode', 'mcp-json', 'agent-plugins'],
     mcp: { enableProjectConfig: false },
   }));
-  const worker = fileURLToPath(new URL('./omp-worker.js', import.meta.url));
+  const worker = fileURLToPath(new URL(request.mode === 'memory' ? './omp-model-worker.js' : './omp-worker.js', import.meta.url));
   const resolved = commandFor(['-p', '--mode', 'json', '--no-session', '--no-tools', '--no-lsp',
     '--no-skills', '--no-rules', '--no-context-files', '--no-title', '--model', request.model, '--config', overlay, '--trusted-extension', worker]);
   let abortReason: Error | undefined;
@@ -115,7 +115,7 @@ async function runOmp(cwd: string, request: OmpWorkerRequest, timeoutMs: number)
   }
 }
 
-export async function delegateOmp(root: string, cwd: string, prompt: string, mode: OmpWorkerRequest['mode'], values: OmpDelegateOptions) {
+export async function delegateOmp(root: string, cwd: string, prompt: string, mode: 'analysis' | 'write', values: OmpDelegateOptions) {
   if ((values.session === undefined) !== (values.run === undefined)) throw new InputError('Supply both Session and Run identifiers');
   const timeoutMs = values.timeout === undefined ? 600_000 : Number(values.timeout);
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647) throw new InputError('OMP timeout must be a positive integer in milliseconds');
@@ -132,4 +132,11 @@ export async function delegateOmp(root: string, cwd: string, prompt: string, mod
     binding = { root, session, run };
   }
   return runOmp(cwd, { request_id: randomUUID(), prompt, cwd, mode, model: values.model ?? '@' + role, binding }, timeoutMs);
+}
+
+export async function delegateOmpModel(root: string, system: string, prompt: string, timeoutMs: number): Promise<string> {
+  const result = await runOmp(root, {
+    request_id: randomUUID(), cwd: root, mode: 'memory', model: '@memory', system, prompt,
+  }, timeoutMs);
+  return result.output;
 }

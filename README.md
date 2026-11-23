@@ -45,6 +45,8 @@ omp plugin install 'https://github.com/zhao-wuyan/self-evolving-workflow/release
 
 要在本地跑工作流，可请 OMP 用 `evolve_workflow` 执行 `skill install --scope project --host omp --yes`，再提交新增的 Skill 和引导文件。安装器会生成 `.evolve/install-manifest.json`；单纯安装插件或查看状态不会生成该清单。
 
+知识收尾可请 OMP 用 `evolve_workflow` 执行 `kb harvest session <Session ID> --project <项目标识>`，再用 `kb candidates show` 查看候选。未配置独立 HTTP 模型时自动复用 OMP 的 `memory` 角色和认证，无需另填 API 地址；已有 HTTP 配置继续生效。候选仅暂存，正式发布仍需审阅批准。
+
 ### 推荐升级步骤
 
 插件升级不会自动更新已安装到项目的 Skills。建议按以下顺序操作：

@@ -1,6 +1,7 @@
 import { InputError, requireText } from './common.js';
 import { memoryModelSettings } from './memory-config.js';
 import type { LlmClient } from './upstream/llm.js';
+import { delegateOmpModel } from './workflow-delegate.js';
 
 interface ChatCompletionChoice {
   finish_reason?: unknown;
@@ -25,6 +26,9 @@ function extractMessageText(value: unknown): string | undefined {
 
 export function createModelClient(root: string): LlmClient {
   const settings = memoryModelSettings(root);
+  if (settings.provider === 'omp') {
+    return { chat: ({ system, prompt }) => delegateOmpModel(root, system, prompt, settings.timeoutMs ?? 240_000) };
+  }
   const url = new URL(requireText(settings.baseUrl, 'LLM base URL (memory config or AGENT_MEMORY_LLM_BASE_URL)'));
   if (!['http:', 'https:'].includes(url.protocol)) throw new InputError('LLM endpoint must use HTTP or HTTPS');
   if (!url.pathname.endsWith('/chat/completions')) {

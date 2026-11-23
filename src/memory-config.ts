@@ -207,9 +207,15 @@ export function memoryModelSettings(root: string) {
   const globalFile = resolve(root) === resolve(dirname(globalConfigPath()))
     ? projectFile
     : readJson(globalConfigPath());
+  const resolvedBaseUrl = baseUrl || setting(projectFile, 'baseUrl') || setting(globalFile, 'baseUrl');
+  const resolvedModel = model || setting(projectFile, 'model') || setting(globalFile, 'model');
+  const provider = process.env.EVOLVE_MODEL_PROVIDER ??
+    (!resolvedBaseUrl && !resolvedModel && (process.env.PI_SESSION_ID || process.env.EVOLVE_OMP_AGENT_KIND) ? 'omp' : 'http');
+  if (provider !== 'omp' && provider !== 'http') throw new InputError('EVOLVE_MODEL_PROVIDER must be omp or http');
   return {
-    baseUrl: baseUrl || setting(projectFile, 'baseUrl') || setting(globalFile, 'baseUrl'),
-    model: model || setting(projectFile, 'model') || setting(globalFile, 'model'),
+    provider,
+    baseUrl: resolvedBaseUrl,
+    model: resolvedModel,
     timeoutMs: envTimeout ?? timeoutSetting(projectFile) ?? timeoutSetting(globalFile),
   };
 }
@@ -278,7 +284,7 @@ export async function configureMemory(root: string, options: ConfigOptions) {
     scope,
     settings_path: file.path,
     hosts: hooks.map(({ host, file }) => ({ host, configured: enabled.includes(host), path: file.path })),
-    model_configured: !!(resolved.model && resolved.baseUrl),
+    model_configured: resolved.provider === 'omp' || !!(resolved.model && resolved.baseUrl),
     ...(enabled.includes('codex') ? { codex: 'Review and trust the hooks with /hooks or Settings > Hooks in Codex.' } : {}),
   };
 }

@@ -79,7 +79,8 @@ async function fixture(t) {
   await Promise.all([root, home, gates].map(path => mkdir(path, { recursive: true })));
   const env = { ...process.env, HOME: home, USERPROFILE: home,
     CODEX_HOME: join(home, '.codex'), CLAUDE_CONFIG_DIR: join(home, '.claude') };
-  for (const key of Object.keys(env)) if (key.startsWith('AGENT_MEMORY_LLM_')) delete env[key];
+  for (const key of Object.keys(env)) if (key.startsWith('AGENT_MEMORY_LLM_') ||
+      ['EVOLVE_MODEL_PROVIDER', 'EVOLVE_OMP_AGENT_KIND', 'PI_SESSION_ID'].includes(key)) delete env[key];
   const children = new Set();
   const knownGates = new Set();
   const servers = new Set();
