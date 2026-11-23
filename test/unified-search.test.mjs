@@ -3,11 +3,11 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
-import { CodeGraph } from '../dist/code.js';
+import { CodeGraph, CodeIndexLockedError } from '../dist/code.js';
 import { KnowledgeStore } from '../dist/kb.js';
 import { KnowledgeReads, validateKnowledgeReads } from '../dist/knowledge-reads.js';
 import { MemoryStore } from '../dist/memory.js';
-import { parseSearchFrom, unifiedSearch } from '../dist/search.js';
+import { parseSearchFrom, search, unifiedSearch } from '../dist/search.js';
 import { applyWikiChange, proposeWikiChange } from '../dist/wiki-change.js';
 import { Wiki } from '../dist/wiki.js';
 
@@ -238,4 +238,68 @@ test('unified search filters code paths before candidate limits', async t => {
   const direct = await code.search('calibration', 1, { paths: ['wanted'] });
   assert.equal(direct.length, 1);
   assert.ok(direct[0].node.filePath.startsWith('wanted/'));
+});
+
+test('contextSpecificity reorders Wiki hits before RRF fusion and episodic survives dense code hits in merged mode', async t => {
+  const { memory, wiki } = await fixture(t);
+  publish(wiki, 'a-generic', 'reference', 'Calibration procedure checklist.');
+  publish(wiki, 'z-targeted', 'reference', 'Calibration procedure checklist for planning.', {
+    scope: ['task:plan'], categories: ['arch'],
+  });
+  await memory.put({ id: 'mem-1', content: 'Calibration failed when pump pressure drifted.' });
+  const kb = new KnowledgeStore([{ scope: 'project', wiki, memory }]);
+
+  const kbRanked = await kb.search('Calibration procedure', { task: 'plan', categories: ['arch'] });
+  assert.equal(kbRanked.results[0].id, 'entries/z-targeted');
+
+  const manyCodeHits = Array.from({ length: 30 }, (_, index) =>
+    codeHit(`calibrationFn${String(index).padStart(2, '0')}`, `src/mod${index}.ts`, 100 - index));
+  const merged = await unifiedSearch({ kb, code: { search: async () => manyCodeHits } }, 'calibration', { limit: 10 });
+  assert.ok(merged.results.some(hit => hit.kind === 'reference'));
+  assert.ok(merged.results.some(hit => hit.kind === 'episodic'));
+  assert.ok(merged.results.some(hit => hit.kind === 'code'));
+});
+
+test('context mode enforces constraints budget and emits explicit overflow notice', async t => {
+  const { wiki } = await fixture(t);
+  for (let index = 0; index < 25; index++) {
+    publish(wiki, `rule-${String(index).padStart(2, '0')}`, 'constraint', `Always validate calibration rule ${index}.`);
+  }
+  const kb = new KnowledgeStore([{ scope: 'project', wiki }]);
+  const result = await unifiedSearch({ kb }, 'calibration', { from: 'kb', mode: 'context' });
+  assert.equal(result.constraints.length, 20);
+  assert.equal(result.constraints_truncated, true);
+  assert.equal(result.constraints_total, 25);
+  assert.equal(result.constraints_omitted.length, 5);
+  assert.match(result.constraints_notice, /Showing 20 of 25 applicable constraints/);
+
+  const charCapped = await unifiedSearch({ kb }, 'calibration', {
+    from: 'kb', mode: 'context', constraintLimit: 50, constraintBudgetChars: 120,
+  });
+  assert.ok(charCapped.constraints.length >= 1 && charCapped.constraints.length < 25);
+  assert.equal(charCapped.constraints_truncated, true);
+});
+
+test('unified search keeps kb results when code index is locked on mixed scope', async t => {
+  const { memory, wiki } = await fixture(t);
+  publish(wiki, 'lock-fallback', 'reference', 'Calibration survives code index lock.');
+  const kb = new KnowledgeStore([{ scope: 'project', wiki, memory }]);
+  const lockedCode = { search: async () => { throw new CodeIndexLockedError('CodeGraph index is locked by another process'); } };
+
+  const mixed = await unifiedSearch({ kb, code: lockedCode }, 'calibration', { mode: 'context' });
+  assert.equal(mixed.references.length, 1);
+  assert.deepEqual(mixed.code, []);
+
+  await assert.rejects(
+    unifiedSearch({ kb, code: lockedCode }, 'calibration', { from: 'code' }),
+    /locked by another process/,
+  );
+
+  const busyCode = { search: async () => { throw new Error('SQLITE_BUSY: database is locked'); } };
+  const mixedBusy = await unifiedSearch({ kb, code: busyCode }, 'calibration', { mode: 'context' });
+  assert.equal(mixedBusy.references.length, 1);
+  assert.deepEqual(mixedBusy.code, []);
+  const legacyBusy = await search({ wiki, memory, code: busyCode }, 'calibration', { scope: 'all' });
+  assert.equal(legacyBusy.wiki.results.length, 1);
+  assert.deepEqual(legacyBusy.code, []);
 });

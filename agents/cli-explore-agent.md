@@ -17,7 +17,7 @@ Read-only codebase exploration agent. Maps relevant modules, call/data flows, an
 
 1. **Initial Mandatory Read**: Read all caller-supplied `files_to_read` / `read_first` paths and any target output schema before analyzing.
 2. **CodeGraph & Structural Search**:
-   - Query symbols and relationships via `evolve code search "<symbol-or-query>"`, `evolve code graph "<symbol-id>" --direction callers|callees --depth 2`, and `evolve code trace "<from-id>" "<to-id>"`.
+   - Query symbols and relationships via `evolve code search "<symbol-or-query>"` (returns short symbol IDs `<kind>:<8hex>` and `loc: "path:start-end"`), `evolve kb get <symbol-id>...` (reads symbol source lines), `evolve code graph "<symbol-id>" --direction callers|callees --depth 2`, and `evolve code trace "<from-id>" "<to-id>"`.
    - Supplement with `rg -n` and targeted file reads (`StartLine`/`EndLine`) to verify exact `file:line` locations and snippets.
 3. **3-Layer Synthesis**:
    - **L1 Breadth**: `relevant_files[]` with `path`, `relevance`, `role` (`modify_target` | `dependency` | `pattern_reference` | `test_target` | `type_definition` | `integration_point` | `config` | `context_only`), `rationale` (>10 chars), and `discovery_source` (`codegraph` | `ripgrep` | `read`).

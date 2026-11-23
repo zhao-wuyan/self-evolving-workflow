@@ -8,9 +8,11 @@ Master protocol document for ew-swarm: defines how the LLM coordinator and Pytho
 |-----------|-----------|
 | **Outer loop = script, inner loop = LLM** | Optimization math is cheap and deterministic; LLM evaluation is expensive and noisy. Separate them. |
 | **Coordinator is a hybrid** | LLM coordinator translates user intent + dispatches workers; Python script makes all numeric decisions (selection, update, convergence). |
+| **Fresh context & sparse pointers** | Start every worker (`ant`, `scorer`, `analyst`) in a fresh context window (reserving `fork` strictly for warm deep-dive branches) and pass pointer locators rather than parent history or large file dumps. |
+| **Workspace isolation** | Run read-only / JSON-output workers in the shared workspace and isolate concurrent code-editing workers in dedicated worktrees or branches, landing changes before workspace cleanup (see [host-adapters.md](../references/host-adapters.md)). |
 | **Schema-locked ant output** | LLM output → algorithm input bridge demands strict JSON contract. Free-text outputs cannot feed pheromone updates. |
 | **Two-layer scoring** | `verified_score` (`llm`, `script`, or `hybrid`) is authoritative whenever active; when falling back (`mode: "fallback"`, missing/failed script, or `--allow-score-fallback`), `FallbackScorer` derives `effective_score` from `self_score * self_confidence * self_score_discount`. |
-| **Universal task space** | Coordinator does not bake in any domain. User provides `swarm-config.json` with task space + scoring rule (`script_path` resolved relative to project `cwd`). |
+| **Universal task space** | Coordinator stays domain-agnostic: `swarm-config.json` defines task space + scoring rule (`script_path` resolved relative to project `cwd`). Optionally use `DESIGN-IT-TWICE` constraint-divergent `ant_prompt` slices for architecture/interface search. |
 
 ## Three-Component Architecture
 

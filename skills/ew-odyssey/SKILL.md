@@ -1,8 +1,8 @@
 ---
 name: ew-odyssey
 disable-model-invocation: true
-description: Long-running iterative cycle — one entry, seven modes (debug|improve|planex|review|security|defensive|ui). Shared archaeology/audit → fix → verify → generalize → discover → persist skeleton with mode-specific dimensions. User-invoked multi-iteration campaign entry; single-pass review/debug or bounded orchestration chains route via /ew-orchestrate and single-pass UI work via /ew-impeccable
-argument-hint: <intent> --mode debug|improve|planex|review|security|defensive|ui [-y] [-c]
+description: Long-running iterative cycle — one entry, eight modes (debug|improve|planex|review|security|defensive|ui|arch). Shared archaeology/audit → fix → verify → generalize → discover → persist skeleton with mode-specific dimensions. User-invoked multi-iteration campaign entry; single-pass review/debug or bounded orchestration chains route via /ew-orchestrate and single-pass UI work via /ew-impeccable
+argument-hint: <intent> --mode debug|improve|planex|review|security|defensive|ui|arch [--visual] [-y] [-c]
 session-mode: run
 contract:
   discovery: self-described
@@ -23,9 +23,10 @@ For Evolve Session/Run dispatch, decisions, and recovery, inspect `evolve skill 
 - Security — [prepare](references/prepare/odyssey-security.md), [workflow](references/odyssey-security.md)
 - Defensive — [prepare](references/prepare/odyssey-defensive.md), [workflow](references/odyssey-defensive.md)
 - UI — [prepare](references/prepare/odyssey-ui.md), [workflow](references/odyssey-ui.md)
+- Architecture — [prepare](references/prepare/odyssey-arch.md), [workflow](references/odyssey-arch.md)
 
 <purpose>
-Long-running, evidence-driven iterative campaign across seven modes sharing one backbone (`discovery → audit → fix → verify → GENERALIZE → DISCOVER → RECORD → END`) until mode exit criteria pass or escalation is required.
+Long-running, evidence-driven iterative campaign across eight modes sharing one backbone (`discovery → audit → fix → verify → GENERALIZE → DISCOVER → RECORD → END`) until mode exit criteria pass or escalation is required.
 </purpose>
 
 <mode_dispatch>
@@ -37,6 +38,7 @@ Long-running, evidence-driven iterative campaign across seven modes sharing one 
 | defensive programming, defensive code, exception swallowing, silent failure, fallback risk, default risk, error suppression, 防御性编程, 防御性代码, 异常吞噬, 兜底风险 | `defensive` | `ANCHOR, SLICE` / `SCAN (8 patterns) + PROPAGATE` | *(read-only)* |
 | security audit, OWASP, vulnerability, CVE, secrets scan, STRIDE, threat model, supply chain | `security` | `RECON` / `SCAN (OWASP+deps+secrets+CI+STRIDE+git)` | *(read-only)* |
 | ui, visual, layout, style, component, page, responsive, a11y, design system, design tokens | `ui` | `SURVEY` / `AUDIT (6 dims) + DIVERGE` | `FIX → VERIFY` |
+| architecture, arch, deepen, deep module, shallow module, seam, coupling, dependency cycle, boundary guardrail, module interface, 架构, 深模块, 浅模块, 解耦 | `arch` | `SURVEY (hotspots)` / `AUDIT (seams) + DESIGN` | `DEEPEN → VERIFY` |
 | requirement, implement, build, add feature, deliver feature, user story | `planex` | `—` / `PLAN + EXECUTE` | `VERIFY ↔ FIX` |
 | debug, bug, crash, broken, fails, regression, race, leak, "why does", root cause, runtime error *(fallback: bare `error`)* | `debug` | `ARCHAEOLOGY, EXPLORE` / `DIAGNOSE` | `FIX → CONFIRM` (`A_ESCALATE_DIAGNOSIS`) |
 | improve, optimize, performance, refactor quality, reliability, observability | `improve` | `SURVEY` / `AUDIT (6 dims) + DIAGNOSE` | `FIX → VERIFY` (`A_ESCALATE_DIAGNOSIS`) |
@@ -52,7 +54,7 @@ Long-running, evidence-driven iterative campaign across seven modes sharing one 
 <context>
 $ARGUMENTS
 
-**Universal flags:** `--mode <name>` | `--skip-fix` *(skips `S_FIX` loop in mutable audit/diagnose modes and `planex`, leaving `EXECUTE+VERIFY` in `planex`; combined with `--skip-verify` in `planex`, runs `PLAN` only; rejected/ignored in read-only `security`/`defensive`)* | `--skip-generalize` | `-y` *(skip confirmation prompts, log `deferred`; never bypasses `E000`, INTAKE blockers, or escalation — i.e., reaching hard fix/iteration/stall caps, 3-strike unresolved diagnosis, or sacred-criteria/cross-module conflicts; under `-y`, escalations exit cleanly to `S_RECORD` as `INCONCLUSIVE`/`ESCALATED`/`PARTIAL` rather than continuing auto-fixes or auto-accepting unmet criteria)* | `-c` *(resume latest unfinished same-mode Session via `evolve session list` -> `evolve session get` -> `evolve session resume-view` -> `evolve run get`)* | `--heartbeat`
+**Universal flags:** `--mode <name>` | `--visual` *(generate a self-contained HTML visual review / before-after architecture or UI comparison report under `{run_dir}/outputs/visual-report.html` or OS temp per `evolve skill workflows show visual-report` without touching repo source files)* | `--skip-fix` *(skips `S_FIX` loop in mutable audit/diagnose modes and `planex`, leaving `EXECUTE+VERIFY` in `planex`; combined with `--skip-verify` in `planex`, runs `PLAN` only; rejected/ignored in read-only `security`/`defensive`)* | `--skip-generalize` | `-y` *(skip confirmation prompts, log `deferred`; never bypasses `E000`, INTAKE blockers, or escalation — i.e., reaching hard fix/iteration/stall caps, 3-strike unresolved diagnosis, or sacred-criteria/cross-module conflicts; under `-y`, escalations exit cleanly to `S_RECORD` as `INCONCLUSIVE`/`ESCALATED`/`PARTIAL` rather than continuing auto-fixes or auto-accepting unmet criteria)* | `-c` *(resume latest unfinished same-mode Session via `evolve session list` -> `evolve session get` -> `evolve session resume-view` -> `evolve run get`)* | `--heartbeat`
 
 **Mode-scoped flags** *(inapplicable flag emits `W008` and is ignored)*:
 
@@ -68,9 +70,9 @@ $ARGUMENTS
 | `--executor <tool>` | planex | Explicit CLI executor (`codex\|agy\|claude`) | first available |
 | `--skip-verify` | planex | Skip post-execution validation (`A_EXECUTE` Step 5) & `S_VERIFY` (with `--skip-fix`, runs `PLAN` only) | false |
 
-**Run outputs (`{run_dir}/outputs/` only)**: `session.json` *(always `required: true`)* | `evidence.ndjson` | `understanding.md` | `explore.json` (`debug`/`review`) | `anchors.json` (`defensive`). Slot `required` flags and `_meta` fields follow each mode's `references/prepare/odyssey-<mode>.md` `contract.produces` and [runtime adapters](references/runtime-adapters.md) §4 (`evidence.ndjson` and `understanding.md` are `required: true` in `debug`/`security`/`defensive`, and produced during full campaigns while `required: false` in `improve`/`planex`/`review`/`ui`). Never write session artifacts outside `{run_dir}/outputs/`. Keep Run lifecycle state in the Evolve Run store and seal via `evolve run complete`.
+**Run outputs (`{run_dir}/outputs/` only)**: `session.json` *(always `required: true`)* | `evidence.ndjson` | `understanding.md` | `explore.json` (`debug`/`review`/`arch`) | `anchors.json` (`defensive`). Slot `required` flags and `_meta` fields follow each mode's `references/prepare/odyssey-<mode>.md` `contract.produces` and [runtime adapters](references/runtime-adapters.md) §4 (`evidence.ndjson` and `understanding.md` are `required: true` in `debug`/`security`/`defensive`, and produced during full campaigns while `required: false` in `improve`/`planex`/`review`/`ui`/`arch`). Never write session artifacts outside `{run_dir}/outputs/`. Keep Run lifecycle state in the Evolve Run store and seal via `evolve run complete`.
 
-**Commit convention (mutable modes only, when workspace source files change in `FIX` / `EXECUTE`):** `"odyssey-{mode}({slug}): {STATE} — {summary}"` (e.g., `FIX`, `EXECUTE`; `outputs/*` seal via Evolve Run store, never committed to git).
+**Commit convention (mutable modes only, when workspace source files change in `FIX` / `DEEPEN` / `EXECUTE`):** `"odyssey-{mode}({slug}): {STATE} — {summary}"` (e.g., `FIX`, `DEEPEN`, `EXECUTE`; `outputs/*` seal via Evolve Run store, never committed to git).
 </context>
 
 <invariants>

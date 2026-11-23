@@ -60,14 +60,14 @@ evolve run task assign --session <canonical-session-id> --run <run-id> --id ANT-
 
 ### Step 4: Persist active batch & dispatch N ant workers in parallel
 
-First record the in-flight batch in `team-session.json` (do **not** advance `session.iteration`, which remains the controller's committed iteration until `aco.py update` succeeds):
+First record the in-flight batch in `team-session.json` (leave `session.iteration` at the controller's committed iteration until `aco.py update` succeeds):
 
 ```text
 session.active_iteration = <k>
 session.active_workers = [<list of ant IDs>]
 ```
 
-Then dispatch one worker per assignment in parallel using the host's parallel subagent/swarm capability (see [host-adapters.md](../../../references/host-adapters.md)) with the payload below, and **join/await all dispatched workers** before advancing to Iteration End (in a version-bound Run, instruct each worker to read `roles/ant/role.md` via `evolve run read skill <run-id> roles/ant/role.md --from SKILL.md --session <canonical-session-id>`):
+Then dispatch one worker per assignment in parallel using the host's parallel subagent capability (see [host-adapters.md](../../../references/host-adapters.md)). Start every `ant` worker with a **fresh context window** (reserve `fork` only for warm deep-dive branches needing primary-source context) and pass only the **sparse pointer payload** below (avoid duplicating coordinator history or large file contents), then **join/await all dispatched workers** before Iteration End (in a version-bound Run, instruct each worker to read `roles/ant/role.md` via `evolve run read skill <run-id> roles/ant/role.md --from SKILL.md --session <canonical-session-id>`):
 
 ```text
 ## Role Assignment
@@ -109,8 +109,8 @@ If `config.scoring.mode == "llm"` (or `"hybrid"` when LLM scoring is used for th
    evolve run task assign --session <canonical-session-id> --run <run-id> --id SCORE-<k> --role <scorer-worker-id> --path work/team/scores/iter-<k>-scores.json --actor <coordinator> --expected-orchestration-revision <revision>
    ```
    Capture the updated `orchestration_revision` from the `assign` receipt.
-2. Dispatch a `scorer` worker via the host parallel subagent capability (see [host-adapters.md](../../../references/host-adapters.md)) and **wait/join** for completion before Step 3 (instructing it to read `roles/scorer/role.md` via `evolve run read skill <run-id> roles/scorer/role.md --from SKILL.md --session <canonical-session-id>`):
-   - Pass `Iteration to score: <k>`, `team_dir`, canonical `session_id`, `run_id`, `run_dir`, `assignment_id: SCORE-<k>`, `worker_id` (matching `--role`), `expected_orchestration_revision`, output path `{run_dir}/work/team/scores/iter-<k>-scores.json`, and input glob `{run_dir}/outputs/ant-<k>-*.json`.
+2. Dispatch a `scorer` worker in a **fresh context window** (never forked from coordinator or ant history, keeping scoring blind) via the host parallel subagent capability (see [host-adapters.md](../../../references/host-adapters.md)) and **wait/join** for completion before Step 3 (instructing it to read `roles/scorer/role.md` via `evolve run read skill <run-id> roles/scorer/role.md --from SKILL.md --session <canonical-session-id>`):
+   - Pass sparse pointers only: `Iteration to score: <k>`, `team_dir`, canonical `session_id`, `run_id`, `run_dir`, `assignment_id: SCORE-<k>`, `worker_id` (matching `--role`), `expected_orchestration_revision`, output path `{run_dir}/work/team/scores/iter-<k>-scores.json`, and input glob `{run_dir}/outputs/ant-<k>-*.json`.
 3. After the scorer joins, verify `SCORE-<k>` in `evolve run task list` carries `result` and `scores/iter-<k>-scores.json` covers every valid `ant-<k>-*.json` artifact 1:1. If the scorer failed and you accept self-score fallback for this Run iteration, cancel `SCORE-<k>` via `evolve run task cancel --reason "<reason>"` before running `update --iter <k> --allow-score-fallback`. Once the controller commits the iteration, replay must keep the same scoring decision and inputs.
 
 If `config.scoring.mode == "script"` or `"fallback"` (or `"hybrid"` using `script_path` only) -> proceed directly to Step 3.

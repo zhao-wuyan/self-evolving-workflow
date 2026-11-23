@@ -1,5 +1,7 @@
 [
   { "id": "session-run", "path": "skills/ew-orchestrate/references/orchestrator-run-loop.md" },
+  { "id": "agent-usage", "path": "skills/ew-orchestrate/references/agent-usage.md" },
+  { "id": "visual-report", "path": "skills/ew-orchestrate/references/visual-report.md" },
   { "id": "ew-orchestrate", "path": "skills/ew-orchestrate/references/ew-orchestrate.md" },
   { "id": "boundary-grill", "path": "skills/ew-orchestrate/references/boundary-grill.md" },
   { "id": "ew-companion", "path": "skills/ew-orchestrate/steps/ew-companion/SKILL.md" },
@@ -25,7 +27,9 @@
   { "id": "ew-odyssey-security", "path": "skills/ew-odyssey/references/odyssey-security.md" },
   { "id": "ew-odyssey-defensive", "path": "skills/ew-odyssey/references/odyssey-defensive.md" },
   { "id": "ew-odyssey-ui", "path": "skills/ew-odyssey/references/odyssey-ui.md" },
+  { "id": "ew-odyssey-arch", "path": "skills/ew-odyssey/references/odyssey-arch.md" },
   { "id": "ew-impeccable", "path": "skills/ew-impeccable/SKILL.md" },
+  { "id": "ew-prototype", "path": "skills/ew-prototype/SKILL.md" },
   { "id": "ew-swarm", "path": "skills/ew-swarm/specs/swarm-protocol.md" },
   { "id": "ew-knowledge", "path": "skills/ew-knowledge/SKILL.md" },
   { "id": "ew-openviking", "path": "skills/ew-openviking/SKILL.md" },

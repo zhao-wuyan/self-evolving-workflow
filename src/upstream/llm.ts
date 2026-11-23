@@ -16,7 +16,7 @@ export function stripThinkingBlocks(raw: string): string {
   if (leadingClose && !/<(?:think|thought)>/i.test(leadingClose[0])) {
     return closed.slice(leadingClose[0].length).trim();
   }
-  return closed;
+  return closed.replace(/<(?:think|thought)>[\s\S]*$/i, '').trim();
 }
 
 function findBalancedJsonEnd(text: string, start: number): number {

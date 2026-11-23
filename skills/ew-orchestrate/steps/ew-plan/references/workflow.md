@@ -58,7 +58,11 @@ Deduplicate blocking/important `clarification_needs[]`, clarify via structured p
 
 Launch a planner subagent (`workflow-planner` / `workflow_planner`, or `2+1` topology using 2 parallel `workflow-collab-planner` + 1 synthesis `workflow-planner`; join all subagents before Step 4; fall back to inline role instructions when named agents are absent). **Inline planning in the main flow is forbidden.** Pass upstream context, `session-priors`/Wiki constraints, `explorationContext`, `clarificationContext`, and inherited `architecture_template_evidence`.
 
-- **Guardrails**: `small` (`<= 4` tasks), `medium` (`<= 8` tasks), `large` (`> 3` modules / `scope_verdict: large`, `<= 16` tasks); 1 feature = 1 substantial task (15-60m, batch `< 5m` trivial edits); `depends_on[]` only for real output dependencies; vertical UI slices with `>= 1` `[UI-observable]` criterion per delivery wave.
+- **Guardrails**: `small` (`<= 4` tasks), `medium` (`<= 8` tasks), `large` (`> 3` modules / `scope_verdict: large`, `<= 16` tasks); 1 feature = 1 substantial task (15-60m, batch `< 5m` trivial edits); `depends_on[]` only for real output dependencies; vertical slices cutting end-to-end through every layer (with `>= 1` `[UI-observable]` criterion per UI delivery wave) and using project domain vocabulary / ADRs when present. Do prefactoring tasks first when they make downstream slices clean.
+- **Wide Refactor exception (`Expand -> Batch Migrate -> Contract`)**: when a single mechanical change (e.g., column rename, shared symbol retype, pervasive contract change) fans across so many call sites that no vertical slice can land green alone, sequence it in 3 explicit waves instead of forcing vertical slices:
+  1. **Expand**: add the new form beside the old so existing callers stay green.
+  2. **Batch Migrate** (multiple non-colliding `type: refactor` tasks sized by package/directory blast radius, each `depends_on` Expand): migrate call sites in green batches (or onto a shared integration branch converging on a single integrate-and-verify task when batches cannot stay green independently).
+  3. **Contract** (`depends_on` every migrate batch): remove the old form once zero callers remain.
 - **Every `TASK-NNN.json` must follow the canonical `plan-task/1.0` schema** (`Output Skeleton` below), including:
   1. `read_first[]`: target modified files + source-of-truth/pattern files.
   2. `convergence_criteria[]`: concrete grep/test/CLI verifiable assertions (zero subjective words like "looks correct").

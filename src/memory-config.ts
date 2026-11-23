@@ -197,10 +197,12 @@ function timeoutSetting(file: JsonFile): number | undefined {
 
 export function memoryModelSettings(root: string) {
   const { AGENT_MEMORY_LLM_BASE_URL: baseUrl, AGENT_MEMORY_LLM_MODEL: model, AGENT_MEMORY_LLM_TIMEOUT_MS: rawTimeout } = process.env;
-  const envTimeout = rawTimeout === undefined ? undefined : Number(rawTimeout);
-  if (envTimeout !== undefined && (!Number.isFinite(envTimeout) || envTimeout <= 0)) {
+  const trimmedTimeout = rawTimeout?.trim();
+  const parsedTimeout = trimmedTimeout ? Number(trimmedTimeout) : undefined;
+  if (parsedTimeout !== undefined && (!Number.isFinite(parsedTimeout) || parsedTimeout <= 0)) {
     throw new InputError('AGENT_MEMORY_LLM_TIMEOUT_MS must be a positive number');
   }
+  const envTimeout = parsedTimeout === undefined ? undefined : Math.floor(parsedTimeout);
   const projectFile = settingsFile(root, 'project');
   const globalFile = resolve(root) === resolve(dirname(globalConfigPath()))
     ? projectFile

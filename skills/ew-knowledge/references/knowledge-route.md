@@ -25,6 +25,9 @@
 6. `constraint` 与 `reference` 发生冲突时保留双方证据并创建待审查关系，不自动覆盖活跃条目。
 7. 归因到具体 Skill、版本、读取文件与证据的信号转交 `workflow-evolve`；项目级规则与跨任务经验留在 Wiki。
 8. 候选只有在需要新契约、新产物、跨 Skill 路由、至少 3 个稳定步骤、明确要求新增 Skill，或目标 Skill learning 已膨胀（`evolve skill learnings` 报告 `consolidate_recommended`：inline > 3 或总数 > 8，`kb candidates route --skill` 自动检查）时才进入 `ew-skill-design`；单条指令、条件链接及对已有 learning 的 `supersede` / `retire` 继续由 `workflow-evolve` 处理。
+9. **写历史而非“当前状态”（日期与 commit SHA 锚点）**：Wiki 是历史记录，不假设正文随代码自动保持实时同步。每条决策或事实必须标注日期（如 `2026-11-22`）；凡涉及代码实现、符号、路径或行为的断言，必须附带对应仓库与 commit SHA（如 `<repo>@<sha>`），避免无日期、无 commit 锚点地写“当前/现在/总是”。发生变更时通过受治理提案新增带新日期与新 SHA 的断言，并将旧断言/旧条目显式标记为已取代（`superseded` / `deprecated` / `needs_review`），不静默改写历史。
+10. **`.out-of-scope/` 被拒绝方案治理约定（绝不绕过 `evolve kb`）**：记录明确被拒绝的功能请求或设计方案时按**概念**归并而非按单个 Issue 建档（包含项目范围/技术约束/战略权衡等持久理由及历史请求引用，避免临时性延期理由；**禁止**把已实现功能或普通 Bug 记为被拒绝范围，以免污染概念查重）。在 Evolve 项目中**禁止**直接手写或以 `.out-of-scope/*.md` 绕过 `evolve kb` 治理：评估新需求前先通过 `evolve search` / `evolve kb search` 按概念相似度查重；若仓库存在历史 `.out-of-scope/*.md`，仅作为只读迁移/对照输入（通过 `evolve kb ingest <file> --propose` 或 `kb propose` → `kb apply` 纳入受治理的 `mode: reference` / `constraint` 条目并标记 `out-of-scope` 标签与日期/SHA）；若维护者日后重新采纳该概念，同样通过 `kb propose` → `kb apply` 将旧条目状态推进为 `deprecated` / `superseded`。
+11. **周期性 Wiki 维护**：定期按 [Wiki 与记忆维护参考](wiki-maintenance.md) 执行只读 `Wiki Lint`（矛盾、孤立页与断链、已被新提交取代的条目），发现需修正项时经受治理提案与人类授权更新。
 
 ## Read 与 ID 边界
 
@@ -32,16 +35,20 @@
 
 ```text
 evolve kb list --root <project> --kind constraint --category <category>
-evolve kb search "<topic>" --root <project> --kind reference --task <kind>
-evolve kb get <entry-id> --root <project> --resolved --task <kind>
-evolve search "<query>" --root <project> --mode context --task <kind> --session <session-id>
+evolve kb search "<topic>" --root <project> --kind reference --task <kind> [--format compact]
+evolve kb get <id|q-N:idx>... --root <project> --resolved --task <kind> [--pick <n,...>]
+evolve search "<query>" --root <project> --mode context --task <kind> --session <session-id> [--format compact]
 evolve search "<query>" --root <project> --mode context --session <current-session-id> --memory-session <historical-session-id>
 evolve search "<query>" --root <project> --mode context --context-file <context.json>
 evolve kb search "<query>" --root <project> --kind episodic --scene <scene> --type <type> --reads <knowledge-reads.json>
 ```
 
-- 标准顺序为 `search → get`：搜索返回统一条目和稳定 `id`，精确读取（`kb get <id> --resolved` / `kb get <id>`）才返回完整正文、作用域和来源。
-- 写入接口（`propose`、`changes`、`apply`）必须使用规范化条目 ID、候选 ID 或变更 ID 并校验基线哈希，不接受别名。
+- 标准顺序为 `search → get`：
+  - 默认输出精简单行 JSON（加 `--format compact` 输出纯文本 Agent 视图，加 `--verbose` 查看 `rawId`/`score`/`commands` 等全量字段）：正文 `<= 300` 字符直接内联 `content`，超过时仅返回 `snippet` 与 `truncated: true`。
+  - 返回的 `id` 为无状态防碰撞短前缀（64 位记忆 Hex / UUID 至少 8 位；legacy Wiki 为 `entries/legacy-<8hex>`；代码符号为 `<kind>:<8hex>` 并附带 `loc: "path:start-end"`；语义化 `entries/<slug>` 原样保留）。携带 `--reads` 时顶层返回单一 `search_id`（`q-N`）与条目序号 `idx`。
+  - `evolve kb get <id|q-N:idx>...` 支持短前缀、批量读取、`q-N:idx` 或 `--pick <n,...>`，并可直接读取 CodeGraph 符号源码片段，返回完整正文、作用域和规范完整 `id`。
+  - `--mode context` 的 `constraints` 按作用域特异度降序排列并受默认预算上限（`20` 条 / `4000` 字符）保护，超出时输出 `constraints_truncated: true` 与 `constraints_notice`（可用 `--task`/`--path`/`--category` 收窄或用 `kb get` 读取其余条目）；`--mode merged` 通过 RRF（`K=10`）平衡代码与工作记忆/Wiki 排序。
+- 写入接口（`propose`、`changes`、`apply`）必须使用 `kb get` 返回的规范化完整条目 ID、候选 ID 或变更 ID 并校验基线哈希，不接受别名或短前缀。
 - 零命中时保留查询条件与空结果，禁止把“缺少参考”误写成新的 `constraint`。
 
 ## 个人跨项目经验（可选）
@@ -58,11 +65,12 @@ evolve kb search "<query>" --root <project> --kind episodic --scene <scene> --ty
 
 ## 搜索回执与 `session-priors`
 
-`evolve search "<query>" --mode context` 与 `evolve kb get <id>` 通过同一个 `--reads <run-dir>/knowledge-reads.json` 记录 `knowledge-reads/1.0`，并在封存时写入回执。分析 Run 还会把已读 Wiki 正文和约束封存为 `session-priors`；后续 Run 通过 `artifact-read` 打开该产物后，`priors_reuse` 自动记录产物 ID、哈希和原 Run ID。
+`evolve search "<query>" --mode context` 与 `evolve kb get <id|q-N:idx>...` 通过同一个 `--reads <run-dir>/knowledge-reads.json` 记录 `knowledge-reads/1.0`，并在封存时写入回执。分析 Run 还会把已读 Wiki 正文和约束封存为 `session-priors`；后续 Run 通过 `artifact-read` 打开该产物后，`priors_reuse` 自动记录产物 ID、哈希和原 Run ID。
 
-- `searches[]` 记录查询词、阶段过滤条件、返回 ID 与命中数。
-- `reads[]` 记录精确读取及其 `from_search_id`（或 `priors` 来源）、`content_sha256` 与 `version`。
-- CLI 模式下跨调用复用同一个 `--reads <run_dir>/knowledge-reads.json`，并在精确读取时传入 `--from-search <search-id>`；无搜索时不伪造记录，零命中保留 `returned_ids: []`。
+- `searches[]` 记录各源底层 `search_id`、查询词、阶段过滤条件、完整规范 `returned_ids` 与命中数。
+- `queries[]` 记录统一查询句柄 `q-N` 及 `idx -> { kind, id, scope, from_search_id }` 映射（供 `q-N:idx` 与 `--pick` 反解）。
+- `reads[]` 记录精确读取及其关联 `from_search_id`（或 `priors` 来源）、完整规范 `id`、`content_sha256` 与 `version`。
+- CLI 模式下跨调用复用同一个 `--reads <run_dir>/knowledge-reads.json` 时，`kb get` 对前缀 ID、`q-N:idx` 与 `--pick` 会自动关联对应 `from_search_id`（显式传入 `--from-search <search-id|q-N>` 仍可覆盖指定）；无搜索时不伪造记录，零命中保留 `returned_ids: []`。
 
 ## L3 初始化与无侵入回溯
 

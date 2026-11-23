@@ -28,13 +28,13 @@ contract:
 1. **Inputs & Knowledge Gate**:
    - **Inputs**: Read `environment` (e.g. `production`, `staging`), `artifact_sha256`, and optional `query` from the invocation arguments, Run brief/arguments, or test payload. If `environment` or `artifact_sha256` is missing, fail closed (`decision: "blocked"` or `evolve run transition <run-id> blocked` with the missing-input reason).
    - **Knowledge Gate**: Follow the canonical Knowledge Gate with `--task release`:
-     - Inside a Run, follow `evolve skill workflows show session-run` (prefer `session-priors` when its scope matches, otherwise record a single receipt via CLI `--reads "<run-dir>/knowledge-reads.json"` with `--task release` and `--from-search <search-id>`).
+     - Inside a Run, follow `evolve skill workflows show session-run` (prefer `session-priors` when its scope matches, otherwise record a single receipt via CLI `--reads "<run-dir>/knowledge-reads.json"` with `--task release` and `--from-search <search-id>` or `q-N:idx` / `--pick`).
      - Outside a Run, follow `AGENTS.md` / `evolve skill workflows show ew-knowledge` with `--task release`.
 2. **Checksum Verification**:
    - Verify `artifact_sha256` matches `^sha256:[a-f0-9]{64}$` and check active release checksum Wiki constraints (`evolve kb list --kind constraint --task release`), recording the consulted constraint ID in `consulted_knowledge_ids`.
    - **Failure branch**: If `artifact_sha256` fails format validation or no active release checksum constraint can be verified when required, fail closed (`decision: "blocked"`, record the mismatch or missing constraint gap in `reasons` — never fabricate a pass).
 3. **Production Freeze Check & Authority Weight**:
-   - When `environment=production`, search both Wiki (`evolve kb search --kind reference` + `evolve kb get <id> --resolved`) and working memory (`evolve kb search` + `evolve kb get <id>` / `evolve search --mode context --task release`).
+   - When `environment=production`, search both Wiki (`evolve kb search --kind reference` + `evolve kb get <id|q-N:idx> --resolved`) and working memory (`evolve kb search` + `evolve kb get <id|q-N:idx>` / `evolve search --mode context --task release`), recording canonical full IDs returned by `kb get` in `consulted_knowledge_ids` / `consulted_memory_ids`.
    - **Authority rule**: Working memory (`authority: unverified_episodic`) is an investigative clue only, never standalone blocking authority. Final authority rests with **active Wiki entries (`status: active`, with `mode: constraint` taking precedence over `mode: reference` and memory)**:
      - Block (`decision: "blocked"`) if an `active` Wiki `constraint` directs a freeze/block, OR if an `active` Wiki protocol (`status: active`) delegates freeze status to an unresolved active freeze window reported in matching working memory (with no superseding resolved/lifted signal).
      - If working memory and an active Wiki `constraint` conflict, follow the active Wiki `constraint` and record both IDs plus the conflict note in `reasons`.

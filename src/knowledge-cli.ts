@@ -19,7 +19,7 @@ import {
   drainMemoryHookJobs, enqueueMemoryHook, hasPendingMemoryHookJobs, readMemoryHookInput,
   readMemoryHookJobs, retryMemoryHookJobs, startMemoryHookWorker,
 } from './memory-hook-jobs.js';
-import { InputError, evolveDir, evolvePath, requireText } from './common.js';
+import { InputError, NotFoundError, evolveDir, evolvePath, requireText } from './common.js';
 import { defaultMemoryDbPath, MemoryStore, type ConversationMessage } from './memory.js';
 import { unifiedSearch } from './search.js';
 import { KnowledgeStore, type KnowledgeFilters, type KnowledgeInput, type KnowledgeLayer, type KnowledgeMutationOptions } from './kb.js';
@@ -34,7 +34,20 @@ import { changeSkillVersion, replaySkillAddition } from './skill-replay.js';
 import { migrateLegacyWiki } from './wiki-migration.js';
 import { isRepositoryId, isWikiCategory } from './wiki-entry.js';
 import { applyWikiChange, listWikiChanges, proposeWikiChange } from './wiki-change.js';
-import { KnowledgeReads, validateKnowledgeReads } from './knowledge-reads.js';
+import { KnowledgeReads, validateKnowledgeReads, type KnowledgeQueryItem } from './knowledge-reads.js';
+import {
+  formatUnifiedContextJson,
+  formatUnifiedMergedJson,
+  projectCodeGraphItem,
+  projectKnowledgeHit,
+  renderCodeSearchCompact,
+  renderKbGetCompact,
+  renderKbSearchCompact,
+  renderUnifiedContextCompact,
+  renderUnifiedMergedCompact,
+  type OutputFormat,
+  type RawCodeGraphItem,
+} from './search-format.js';
 import { decideSkillRoute } from './skill-route.js';
 import { learningBloat, readSkillLearnings, skillLearningUsage } from './skill-learnings.js';
 import { evolveSessionReceipt, readEvolveSessions, workflowDbPath } from './workflow-runtime.js';
@@ -56,7 +69,7 @@ export function knowledgeHelp(invocation: 'evolve' = 'evolve') {
   search <query>                           Aggregate knowledge and code (--from kb,code|all)
                                            --mode merged|context --scope project|global|local
   kb add <text>                            Add a record (--kind episodic|reference|constraint)
-  kb get <id>                              Read a complete record and its provenance
+  kb get <id>...                           Read complete record(s) and provenance (--pick <n,...>)
   kb list                                  List records with filters and stable pagination
   kb search <query>                        Search knowledge records only
   kb update <id> [text]                     Update a record without replacing omitted fields
@@ -78,7 +91,7 @@ export function knowledgeHelp(invocation: 'evolve' = 'evolve') {
   kb harvest session|conversation|skill|receipt|scan <id>
                                            Extract review candidates (--project)
   kb candidates show|route|publish <id>     Inspect, route or publish reviewed candidates
-  code sync                                Build or update the project code graph
+  code build|sync                          Build or update the project code graph
   code search <query>                      Find code symbols
   code graph <id> [to-id]                   Follow callers/callees or trace a path (--direction, --depth)
   session review <id>                      Review Session execution signals
@@ -115,9 +128,12 @@ Options:
   --namespace <name>    Episodic namespace (default default)
   --reads <path>        Persist a knowledge_reads receipt across calls
   --trace-file <path>   Compatibility alias for --reads
-  --from-search <id>    Associate an exact read with a recorded search
+  --from-search <id>    Associate an exact read with a recorded search (or q-N query ID)
+  --pick <n[,m...]>     Select item index(es) from the recorded search when using --reads
   --trace               Include knowledge_reads in the result
   --resolved            Read Wiki references using the active scope context
+  --format <mode>       Output format: json (default) or compact (plain text)
+  --verbose             Return full unslimmed debug fields and pretty JSON
   --help                Show this message
 
 Writes default to project; --scope global selects user knowledge. Formal writes use governed proposals.
@@ -125,7 +141,7 @@ Context defaults to episodic + formal knowledge + code. --from kb excludes code.
 Task/category/session filters apply to knowledge; --path also filters code file paths.
 Set an OpenAI-compatible extraction endpoint with kb config or AGENT_MEMORY_LLM_BASE_URL,
 AGENT_MEMORY_LLM_MODEL and, when required, AGENT_MEMORY_LLM_API_KEY.
-Message files contain an array of {id, role, timestamp, content}. Commands return JSON on stdout.
+Message files contain an array of {id, role, timestamp, content}. Commands return compact JSON by default (pass --verbose for full fields or --format compact for plain text).
 `;
 }
 
@@ -203,6 +219,9 @@ export const knowledgeOptions = {
   scenarios: { type: 'string' },
   help: { type: 'boolean', short: 'h' },
   json: { type: 'boolean' },
+  format: { type: 'string' },
+  verbose: { type: 'boolean' },
+  pick: { type: 'string' },
   'root-b64': { type: 'string' },
   'timeout-ms': { type: 'string' },
   'no-global': { type: 'boolean' },
@@ -319,6 +338,185 @@ function numberOption(value: string | undefined, label: string): number | undefi
   return Number(value);
 }
 
+function buildQueryItemsForContext(
+  result: Awaited<ReturnType<typeof unifiedSearch>> & { mode: 'context' },
+  knowledgeReads: KnowledgeReads,
+): { items: KnowledgeQueryItem[]; indices: Map<string, number> } {
+  const items: KnowledgeQueryItem[] = [];
+  const indices = new Map<string, number>();
+  let idx = 0;
+  for (const item of result.constraints) {
+    idx++;
+    indices.set(`${item.kind}:${item.id}`, idx);
+    items.push({ idx, kind: 'wiki', id: item.rawId, scope: item.scope });
+  }
+  for (const item of result.references) {
+    idx++;
+    indices.set(`${item.kind}:${item.id}`, idx);
+    items.push({
+      idx, kind: 'wiki', id: item.rawId, scope: item.scope,
+      from_search_id: knowledgeReads.findSearchId('wiki', item.rawId, item.scope),
+    });
+  }
+  for (const item of result.episodic) {
+    idx++;
+    indices.set(`${item.kind}:${item.id}`, idx);
+    items.push({
+      idx, kind: 'memory', id: item.rawId, scope: item.scope,
+      from_search_id: knowledgeReads.findSearchId('memory', item.rawId, item.scope),
+    });
+  }
+  for (const item of result.code) {
+    idx++;
+    indices.set(`code:${item.id}`, idx);
+    items.push({
+      idx, kind: 'code', id: item.id, scope: 'project',
+      from_search_id: knowledgeReads.findSearchId('code', item.id, 'project'),
+    });
+  }
+  return { items, indices };
+}
+
+function buildQueryItemsForMerged(
+  result: Awaited<ReturnType<typeof unifiedSearch>> & { mode: 'merged' },
+  knowledgeReads: KnowledgeReads,
+): { items: KnowledgeQueryItem[]; indices: Map<string, number> } {
+  const items: KnowledgeQueryItem[] = [];
+  const indices = new Map<string, number>();
+  result.results.forEach((item, index) => {
+    const idx = index + 1;
+    if (item.source === 'code') {
+      indices.set(`code:${item.id}`, idx);
+      items.push({
+        idx, kind: 'code', id: item.id, scope: 'project',
+        from_search_id: knowledgeReads.findSearchId('code', item.id, 'project'),
+      });
+    } else {
+      indices.set(`${item.kind}:${item.id}`, idx);
+      items.push({
+        idx, kind: item.storageKind, id: item.rawId, scope: item.scope,
+        from_search_id: knowledgeReads.findSearchId(item.storageKind, item.rawId, item.scope),
+      });
+    }
+  });
+  return { items, indices };
+}
+
+type GetTarget = { directId: string } | { picked: KnowledgeQueryItem };
+
+function resolveGetTargets(
+  args: string[],
+  pick: string | undefined,
+  fromSearch: string | undefined,
+  knowledgeReads: KnowledgeReads | undefined,
+): GetTarget[] {
+  if (pick !== undefined) {
+    if (!knowledgeReads) throw new InputError('--pick requires --reads <path> or --trace');
+    if (args.length) throw new InputError('Do not combine positional record IDs with --pick');
+    const rawIndices = pick.split(',').map(item => item.trim()).filter(Boolean);
+    if (!rawIndices.length) throw new InputError('--pick must specify at least one positive integer');
+    return rawIndices.map(raw => {
+      if (!/^\d+$/.test(raw) || Number(raw) < 1) throw new InputError(`Invalid pick index: ${raw}`);
+      return { picked: knowledgeReads.resolvePick(fromSearch, Number(raw)) };
+    });
+  }
+  if (!args.length) throw new InputError('record ID must be a non-empty string');
+  return args.map(raw => {
+    const id = requireText(raw, 'record ID');
+    const ref = /^(q-\d+|search-\d+):(\d+)$/.exec(id);
+    if (ref) {
+      if (!knowledgeReads) throw new InputError(`${id} requires --reads <path> or --trace`);
+      return { picked: knowledgeReads.resolvePick(ref[1], Number(ref[2])) };
+    }
+    return { directId: id };
+  });
+}
+
+async function executeGetTargets(
+  targets: GetTarget[],
+  context: {
+    kb: KnowledgeStore;
+    root: string;
+    filters: KnowledgeFilters;
+    knowledgeReads?: KnowledgeReads;
+    fromSearch?: string;
+    getRemote?: (id: string, fromSearchId?: string) => Promise<unknown>;
+  },
+) {
+  const { kb, root, filters, knowledgeReads, fromSearch, getRemote } = context;
+  let codeGraph: CodeGraph | undefined;
+  const getCodeGraph = () => (codeGraph ??= new CodeGraph(root));
+  const recordCodeSymbol = (symbol: Awaited<ReturnType<CodeGraph['getSymbol']>>, resolvedFromSearch?: string) => {
+    if (knowledgeReads) {
+      knowledgeReads.recordRead({
+        kind: 'code', id: symbol.id, fromSearchId: resolvedFromSearch, content: symbol.content,
+      });
+    }
+    return symbol;
+  };
+  const results: Array<unknown> = [];
+  for (const target of targets) {
+    const id = 'picked' in target ? target.picked.id : target.directId;
+    if (id.startsWith('ov:') && getRemote) {
+      const resolvedFromSearch = ('picked' in target ? target.picked.from_search_id : undefined) ??
+        knowledgeReads?.resolveFromSearch(fromSearch, 'memory', id, 'project');
+      results.push(await getRemote(id, resolvedFromSearch) ?? null);
+      continue;
+    }
+    if ('picked' in target) {
+      const picked = target.picked;
+      if (picked.kind === 'code') {
+        const symbol = await getCodeGraph().getSymbol(picked.id);
+        results.push(recordCodeSymbol(symbol, picked.from_search_id));
+        continue;
+      }
+      const storageKind = picked.kind === 'memory' ? 'memory' : picked.kind === 'wiki' ? 'wiki' : filters.storageKind;
+      const resolvedFromSearch = picked.from_search_id ??
+        knowledgeReads?.resolveFromSearch(fromSearch, picked.kind, picked.id, picked.scope);
+      const record = kb.get(picked.id, {
+        ...filters,
+        ...(picked.scope ? { scope: picked.scope } : {}),
+        ...(storageKind ? { storageKind } : {}),
+        fromSearchId: resolvedFromSearch,
+      });
+      results.push(record ?? null);
+      continue;
+    }
+
+    const peek = kb.get(target.directId, { ...filters, knowledgeReads: undefined });
+    if (!peek) {
+      if (filters.kind === undefined && filters.scope !== 'global' && CodeGraph.hasIndex(root)) {
+        try {
+          const symbol = await getCodeGraph().getSymbol(target.directId);
+          const resolvedFromSearch = knowledgeReads?.resolveFromSearch(fromSearch, 'code', symbol.id, 'project');
+          results.push(recordCodeSymbol(symbol, resolvedFromSearch));
+          continue;
+        } catch (error) {
+          if (!(error instanceof NotFoundError)) throw error;
+        }
+      }
+      results.push(null);
+      continue;
+    }
+    const resolvedFromSearch = knowledgeReads?.resolveFromSearch(fromSearch, peek.storageKind, peek.rawId, peek.scope);
+    const record = kb.get(peek.rawId, {
+      ...filters,
+      storageKind: peek.storageKind,
+      scope: peek.scope,
+      fromSearchId: resolvedFromSearch,
+    });
+    results.push(record ?? null);
+  }
+  if (targets.length === 1) return results[0];
+  return {
+    results: results.map((item, index) => {
+      if (item !== null) return item;
+      const target = targets[index];
+      return { id: 'directId' in target ? target.directId : target.picked.id, not_found: true };
+    }),
+  };
+}
+
 export async function runKnowledgeCli(argv: string[], invocation: 'evolve' = 'evolve') {
   const { values, positionals } = parseArgs({ args: argv, options: knowledgeOptions, allowPositionals: true });
   const [command, action, ...args] = positionals;
@@ -329,10 +527,14 @@ export async function runKnowledgeCli(argv: string[], invocation: 'evolve' = 'ev
     process.stdout.write(knowledgeHelp(invocation));
     return;
   }
+  const format = (values.format ?? 'json') as OutputFormat;
+  if (format !== 'json' && format !== 'compact') throw new InputError('format must be json or compact');
+  if (values.json && values.format === 'compact') throw new InputError('Use either --json or --format compact, not both');
+  const verbose = Boolean(values.verbose);
   let openvikingSyncTracker: OpenVikingSyncTracker | undefined;
-  const print = (result: unknown, compact = false) => {
+  const print = (result: unknown, pretty = verbose) => {
     const output = withOpenVikingSync(result, openvikingSyncTracker);
-    process.stdout.write(JSON.stringify(output, null, compact ? 0 : 2) + '\n');
+    process.stdout.write(JSON.stringify(output, null, pretty ? 2 : 0) + '\n');
   };
   const isHookCommand = command === 'kb' && ['codex-hook', 'host-hook', 'session-start-hook'].includes(action ?? '');
   const hookInput: unknown = isHookCommand ? await readMemoryHookInput() : undefined;
@@ -389,6 +591,11 @@ export async function runKnowledgeCli(argv: string[], invocation: 'evolve' = 'ev
     session: workflowSession, db: values.db, namespace: values.namespace,
     wikiRoot: values['wiki-root'], traceFile, memoryBackend: backend, includeMemory: true,
   });
+  const persistTrace = () => {
+    if (!knowledgeReads || !traceFile) return;
+    mkdirSync(dirname(resolve(traceFile)), { recursive: true });
+    writeFileSync(traceFile, JSON.stringify(knowledgeReads.toJSON(), null, 2) + '\n');
+  };
   const withTrace = (result: unknown) => {
     const remoteReads = activeKnowledge?.memory?.drainRemoteReads?.() ?? [];
     if (traceFile && activeKnowledge?.releaseId && activeKnowledge.repositoryId && remoteReads.length) {
@@ -398,10 +605,7 @@ export async function runKnowledgeCli(argv: string[], invocation: 'evolve' = 'ev
       ? { ...result, knowledge_backend: activeKnowledge.backend, ...(remoteReads.length ? { openviking_reads: remoteReads } : {}) }
       : { result, knowledge_backend: activeKnowledge.backend, ...(remoteReads.length ? { openviking_reads: remoteReads } : {}) };
     if (!knowledgeReads) return result;
-    if (traceFile) {
-      mkdirSync(dirname(resolve(traceFile)), { recursive: true });
-      writeFileSync(traceFile, JSON.stringify(knowledgeReads.toJSON(), null, 2) + '\n');
-    }
+    persistTrace();
     return result && typeof result === 'object' && !Array.isArray(result)
       ? { ...result, knowledge_reads: knowledgeReads.toJSON() } : { result, knowledge_reads: knowledgeReads.toJSON() };
   };
@@ -471,10 +675,11 @@ export async function runKnowledgeCli(argv: string[], invocation: 'evolve' = 'ev
         const activeSession = readEvolveSessions(root, values.session)[0];
         preferredMemoryTypes = activeSession?.runs.findLast(item => item.status === 'running')?.skill.search_profile?.memory;
       }
-      return print(withTrace(await unifiedSearch({
+      const queryText = requireText([action, ...args].join(' '), 'query');
+      const result = await unifiedSearch({
         kb: selected.some(item => item === 'kb' || item === 'all') ? await openKnowledge() : undefined,
         code: hasCode ? new CodeGraph(root, { autoRefresh: true }) : undefined,
-      }, requireText([action, ...args].join(' '), 'query'), {
+      }, queryText, {
         ...filters, from, mode, preferredMemoryTypes,
         session: mode === 'context' ? undefined : filters.session,
         memorySession: values['memory-session'],
@@ -483,24 +688,39 @@ export async function runKnowledgeCli(argv: string[], invocation: 'evolve' = 'ev
           ...(contextValues.task ? { task_kind: contextValues.task } : {}),
           ...(contextValues.paths?.length ? { paths: contextValues.paths } : {}),
         },
-      })));
+      });
+      let searchId: string | undefined;
+      let indices: Map<string, number> | undefined;
+      if (knowledgeReads) {
+        const mapped = result.mode === 'context'
+          ? buildQueryItemsForContext(result, knowledgeReads)
+          : buildQueryItemsForMerged(result, knowledgeReads);
+        indices = mapped.indices;
+        searchId = knowledgeReads.recordQuery(result.query, mapped.items);
+      }
+      const formatted = result.mode === 'context'
+        ? formatUnifiedContextJson(result, { searchId, indices, verbose })
+        : formatUnifiedMergedJson(result, { searchId, indices, verbose });
+      if (format === 'compact') {
+        withTrace(formatted);
+        const text = result.mode === 'context'
+          ? renderUnifiedContextCompact(formatted as ReturnType<typeof formatUnifiedContextJson>)
+          : renderUnifiedMergedCompact(formatted as ReturnType<typeof formatUnifiedMergedJson>);
+        process.stdout.write(text);
+        return;
+      }
+      return print(withTrace(formatted));
     }
     if (command === 'kb' && ['add', 'get', 'list', 'search', 'update', 'delete'].includes(action)) {
-      if (action === 'get') {
-        const id = requireText(args[0], 'record ID');
-        if (!frozen && id.startsWith('ov:')) {
-          if (traceFile && !workflowSession && !existsSync(traceFile + '.openviking.json')) {
-            const profile = readProject(root);
-            if (profile?.enabled !== false && profile) {
-              appendRemoteReads(traceFile + '.openviking.json', profile.project_id, parseRemoteMemoryId(id).release);
-            }
+      const targets = action === 'get' ? resolveGetTargets(args, values.pick, values['from-search'], knowledgeReads) : [];
+      if (!frozen && traceFile && !workflowSession && !existsSync(traceFile + '.openviking.json')) {
+        const remoteId = targets.map(target => 'picked' in target ? target.picked.id : target.directId)
+          .find(id => id.startsWith('ov:'));
+        if (remoteId) {
+          const profile = readProject(root);
+          if (profile?.enabled !== false && profile) {
+            appendRemoteReads(traceFile + '.openviking.json', profile.project_id, parseRemoteMemoryId(remoteId).release);
           }
-          const sources = await readSources();
-          activeKnowledge = sources;
-          if (!sources.memory) throw new InputError('Memory reader is not configured');
-          if (!sources.releaseId && readProject(root)) throw new InputError('OPENVIKING_REMOTE_ID_UNAVAILABLE');
-          const record = await sources.memory.get(id, { knowledgeReads, fromSearchId: values['from-search'] });
-          return print(withTrace(record ?? null));
         }
       }
       const kb = await openKnowledge(['add', 'update', 'delete'].includes(action));
@@ -513,28 +733,78 @@ export async function runKnowledgeCli(argv: string[], invocation: 'evolve' = 'ev
         sources: values.evidence,
       });
       if (action === 'add') return print(withTrace(await kb.add(input(values.content ?? args.join(' ')), mutationOptions)));
-      if (action === 'get') return print(withTrace(kb.get(requireText(args[0], 'record ID'), filters) ?? null));
+      if (action === 'get') {
+        const payload = await executeGetTargets(targets, {
+          kb, root, filters, knowledgeReads, fromSearch: values['from-search'],
+          ...(!frozen ? { getRemote: async (id: string, fromSearchId?: string) => {
+            const sources = await readSources();
+            activeKnowledge = sources;
+            if (!sources.memory) throw new InputError('Memory reader is not configured');
+            if (!sources.releaseId && readProject(root)) throw new InputError('OPENVIKING_REMOTE_ID_UNAVAILABLE');
+            return sources.memory.get(id, { knowledgeReads, fromSearchId });
+          } } : {}),
+        });
+        if (format === 'compact') {
+          withTrace(payload);
+          process.stdout.write(renderKbGetCompact(payload));
+          return;
+        }
+        return print(withTrace(payload));
+      }
       if (action === 'update') return print(withTrace(await kb.update(requireText(args[0], 'record ID'), input(values.content ?? (args.length > 1 ? args.slice(1).join(' ') : undefined)), mutationOptions)));
       if (action === 'delete') return print(withTrace(await kb.delete(requireText(args[0], 'record ID'), mutationOptions)));
       const result = action === 'list' ? await kb.list(filters) : await kb.search(requireText(args.join(' '), 'query'), filters);
-      const results = result.results.map(record => {
-        const searchId = knowledgeReads?.toJSON().searches.findLast(search =>
-          search.source === record.storageKind && search.returned_ids.includes(record.rawId))?.search_id;
-        return { ...record, ...(searchId ? { search_id: searchId } : {}) };
-      });
-      const commands = {
-        prefix: prefix(),
-        get: ['get', '--kind', { arg: 'kind' }, ...commandFlags({ reads: traceFile, trace: values.trace }),
-          ...(traceFile && action === 'search' ? ['--from-search', { arg: 'search_id' }] : []), '--', { arg: 'id' }],
-        sources: ['sources', '--', { arg: 'id' }],
-        ...(hasOtherPage(result.pagination) ? { page: [action, ...commandFlags({
-          kind, status: values.status, task: values.task, session: values.session, type: values.type, scene: values.scene,
-          limit: result.pagination.limit, reads: traceFile, trace: values.trace,
-        }), ...((values.path ?? []).flatMap(value => ['--path', value])),
-          ...((values.category ?? []).flatMap(value => ['--category', value])),
-          '--page', { arg: 'page' }, ...(action === 'search' ? ['--', args.join(' ')] : [])] } : {}),
+      const queryLabel = action === 'list' ? 'kb:list' : args.join(' ');
+      let searchId: string | undefined;
+      if (knowledgeReads) {
+        const items: KnowledgeQueryItem[] = result.results.map((record, index) => ({
+          idx: index + 1,
+          kind: record.storageKind,
+          id: record.rawId,
+          scope: record.scope,
+          ...(action === 'search' ? { from_search_id: knowledgeReads.findSearchId(record.storageKind, record.rawId, record.scope) } : {}),
+        }));
+        searchId = knowledgeReads.recordQuery(queryLabel, items);
+      }
+      if (verbose) {
+        const results = result.results.map((record, index) => {
+          const itemSearchId = knowledgeReads?.findSearchId(record.storageKind, record.rawId, record.scope);
+          return { ...record, ...(searchId ? { idx: index + 1 } : {}), ...(itemSearchId ? { search_id: itemSearchId } : {}) };
+        });
+        const commands = {
+          prefix: prefix(),
+          get: ['get', '--kind', { arg: 'kind' }, ...commandFlags({ reads: traceFile, trace: values.trace }),
+            ...(traceFile && action === 'search' ? ['--from-search', { arg: 'search_id' }] : []), '--', { arg: 'id' }],
+          sources: ['sources', '--', { arg: 'id' }],
+          ...(hasOtherPage(result.pagination) ? { page: [action, ...commandFlags({
+            kind, status: values.status, task: values.task, session: values.session, type: values.type, scene: values.scene,
+            limit: result.pagination.limit, reads: traceFile, trace: values.trace,
+          }), ...((values.path ?? []).flatMap(value => ['--path', value])),
+            ...((values.category ?? []).flatMap(value => ['--category', value])),
+            '--verbose', '--page', { arg: 'page' }, ...(action === 'search' ? ['--', args.join(' ')] : [])] } : {}),
+        };
+        const payload = { ...(searchId ? { search_id: searchId } : {}), ...result, results, commands };
+        if (format === 'compact') {
+          withTrace(payload);
+          process.stdout.write(renderKbSearchCompact(payload as Parameters<typeof renderKbSearchCompact>[0]));
+          return;
+        }
+        return print(withTrace(payload));
+      }
+      const allIds = result.results.map(record => record.id);
+      const compactResults = result.results.map((record, index) =>
+        projectKnowledgeHit(record, { idx: searchId ? index + 1 : undefined, allIds }));
+      const payload = {
+        ...(searchId ? { search_id: searchId } : {}),
+        results: compactResults,
+        pagination: result.pagination,
       };
-      return print(withTrace({ ...result, results, commands }));
+      if (format === 'compact') {
+        withTrace(payload);
+        process.stdout.write(renderKbSearchCompact(payload));
+        return;
+      }
+      return print(withTrace(payload));
     }
     if (command === 'kb' && action === 'config') {
       return print(await configureMemory(root, {
@@ -668,27 +938,83 @@ export async function runKnowledgeCli(argv: string[], invocation: 'evolve' = 'ev
     }
     if (command === 'code') {
       const code = new CodeGraph(root, { autoRefresh: true });
+      const formatGraphList = (items: RawCodeGraphItem[]) => {
+        if (verbose) return items;
+        const allIds = items.map(item => item.node.id);
+        return items.map(item => projectCodeGraphItem(item, allIds));
+      };
       switch (action) {
         case 'build': return print(await code.build());
         case 'sync': return print(await code.sync());
         case 'search': {
           const query = args.join(' ');
           const result = await code.search(query, limit);
-          if (knowledgeReads) knowledgeReads.recordSearch({
-            source: 'code', query,
-            returnedIds: result.flatMap(item => typeof item.node?.id === 'string' ? [item.node.id] : []),
-          });
-          return print(withTrace(result));
+          let searchId: string | undefined;
+          if (knowledgeReads) {
+            const subSearchId = knowledgeReads.recordSearch({
+              source: 'code', query,
+              returnedIds: result.flatMap(item => typeof item.node?.id === 'string' ? [item.node.id] : []),
+            });
+            const queryItems: KnowledgeQueryItem[] = result.flatMap((item, index) =>
+              typeof item.node?.id === 'string'
+                ? [{ idx: index + 1, kind: 'code' as const, id: item.node.id, scope: 'project' as const, from_search_id: subSearchId }]
+                : []);
+            searchId = knowledgeReads.recordQuery(query, queryItems);
+          }
+          const allIds = result.map(item => item.node.id);
+          const projected = verbose
+            ? result.map((item, index) => ({ ...(searchId ? { idx: index + 1 } : {}), ...item }))
+            : (result as unknown as RawCodeGraphItem[]).map((item, index) =>
+              projectCodeGraphItem(item, allIds, searchId ? index + 1 : undefined));
+          if (format === 'compact') {
+            persistTrace();
+            process.stdout.write(renderCodeSearchCompact({
+              search_id: searchId,
+              results: projected as Array<Record<string, unknown>>,
+            }));
+            return;
+          }
+          if (knowledgeReads) {
+            return print(withTrace({ ...(searchId ? { search_id: searchId } : {}), results: projected }));
+          }
+          return print(projected);
         }
         case 'graph': {
-          if (args.length > 1) return print(await code.trace(requireText(args[0], 'from id'), requireText(args[1], 'to id')));
-          const direction = values.direction ?? 'callers';
-          if (direction !== 'callers' && direction !== 'callees') throw new InputError('direction must be callers or callees');
-          return print(await code.neighbors(requireText(args[0], 'symbol id'), direction, numberOption(values.depth, 'depth') ?? 1));
+          const raw = args.length > 1
+            ? await code.trace(requireText(args[0], 'from id'), requireText(args[1], 'to id'))
+            : await (async () => {
+              const direction = values.direction ?? 'callers';
+              if (direction !== 'callers' && direction !== 'callees') throw new InputError('direction must be callers or callees');
+              return code.neighbors(requireText(args[0], 'symbol id'), direction, numberOption(values.depth, 'depth') ?? 1);
+            })();
+          const formatted = formatGraphList(raw as unknown as RawCodeGraphItem[]);
+          if (format === 'compact') {
+            process.stdout.write(renderCodeSearchCompact({ results: formatted as Array<Record<string, unknown>> }));
+            return;
+          }
+          return print(formatted);
         }
         case 'callers':
-        case 'callees': return print(await code.neighbors(requireText(args[0], 'symbol id'), action, Number(values.depth ?? '1')));
-        case 'trace': return print(await code.trace(requireText(args[0], 'from id'), requireText(args[1], 'to id')));
+        case 'callees': {
+          const raw = await code.neighbors(requireText(args[0], 'symbol id'), action, Number(values.depth ?? '1'));
+          const formatted = formatGraphList(raw as unknown as RawCodeGraphItem[]);
+          if (format === 'compact') {
+            process.stdout.write(renderCodeSearchCompact({ results: formatted as Array<Record<string, unknown>> }));
+            return;
+          }
+          return print(formatted);
+        }
+        case 'trace': {
+          const raw = await code.trace(requireText(args[0], 'from id'), requireText(args[1], 'to id'));
+          const formatted = formatGraphList(raw as unknown as RawCodeGraphItem[]);
+          if (format === 'compact') {
+            process.stdout.write(renderCodeSearchCompact({ results: formatted as Array<Record<string, unknown>> }));
+            return;
+          }
+          return print(formatted);
+        }
+        default:
+          throw new InputError(`Unknown code command: ${action ?? ''}. Expected build, sync, search, graph, callers, callees or trace`);
       }
     }
     if (command === 'kb' && (action === 'harvest' || action === 'candidates')) {

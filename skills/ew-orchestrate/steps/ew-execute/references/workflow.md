@@ -30,21 +30,27 @@ Read `current-plan`:
 
 Resolve `executionMethod`, `defaultExecutor` (honoring `--executor` when provided), and `domainRouting`. **Task filter & checkpoint resume**: if `--task <TASK-ID>` is set, validate that the task exists (or `W001`) and execute only the targeted task(s) once dependencies are met; otherwise scan persisted task statuses (or `current-execution`/checkpoint records for `pi-markdown`) and start from the first wave containing incomplete tasks. If zero incomplete tasks exist and `latest-review`/`latest-debug` is bound, return to Step 0 Degradation Routing rather than completing as a no-op.
 
-## Step 3: Load Project Rules
+## Step 3: Load Project Rules & Optional Shared Exploration Notes
 
 Complete the Run Knowledge Gate (`evolve skill workflows show session-run`): reuse bound `session-priors` for covered `coding` Wiki scope, and query `evolve search "<query>" --mode context` + `evolve kb get <id>` (with CLI `--reads`) for additional paths/categories, passing resolved constraints into each Step 4 task prompt.
 
 When a concrete problem warrants cross-project research, optionally run `evolve experience status`, then search personal experience with a domain and versioned stack verified from the current project (for example `evolve experience search python python@3.12 "<problem>"`). Use non-sensitive query terms. Check applicability and conflicts before using a result. These references never override project rules or enter the required Knowledge Gate.
 
-## Step 4: Wave Parallel Execution
+- **Optional exploration pre-seeding**: for multi-module plans or tasks needing cross-file/API discovery, optionally dispatch one fresh-context read-only exploration subagent (`cli-explore-agent` / `workflow-codebase-mapper` or host equivalent) before task fan-out to save shared markdown notes at `{run_dir}/work/exploration-notes.md` (run-local, outside repo source edits). Pass that path as a **context pointer** to Step 4 workers so implementers focus on implementation rather than repeating discovery.
+
+## Step 4: Task Graph Frontier & Parallel Execution
 
 - **Executor routing** (priority: task assignment > explicit `--executor` / `--method` > auto domain routing):
   - `frontend` (`.tsx/.jsx/.vue/.css/.html` or UI scope), `backend` (`.go/.rs/.java/.py/.sql/.proto` or API/DB scope), `general` (mixed, `.ts/.js`, config, tests). Log before dispatch: `TASK-001 [frontend] -> <executor>`.
-- **Prompt skeleton**: include `PURPOSE`, `TASK`, `MODE: write`, `CONTEXT`, `EXPECTED`, `CONSTRAINTS` (task files + specs), task definition (`Files`, `Read First`, `Implementation`, `Convergence Criteria`), prior wave summaries, and resolved Wiki constraints.
-- **Execution loop** (serial across waves, parallel per independent task inside each wave — never merge unrelated tasks into one delegate call; join all spawned subagents before ending a wave):
-  - **`agent` path**: launch executor subagent (`workflow-executor` / `workflow_executor`, via `invoke_subagent` or host subagent with fresh context; fall back to inline role instructions when absent; OMP hosts use native `task` or eval `agent()`, batching independent items with shared `context` + `tasks[]`, and join/cancel all children before ending the wave without polling) to implement -> verify convergence -> auto-fix (<=3 attempts) -> commit only if `--auto-commit` -> write `evidence/summaries/${task.id}.md` -> report status/checkpoint.
+- **Fresh-per-task & sparse pointer brief**: start **every** task worker with a **fresh context window** (never reuse a prior task's worker or fork the coordinator thread). Communicate via **sparse context pointers** rather than duplicating large files: include `PURPOSE`, `TASK`, `MODE: write`, `CONTEXT` (pointer to `current-plan` task ID/spec section, `{run_dir}/work/exploration-notes.md` if generated, prior dependency summaries/commits, and resolved Wiki constraints), `EXPECTED`, and `CONSTRAINTS` (`Files`, `Read First`, `Implementation`, `Convergence Criteria`).
+- **Frontier scheduling alongside waves**: use `current-plan` waves as baseline ordering while maintaining the **task graph frontier** — any incomplete task whose dependencies (`depends_on` / prior wave prerequisites) are all `completed` (and merged, when isolated). Whenever a task finishes (and merges if isolated), recompute the frontier and dispatch newly unblocked ready tasks right away instead of waiting for unrelated slow tasks, respecting `--task` filtering and tracking wave/task completion cleanly in `waves[]`.
+- **Workspace isolation & dedicated merger**:
+  - **Disjoint direct wave** (default when tasks touch strictly non-colliding `files[]` without build contention): dispatch ready tasks in parallel inside the working tree and join before advancing dependent tasks.
+  - **Isolated worktree + merger** (when parallel tasks share build targets or risk file collisions; resolve host parallel/isolation primitives via `evolve skill workflows show session-run`): give each task its own isolated worktree or branch based on the current integration tip. Each isolated implementer verifies its base matches the integration tip (resetting/rebasing if behind), implements and verifies convergence criteria, merges the latest integration tip back into its branch before reporting completion, and returns its branch/commit/summary pointer. A dedicated **merger** worker (or sequential coordinator merge) lands each completed branch onto the integration branch/working copy before recomputing the frontier and before deleting or tearing down isolated worker workspaces.
+- **Dispatch paths**:
+  - **`agent` path**: launch a fresh executor subagent (`workflow-executor` / `workflow_executor`, via the host's subagent/parallel dispatch capability mapped in `evolve skill workflows show session-run`; fall back to inline role instructions when absent; OMP hosts use native `task` or eval `agent()`, batching independent items with shared `context` + `tasks[]`, and join/cancel all children before ending the wave without polling) to implement -> verify convergence -> auto-fix (<=3 attempts) -> commit only if `--auto-commit` -> write `evidence/summaries/${task.id}.md` -> report status/checkpoint.
   - **`cli` path**: run `evolve agent exec "${prompt}" --to ${executor} --mode write` (supports `codex|agy|claude|omp`; include `--session ${session_id} --run ${run_id}` when `--to codex` or `--to omp`; `--to agy` runs standalone without `--session`/`--run`), verify convergence criteria against disk, write `evidence/summaries/${task.id}.md`, and commit only if `--auto-commit`. For OMP, `--role` selects a model only, `--model` overrides it, and `--timeout` is milliseconds; neither grants permission nor enters Plan mode.
-- **Failure handling**: up to 3 focused retries (for CLI retries, narrow prompt then fall back to a subagent). After 3 failures, mark `blocked` with checkpoint `{attempt: 3, last_error, partial_files, executor}` and mark unmet downstream dependents `upstream_blocked`. Between waves, prompt only if a task blocked and `-y` is unset.
+- **Failure handling**: up to 3 focused retries (for CLI retries, narrow prompt then fall back to a fresh subagent). After 3 failures, mark `blocked` with checkpoint `{attempt: 3, last_error, partial_files, executor}` and mark unmet downstream dependents `upstream_blocked`. Prompt between waves/frontier batches only if a task blocked and `-y` is unset.
 
 ## Step 5: Post-Wave Validation
 
@@ -52,12 +58,13 @@ When a concrete problem warrants cross-project research, optionally run `evolve 
 2. Cross-check task statuses vs wave results (mismatch = critical).
 3. Scan changed files against spec `allowed_languages`/`disallowed_imports` (hit = critical `tech_stack_violation`).
 4. Optional CLI diff check via `evolve agent exec "<review changed files for cycles/dead code/breaking changes>" --to codex|agy|claude|omp --mode analysis`; bind Codex/OMP with both `--session`/`--run`. For OMP, this is the one-shot restricted worker. For an independent second opinion explicitly select an authorized different model (OMP `--model <selector>`), not a same-model child.
+5. Clean up any remaining isolated task worktrees or temporary worker branches after confirming all completed work has landed.
 
 Any critical failure marks the run `blocked` with recorded violations.
 
-## Step 6: Optional Diff Review
+## Step 6: Optional Diff Review & Fresh Fixer
 
-Unless `codeReviewTool == "Skip"`, run `evolve agent exec "<review git diff>" --to ${codeReviewTool} --mode analysis` and record summary findings.
+Unless `codeReviewTool == "Skip"`, run `evolve agent exec "<review git diff>" --to ${codeReviewTool} --mode analysis` (or a fresh read-only review subagent) and record summary findings. If in-scope fixes are applied before handing off to `ew-verify`/`ew-review`, dispatch a **single fresh fixer subagent** (fresh context window, never reusing an earlier task implementer) and re-run affected convergence checks.
 
 ## Step 7: Scoped Smoke Self-Check
 

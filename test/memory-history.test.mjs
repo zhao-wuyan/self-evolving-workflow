@@ -56,13 +56,16 @@ function follow(invoke, commands, action, slots) {
 
 async function assertExactSource(invoke, { host, session, path, content, rawContent = content, scope }) {
   const search = async value => (await invoke(['kb', 'search', value, '--session', session])).results;
-  const { results: [hit], commands } = await invoke(['kb', 'search', originalId(host), '--session', session]);
+  const { results: [hit], commands } = await invoke(['kb', 'search', originalId(host), '--session', session, '--verbose']);
   assert.equal(hit.source, 'kb');
   assert.equal(hit.kind, 'episodic');
   assert.equal(hit.storageKind, 'memory');
   assert.ok(hit.sources.some(id => id.startsWith(host + ':' + session + ':')));
   const record = await follow(invoke, commands, 'get', hit);
-  assert.equal((await search(originalNumber))[0]?.id, record.id);
+  const [compactHit] = await search(originalNumber);
+  assert.ok(compactHit);
+  assert.equal(compactHit.id.length, 8);
+  assert.ok(record.id.startsWith(compactHit.id));
   assert.deepEqual(await search(changedId(host)), []);
   assert.deepEqual(await search(changedNumber), []);
   assert.ok(record.exactValues.includes(originalId(host)));

@@ -350,8 +350,15 @@ export class MemoryStore {
 
   get(id: string, options: { knowledgeReads?: KnowledgeReads; fromSearchId?: string } = {}): MemoryRecord | undefined {
     if (!this.hasTables('memory_records', 'memory_literals', 'memory_sources')) return undefined;
-    const row = this.db!.prepare(`SELECT ${recordFields} FROM memory_records m WHERE namespace = ? AND id = ?`)
+    let row = this.db!.prepare(`SELECT ${recordFields} FROM memory_records m WHERE namespace = ? AND id = ?`)
       .get(this.namespace, id) as Row | undefined;
+    if (!row && /^(?:[a-f0-9]{8,}|[0-9a-f-]{8,})$/i.test(id)) {
+      const matches = this.db!.prepare(
+        `SELECT ${recordFields} FROM memory_records m WHERE namespace = ? AND lower(id) LIKE ? ORDER BY id LIMIT 2`,
+      ).all(this.namespace, `${id.toLowerCase()}%`) as Row[];
+      if (matches.length > 1) throw new InputError(`Ambiguous memory ID prefix: ${id}`);
+      row = matches[0];
+    }
     const result = row && record(row);
     if (result && options.knowledgeReads) {
       options.knowledgeReads.recordRead({
@@ -461,7 +468,7 @@ export class MemoryStore {
     const { where, args } = this.filterWhere(options);
     if (isExact) {
       const indexed = `FROM memory_literals l JOIN memory_records m ON m.key = l.memory_key WHERE l.value = ? AND ${where}`;
-      const rows = db.prepare(`SELECT ${recordFields} ${indexed} ORDER BY m.id LIMIT ? OFFSET ?`)
+      const rows = db.prepare(`SELECT ${recordFields} ${indexed} ORDER BY m.priority DESC, m.updated_at DESC, m.id ASC LIMIT ? OFFSET ?`)
         .all(text, ...args, take, offset) as Row[];
       const results = rows.map(row => ({ ...record(row), score: 1 }));
       // 旧条目仍可按其实际存储内容精确检索。
@@ -472,7 +479,7 @@ export class MemoryStore {
         const legacy = db.prepare(`SELECT ${recordFields} FROM memory_records m
           WHERE ${where} AND instr(m.content, ?) > 0 AND NOT EXISTS
           (SELECT 1 FROM memory_sources WHERE memory_key = m.key) AND NOT EXISTS
-          (SELECT 1 FROM memory_literals WHERE memory_key = m.key AND value = ?) ORDER BY m.id`).iterate(...args, text, text) as Iterable<Row>;
+          (SELECT 1 FROM memory_literals WHERE memory_key = m.key AND value = ?) ORDER BY m.priority DESC, m.updated_at DESC, m.id ASC`).iterate(...args, text, text) as Iterable<Row>;
         for (const row of legacy) {
           if (!exactMemoryValues(row.content).includes(text)) continue;
           if (skip) { skip--; continue; }

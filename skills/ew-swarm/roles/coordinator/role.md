@@ -11,20 +11,9 @@ role: coordinator
 
 ## Boundaries
 
-### MUST
-- Generate `swarm-config.json` from user task description (Phase 1)
-- Invoke `<controller.script>` (`{run_dir}/work/controller/aco.py` materialized via `evolve run task controller`) for ALL numeric decisions (selection, update, convergence)
-- Spawn ant workers with strict role-spec assignment + path hints from script
-- After each iteration's joined ant workers finish (and scorer if `llm`): call `<controller.script> update` -> `<controller.script> converged` -> decide loop/exit
-- Persist session state in the Evolve assignment roster and Python controller checkpoints
-- Trigger analyst for final synthesis when converged
-
-### MUST NOT
-- Make selection/update/convergence decisions on its own — these belong to the script
-- Modify `pheromone/*.json`, `best.json`, or `trails/*.jsonl` directly — script owns these
-- Skip the convergence check after each iteration
-- Spawn more than `config.swarm.n_ants` ants per iteration
-- Exceed `config.convergence.max_iterations` outer loops
+- **Config & script authority**: Generate `swarm-config.json` from the user task (Phase 1), and delegate all numeric decisions (selection, pheromone update, convergence) to `<controller.script>` (`{run_dir}/work/controller/aco.py` materialized via `evolve run task controller`); never modify `pheromone/*.json`, `best.json`, or `trails/*.jsonl` directly (`aco.py` owns them).
+- **Fresh-context & sparse-pointer dispatch**: Spawn every worker (`ant`, `scorer`, `analyst`) in a **fresh context window** (reserve `fork` strictly for warm deep-dive sub-branches needing primary-source reasoning) with **sparse context pointers** (`session_id`, `run_id`, `run_dir`, `team_dir`, `assignment_id`, `role_spec`, `--reads` receipt path) rather than parent history or duplicated file contents.
+- **Bounds & workspace hygiene**: Cap each iteration at `config.swarm.n_ants` workers and outer loops at `config.convergence.max_iterations`; always run `<controller.script> update` and `converged` after joined workers finish; run read-only/JSON-output workers in the shared workspace, isolate concurrent code-editing workers in dedicated worktrees or branches and land their edits before worker teardown (see [host-adapters.md](../../references/host-adapters.md)), and join/stop all spawned workers before Phase 4 synthesis (`analyst`) or returning.
 
 ---
 
@@ -55,7 +44,7 @@ When coordinator needs to execute a phase command:
 | [Iteration](commands/iterate.md) | Command | Phase 3: single iteration loop body (select/spawn/join/update) |
 | [Convergence](commands/converge.md) | Command | Phase 4: convergence handler + analyst spawn |
 | `aco.py` controller | Script | Numeric decisions via `<controller.script>` (`{run_dir}/work/controller/aco.py` materialized by `evolve run task controller`) |
-| team-worker | Subagent | Worker dispatch (`ant`, `scorer`, `analyst`) via host parallel subagent/swarm capability (see [host-adapters.md](../../references/host-adapters.md)) |
+| team-worker | Subagent | Worker dispatch (`ant`, `scorer`, `analyst`) via host parallel subagent capability (see [host-adapters.md](../../references/host-adapters.md)) |
 | host plan / roster | System | Track assignments and join/await workers before concluding |
 | evolve run task | Evolve runtime | Assignment, result, and cancellation receipts (`assign`/`report`/`cancel`/`list`) |
 | host user prompt | System | Clarify ambiguity / failure via host structured user-prompt capability (see [host-adapters.md](../../references/host-adapters.md)) |
@@ -110,9 +99,7 @@ When coordinator needs to execute a phase command:
    - `task_space.nodes` OR `task_space.auto_discover_from`
    - `scoring.mode` ∈ `{script, llm, hybrid, fallback}` based on user answer (with `script_path` relative to project `cwd` for `script`/`hybrid`, and `convergence.target_score.enabled: false` unless verified scoring is active)
    - `ant_prompt.objective` — the actual goal injected into ant role-spec at spawn
-4. Keep config in memory until the Run birth packet provides the exact `run_dir` (self-start Run allocation is the first action of Phase 2). Never write into a guessed Run directory.
-
-**CRITICAL**: Phase 1 does NOT call `aco.py`. It only produces the config.
+4. Keep config in memory until Phase 2 resolves the exact `run_dir` (self-start Run allocation is the first action of Phase 2); never write into a guessed Run directory. Phase 1 produces config only without calling `aco.py`.
 
 ---
 
@@ -159,7 +146,7 @@ Before creating the session folder or writing `swarm-config.json`:
 
 **Objective**: Run iteration `k = 1..K`. Execute the canonical loop in [commands/iterate.md](commands/iterate.md):
 
-1. `<controller.script> select --iter <k>` -> register assignments via `evolve run task assign` -> dispatch `N` `ant` workers in parallel using the host's parallel subagent/swarm capability (see [host-adapters.md](../../references/host-adapters.md)) and wait/join for all `N` workers.
+1. `<controller.script> select --iter <k>` -> register assignments via `evolve run task assign` -> dispatch `N` `ant` workers in parallel using the host's parallel subagent capability (see [host-adapters.md](../../references/host-adapters.md)) and wait/join for all `N` workers.
 2. When all `ANT-<k>-*` assignments are resolved (`result` or `cancellation` in `evolve run task list`), if `scoring.mode == "llm"` (or optional `hybrid`) register `SCORE-<k>` via `evolve run task assign`, dispatch `scorer`, and wait/join for completion; then run `<controller.script> update --iter <k>` and `<controller.script> converged`.
 3. Branch: `converged == true` -> Phase 4; else loop `k + 1`.
 

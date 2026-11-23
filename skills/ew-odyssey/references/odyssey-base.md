@@ -1,10 +1,10 @@
 # Odyssey Shared Base
 
-Shared by all seven Odyssey modes (`debug`, `improve`, `planex`, `review`, `security`, `defensive`, `ui`). Mode files own their front-half state machine, pattern source, category table, completion summary, and `W001-W007` warnings. Everything below is single-source; map host tools via [runtime adapters](runtime-adapters.md).
+Shared by all eight Odyssey modes (`debug`, `improve`, `planex`, `review`, `security`, `defensive`, `ui`, `arch`). Mode files own their front-half state machine, pattern source, category table, completion summary, and `W001-W007` warnings. Everything below is single-source; map host tools via [runtime adapters](runtime-adapters.md).
 
 <execution_discipline>
 
-1. **Workspace commits (mutable modes only)** — in mutable modes ONLY when workspace source files change during `FIX` (or `EXECUTE` in `planex`), commit workspace source changes using `"odyssey-{mode}({slug}): {STATE} — {summary}"` at the mode's fix granularity (per verified fix in `debug`/`improve`/`ui`; per completed severity tier in `review`; per `EXECUTE`/`FIX` pass in `planex`). Never emit empty commits on read-only/analysis phases (`SURVEY`, `AUDIT`, `DIAGNOSE`, `DIVERGE`, `PLAN`, `VERIFY`/`CONFIRM`), and never commit `{run_dir}/outputs/*` (`session.json`, `evidence.ndjson`, `understanding.md`); register them atomically via `evolve run complete`. Read-only `security` and `defensive` modes never touch source files or commits.
+1. **Workspace commits (mutable modes only)** — in mutable modes ONLY when workspace source files change during `FIX` (or `DEEPEN` in `arch`, `EXECUTE` in `planex`), commit workspace source changes using `"odyssey-{mode}({slug}): {STATE} — {summary}"` at the mode's fix granularity (per verified fix in `debug`/`improve`/`ui`; per completed severity tier in `review`; per verified deepening/guardrail step in `arch`; per `EXECUTE`/`FIX` pass in `planex`). Never emit empty commits on read-only/analysis phases (`SURVEY`, `AUDIT`, `DIAGNOSE`, `DIVERGE`, `DESIGN`, `PLAN`, `VERIFY`/`CONFIRM`), and never commit `{run_dir}/outputs/*` (`session.json`, `evidence.ndjson`, `understanding.md`); register them atomically via `evolve run complete`. Read-only `security` and `defensive` modes never touch source files or commits.
 2. **Confident edits vs decision gate** — implement confident fixes immediately; record ambiguous tradeoffs as `evidence.ndjson {"phase":"decision","status":"pending"}` without modifying code. Only these justify waiting on a decision (unless overridden by a mode's explicit `## Decision Gate`, e.g., `odyssey-ui`): cross-module architecture tradeoffs | business-semantics ambiguity | new dependency or breaking API. ("Unsure how", "too big", "pre-existing" are NOT valid triggers.)
 3. **Subagent & CLI assist** — parallelize independent scans/dimensions cleanly via host subagents (always joining/cancelling every spawned subagent — see [runtime adapters](runtime-adapters.md)) and run `evolve agent exec "<prompt>" --to codex|agy|claude|omp --mode analysis|write` for cross-angle checks (pass `--session <id> --run <run>` only with `--to codex` or `--to omp`). OMP runs as a one-shot restricted worker: `analysis` keeps the read-only tool boundary and `--timeout` is milliseconds. For independent second opinions explicitly select an authorized model; same-model children are not independent-model verification. Keep existing Codex defaults.
 4. **No context-exhaustion aborts** — complete every campaign cleanly through `S_RECORD -> END`.
@@ -51,9 +51,9 @@ Evaluate every analytical stage + `S_GENERALIZE` across three checks: **Coverage
 
 <fix_loop_cap>
 
-Unified fix-loop bound across all mutable modes (`debug`, `improve`, `review`, `ui` use `fix_rounds` / `max_fix_rounds` default `5`; `planex` uses `current_iteration` / `max_iterations` default `3`):
-- Every `S_CONFIRM` / `S_VERIFY → S_FIX : needs_rework` transition (and `review` internal `A_FIX` retry rounds) increments `fix_rounds++` in `outputs/session.json`.
-- Re-entry to `S_FIX` is guarded by `fix_rounds < max_fix_rounds` (or `current_iteration < max_iterations` in `planex`).
+Unified fix-loop bound across all mutable modes (`debug`, `improve`, `review`, `ui`, `arch` use `fix_rounds` / `max_fix_rounds` default `5`; `planex` uses `current_iteration` / `max_iterations` default `3`):
+- Every `S_CONFIRM` / `S_VERIFY → S_FIX` (or `S_VERIFY → S_DEEPEN` in `arch`) `: needs_rework` transition (and `review` internal `A_FIX` retry rounds) increments `fix_rounds++` in `outputs/session.json`.
+- Re-entry to `S_FIX` / `S_DEEPEN` is guarded by `fix_rounds < max_fix_rounds` (or `current_iteration < max_iterations` in `planex`).
 - When `fix_rounds >= max_fix_rounds` (or `current_iteration >= max_iterations`) and actionable issues/failed criteria remain:
   - **Normal mode:** structured user prompt — either (a) record remaining items as `deferred`/`issue` (`ESCALATED`/`PARTIAL`) and transition to `S_RECORD`, or (b) approve **at most one** bounded extension (`max_fix_rounds += 2` or `max_iterations += 2`, max 1 extension; exceeding again forces exit to `S_RECORD`).
   - **`-y` mode:** NEVER bypass escalation or auto-accept unmet criteria — record remaining items as `deferred`/`issue` (`ESCALATED` / `PARTIAL`) with per-item reasons and transition to `S_RECORD`.
@@ -100,7 +100,7 @@ Write `outputs/explore.json` + `evidence.ndjson` (`phase=explore`). Update `unde
 ### A_DISCOVER
 
 1. Triage every scan hit (`±10` lines context) as `bug` / `risk` / `safe`:
-   - `bug` + `fix_template` -> fix & re-enter the mode's `Discover routing` target (default `S_FIX` in mutable audit modes; **modes override this target in `## Generalize Source` (`Discover routing`)**, e.g. `planex` routes to `S_EXECUTE`, `review` to `S_REVIEW`, `debug`/`improve` to `S_DIAGNOSE`, `ui` to `S_AUDIT`, read-only `security`/`defensive` to `S_SCAN` or `issue`/`decision`)
+   - `bug` + `fix_template` -> fix & re-enter the mode's `Discover routing` target (default `S_FIX` in mutable audit modes; **modes override this target in `## Generalize Source` (`Discover routing`)**, e.g. `planex` routes to `S_EXECUTE`, `review` to `S_REVIEW`, `debug`/`improve` to `S_DIAGNOSE`, `arch` to `S_DEEPEN`, `ui` to `S_AUDIT`, read-only `security`/`defensive` to `S_SCAN` or `issue`/`decision`)
    - `bug` needing decision / read-only mode -> record `phase: "issue"` or `phase: "decision"`
    - `risk` -> add guard if safe (mutable) or record `issue`/`decision`
    - `safe` -> skip
@@ -125,7 +125,7 @@ Initialize `phase_goals[]` in `session.json` after INTAKE and mirror cleanly via
 
 Before discovery or code search, satisfy the **Knowledge Gate** (`evolve skill workflows show session-run`):
 1. **Bound `session-priors` first** (when available in Run inputs and its `lookup_scopes` matches the current scope): read via `evolve run read artifact <run> session-priors --session <session> --scope '<json>'`.
-2. **Otherwise query the CLI** (one receipt source per Run): use `evolve search "<keywords>" --mode context --session <id> --reads "<run_dir>/knowledge-reads.json"` followed by `evolve kb get <id> --resolved --reads "<run_dir>/knowledge-reads.json" --from-search <search-id>`.
+2. **Otherwise query the CLI** (one receipt source per Run): use `evolve search "<keywords>" --mode context --session <id> --reads "<run_dir>/knowledge-reads.json"` (add `--format compact` for terse text; `--mode context` uses short prefix IDs, `q-N` + `idx`, inline `<= 300`-char `content` / `truncated: true` snippets, and `20`-item/`4000`-char `constraints` cap), followed by `evolve kb get <id|q-N:idx>... --resolved --reads "<run_dir>/knowledge-reads.json"` (or `--pick <n,...>`, auto-linking `from_search_id` on `--reads`).
 3. After the Knowledge Gate, inspect the codebase with `evolve code search "<keywords>"` and check `evolve session list` when `-c` or prior scope overlap may exist.
 
 ### Error Codes

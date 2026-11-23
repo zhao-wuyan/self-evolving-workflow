@@ -23,7 +23,7 @@ evolve kb candidates show --root <project> <receipt-id> --project <source-projec
 ```
 
 - 重复投递按回执身份幂等处理；模型抽取失败时沿用同一回执运行 `kb harvest receipt <receipt-id> --project <source-project-id>`（Session 回执则用相同 `--receipt` 重跑 `kb harvest session`），不重构或扩大证据范围。若候选与唯一活跃、未锁定的 project `reference` 正文完全一致，收尾会经 `propose`/`apply` 自动合并 `sources` 并在 `wiki_changes` 留存审计记录，其余候选保留待审。
-- 先用 `evolve kb search` / `evolve kb get` 核对每条候选与现有活跃 Wiki 的重复、重叠或冲突，保留双方证据并可在授权前用 `evolve kb propose` 生成待审变更预览（`kb propose` 仅写入 `<root>/.evolve/closeout.db` 暂存区，不修改 `wiki/entries/`；真正修改 `wiki/` 需在授权后执行 `kb apply` 或 `kb candidates publish`）：
+- 先用 `evolve kb search` / `evolve kb get <id|q-N:idx>...`（支持短前缀与批量读取）核对每条候选与现有活跃 Wiki 的重复、重叠或冲突，保留双方证据；`propose` / `apply` 必须使用 `kb get` 返回的规范完整条目 ID。可在授权前用 `evolve kb propose` 生成待审变更预览（`kb propose` 仅写入 `<root>/.evolve/closeout.db` 暂存区，不修改 `wiki/entries/`；真正修改 `wiki/` 需在授权后执行 `kb apply` 或 `kb candidates publish`）：
 
 ```text
 evolve kb --root <project> propose <change.json> --closeout <closeout-id> --candidate <candidate-id>
@@ -32,13 +32,14 @@ evolve kb --root <project> changes [<change-id>]
 ```
 
 - 没有合格候选时直接记录零候选回执并正常结束。
+- **日期 / commit SHA 锚点与被拒绝方案检查**：涉及代码实现或架构决策的候选必须附带回执/Git `HEAD` 日期与 `<repo>@<sha>` 锚点；若候选属于被拒绝的功能或设计方案（`.out-of-scope/` 概念级记录），先按概念相似度检索已有 Wiki（并将仓库现存 `.out-of-scope/*.md` 仅作只读参考），确认为持久性架构/范围拒绝而非“已实现功能”或临时延期后，再通过 `kb propose` → `kb apply`（或首次全新 `reference` 授权发布）纳入受治理 Wiki，禁止绕过 `evolve kb` 直写文件。
 
 ### 2. Present（结构化呈现）
 
 向用户逐条展示每个可处理候选的：
-- 精确 `candidate-id`、建议动作（新增 / 更新 / 追加来源 / 标记冲突 / 跳过）与理由；
-- 真实验证证据锚点（完成回执、消息 ID、命令结果）；
-- 与既有 Wiki 条目的命中对照关系（不要将不可信原始对话摘录直接当作已验证正文）。
+- 精确 `candidate-id`、建议动作（新增 / 更新 / 追加来源 / 标记冲突或取代 `superseded` / 跳过）与理由；
+- 真实验证证据锚点（完成回执、消息 ID、命令结果，以及代码类断言对应的日期与 commit SHA）；
+- 与既有 Wiki 条目（含概念级被拒绝方案）的命中对照关系（不要将不可信原始对话摘录直接当作已验证正文）。
 
 ### 3. Ask（人类审查与固定授权）
 

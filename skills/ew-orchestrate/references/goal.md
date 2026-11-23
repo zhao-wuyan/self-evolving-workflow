@@ -11,7 +11,7 @@ Under `evolve-session/1.0`, `--amend` updates an open Session through the fenced
    - If `0` compatible open Sessions match: stop and report that there is no open Session to amend (offer to open a new Session instead).
    - If `>1` compatible open Sessions match: ask the user to select the target `session_id`.
    - Then inspect `evolve session get --session {session_id}`.
-3. Retain exact `session_id + orchestration_revision` (plus `run_revision` for run-target mutations) and one authorized `actor_id`; pass it to `--actor` (`--participant` is optional and defaults to `--actor`; if supplied, it must match). Never infer current authority from Session status.
+3. Retain `session_id` (and track `orchestration_revision` / `run_revision` plus `actor_id` when optimistic concurrency guards are needed; `--actor`, `--expected-orchestration-revision`, and `--expected-run-revision` are optional in single-coordinator sequential mode, and recommended in multi-worker / retry / parallel races — if `--participant` is supplied, it must match `--actor`). Never infer current authority from Session status.
 4. Snapshot current Session `objective`, `definition_of_done`, `boundary_contract`, `goals[]`, `amendments[]`, sealed Run handoffs, pending chain, decisions, and active Runs via `evolve session get` / `evolve run get`. **Active-Run precondition**: Runtime rejects `evolve session update` if any Run in the Session has status `running` or `blocked` (`Resolve the active Run before amending the Session`), so seal (`run complete`), transition (`run transition`), or cancel (`run cancel`) active/blocked Runs first.
 
 ## 2. Parse and Assess
@@ -30,23 +30,23 @@ When the change can proceed on the open Session, construct the pending-tail chai
 
 - Do not edit protocol JSON or issue direct chain mutations from a Skill. The orchestrator applies the pending-tail change through the fenced chain surface after Skill assessment:
 
-`evolve session step update --session {session_id} --step-id <id> --command <name> --actor {actor_id} --expected-orchestration-revision {orchestration_revision}`
+`evolve session step update --session {session_id} --step-id <id> --command <name>`
 
-or `evolve session step add --session {session_id} --step-id <id> --command <name> [--arg <value> ...] [--after-step <id>] [--goal-ref <id>] [--stage <name>] [--decision-ref <id>] [--retry-max <n>] [--decision-only] --actor {actor_id} --expected-orchestration-revision {orchestration_revision}` for added steps. Skipping a non-running step uses `evolve session step delete --session {session_id} --step-id <id> --evidence "<reason>" --actor {actor_id} --expected-orchestration-revision {orchestration_revision}`.
+or `evolve session step add --session {session_id} --step-id <id> --command <name> [--arg <value> ...] [--after-step <id>] [--goal-ref <id>] [--stage <name>] [--decision-ref <id>] [--retry-max <n>] [--decision-only]` for added steps. Skipping a non-running step uses `evolve session step delete --session {session_id} --step-id <id> --evidence "<reason>"` (add `--actor` and `--expected-orchestration-revision` when guarding concurrent/retry races).
 
 ## 4. Commit the Amendment
 
 1. Ensure no `running` or `blocked` Run remains in the Session (`evolve session get`).
-2. After confirmation, record the new objective and completion criteria with `evolve session update "<objective>" [--definition-of-done "<criteria>"] --session <session> --actor <actor> --expected-orchestration-revision <revision> --evidence <confirmation> [--reason "<why>"]` (Runtime appends `CHG-NNN` automatically to `Session.amendments[]`).
-3. Apply approved pending-tail chain changes (`session step update|add|delete`) using the refreshed `orchestration_revision` from the `session update` receipt, then dispatch with the current fence:
+2. After confirmation, record the new objective and completion criteria with `evolve session update "<objective>" [--definition-of-done "<criteria>"] --session <session> --evidence <confirmation> [--reason "<why>"]` (Runtime appends `CHG-NNN` automatically to `Session.amendments[]`).
+3. Apply approved pending-tail chain changes (`session step update|add|delete`), then dispatch with:
 
-`evolve run create --session {session_id} --actor {actor_id} --expected-orchestration-revision {orchestration_revision}`
+`evolve run create --session {session_id}`
 
 and complete each Run with:
 
-`evolve run complete {run_id} --session {session_id} --actor {actor_id} --expected-orchestration-revision {orchestration_revision} --expected-run-revision {run_revision} --summary "<summary>" --verdict {done|done_with_concerns}`
+`evolve run complete {run_id} --session {session_id} --summary "<summary>" --verdict {done|done_with_concerns} [--next]`
 
-Runtime atomically validates and seals the Run plus advances the chain step and returns `Evolve mutation receipt`. Consume its fresh `orchestration_revision` before continuing. Reject by recording a blocking concern; revise by re-reading `evolve session get` and applying another fenced chain mutation.
+(add `--actor {actor_id}`, `--expected-orchestration-revision {orchestration_revision}`, and `--expected-run-revision {run_revision}` when guarding multi-worker, retry, or parallel races; pass `--next` to seal the current Run and immediately allocate the next pending Run in one CLI call). Runtime atomically validates and seals the Run plus advances the chain step and returns `Evolve mutation receipt`. Consume its fresh `orchestration_revision` whenever concurrency guards are active. Reject by recording a blocking concern; revise by re-reading `evolve session get` and applying another fenced chain mutation.
 
 If the installed Runtime cannot express the complete goal/boundary replacement as an `objective`/`--definition-of-done` amendment plus Session-chain pending-tail change, stop with a capability blocker and escalate to the user rather than silently mutating state files or calling unsupported commands.
 

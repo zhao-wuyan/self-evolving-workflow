@@ -4,10 +4,10 @@
 
 ## Execution Authority Invariants
 
-1. 首次变更前通过 `evolve capabilities` 确认运行时能力，之后严格沿 `Evolve mutation receipt` 刷新 `orchestration_revision`（Run 目标操作另需 `run_revision`）。
-2. 全程固定同一 `actor_id` 并传给 `--actor`（`--participant` 可选，默认等同 `--actor`，若传入必须一致）；每次重试同一请求复用原 `--request-id`，修订冲突先读 `evolve session get`。
+1. 单协调者顺序流中，`--actor` 与 `--expected-orchestration-revision` / `--expected-run-revision` 均为**可选项**，默认可省略以精简命令（需要显式校验能力时可先查 `evolve capabilities`）。
+2. 在多 Worker、重试或并行竞态场景下，建议开启乐观并发守卫：全程固定同一 `actor_id` 并传给 `--actor`（`--participant` 可选，默认等同 `--actor`，若传入必须一致），沿 `Evolve mutation receipt` 刷新 `--expected-orchestration-revision`（Run 目标操作另传 `--expected-run-revision`）；每次重试同一请求复用原 `--request-id`，遇到 `REVISION_CONFLICT` 先读 `evolve session get`。
 3. 在 `session create` 时显式持久化 `--boundary-contract`、`--goals` 与 `--auto` / `--goal-mode` 策略（`Session.policy.auto_mode` 控制 `continuation.authority = "automatic"`）；未设置 `--auto` 时需按 `S_CONFIRM` 与每步人工节点推进。
-4. 禁止绕过 `evolve session` / `evolve run` 命令行直接修改状态；Run 封存后不可变，失败重试须通过 `evolve run transition ... failed`（或 `cancel` / `decide fix` 重开）后再经 `evolve run create` 派发。Runtime 计算 `--retry-max` 时统计同一 `step_id` 下全部非 `running` 的历史 Run（含 `failed`、`cancelled` 以及被 `run decide --verdict fix` 重开的 `sealed` Run）。
+4. 禁止绕过 `evolve session` / `evolve run` 命令行直接修改状态；Run 封存后不可变（连续步进可使用 `evolve run complete ... --next` 在单次调用中封存当前 Run 并立即派发下一待执行 Run），失败重试须通过 `evolve run transition ... failed`（或 `cancel` / `decide fix` 重开）后再经 `evolve run create` 派发。Runtime 计算 `--retry-max` 时统计同一 `step_id` 下全部非 `running` 的历史 Run（含 `failed`、`cancelled` 以及被 `run decide --verdict fix` 重开的 `sealed` Run）。
 
 ## Stage Mapping
 
@@ -63,7 +63,7 @@
 ### Evaluator Verdict、置信度处置矩阵与恢复约定
 
 - **决策门命令**：`--auto` / `--goal` 下调用 `evolve run decide` **必须显式传入 `--confidence <0-100>`**（防止省略参数绕过置信度门卫），语法：
-  `evolve run decide <gate> --session <session> --actor <actor> --expected-orchestration-revision <rev> --verdict proceed|fix|escalate --confidence <score> [--target-step <step-id>] [--evidence <ref>] --summary "<evidence>"`
+  `evolve run decide <gate> --session <session> --verdict proceed|fix|escalate --confidence <score> [--target-step <step-id>] [--evidence <ref>] --summary "<evidence>"`（多 Worker/并行竞态时补充 `--actor <actor> --expected-orchestration-revision <rev>`）
 
 | `CONFIDENCE_SCORE` | 漂移 / 门禁状态 | 协调器强制处置 |
 | --- | --- | --- |
@@ -74,7 +74,7 @@
 - **`fix` 重开与插链**：判定 `fix` 需要重跑上游执行/规划步骤时，**必须显式传入 `--target-step <step-id>`**（从 `--decision-only` 节点返回 `fix` 时为必填），Runtime 会把目标步骤至决策门间的步骤重开为 `pending`；若需新增修复步骤（如 `ew-debug` / `ew-plan --gaps`），先通过 `evolve session step add` 在 pending tail 插链再判定 `proceed` 或重开步骤。
 - **`escalate` 解除与恢复流程**：提交 `--verdict escalate` 后，Runtime 将该步骤保留为 `completed` 且 `decision = "escalate"`，因此 `continuation.action` 仍停留在 `"decide"`（阻塞后续派发）。在用户提供澄清、确认风险或同意补救方案后，按以下顺序解除：
   1. 如需补救步骤，先通过 `evolve session step add` 在 pending tail 插入补救步骤（例如 `ew-debug` / `ew-plan --gaps`）；
-  2. 使用最新 `orchestration_revision` 重新执行 `evolve run decide <decision-id> --verdict proceed|fix --confidence <score> [--target-step <step-id>] [--evidence <user-confirmation-or-ref>] --summary "<resolution>"`；
+  2. 重新执行 `evolve run decide <decision-id> --session <session> --verdict proceed|fix --confidence <score> [--target-step <step-id>] [--evidence <user-confirmation-or-ref>] --summary "<resolution>"`（并发竞态场景补充最新 `--actor` 与 `--expected-orchestration-revision`）；
   3. 只有 `proceed` 或带 `--target-step` 的 `fix` 会清除 `escalate` 阻塞并推进 `continuation.action`。
 - **重试耗尽处理（`Retry limit exceeded`）**：当 `evolve run create` 抛出 `Retry limit exceeded for step: <step-id>` 时，严禁继续循环重试；立即停止自动重派，向用户报告失败历史并请求决策，或在用户授权/明确降级路径下通过 `evolve session step delete --step-id <step-id> --evidence "<retry limit exceeded>"` 跳过原步骤并 `chain insert` 新的诊断/补救步骤（如 `ew-debug` 或新 `step-id`）。
-- **`post-execution`**：核验全部 Run 已 sealed 且无悬空门禁后，提交 `--verdict proceed --confidence <score>`，再用最新 `orchestration_revision` 调用 `evolve session complete`。
+- **`post-execution`**：核验全部 Run 已 sealed 且无悬空门禁后，提交 `--verdict proceed --confidence <score>`，再调用 `evolve session complete --session <session>`（并发竞态场景附带最新 `--expected-orchestration-revision`）。

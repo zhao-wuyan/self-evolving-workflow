@@ -44,11 +44,12 @@ Orchestrate ant-colony-style exploration over a user-defined task space (`swarm-
 
 ## Shared Constants & Host Mapping
 
-- **Coordination state**: `{run_dir}/work/team/` (never register as formal Run outputs).
+- **Coordination state**: `{run_dir}/work/team/` (internal scratch; keep out of formal Run `outputs/`).
 - **Formal outputs**: `{run_dir}/outputs/` (`ant-<k>-<i>.json` where `k` is iteration and `i` is the trailing index of `ant_id = "ANT-<k>-<i>"`, matching `stem.upper() == ant_id`; `swarm-report.json`; `best-solution.md`).
-- **Controller CLI**: In a version-bound Run, materialize the pinned controller scripts via `evolve run task controller --session <session> --run <run>` and invoke the returned `script` path (`{run_dir}/work/controller/aco.py`, Python 3.10+). Do not invoke `<skill_root>/scripts/aco.py` directly inside a Run.
-- **Roster**: `evolve run task list --session <session> --run <run>`. Always read [Team coordination](references/team-coordination.md) before dispatching or reporting assignments.
-- **Host dispatch**: Use the host's parallel subagent / swarm dispatch mechanism (joining/awaiting all spawned workers before finishing) and structured user-prompt capability. See [references/host-adapters.md](references/host-adapters.md) for host-specific tool mappings.
+- **Controller CLI**: In a version-bound Run, materialize the pinned controller scripts via `evolve run task controller --session <session> --run <run>` and invoke the returned `script` path (`{run_dir}/work/controller/aco.py`, Python 3.10+) rather than `<skill_root>/scripts/aco.py`.
+- **Roster**: `evolve run task list --session <session> --run <run>`. Read [Team coordination](references/team-coordination.md) before dispatching or reporting assignments.
+- **Host dispatch & context hygiene**: Dispatch parallel workers via the host parallel subagent capability ([references/host-adapters.md](references/host-adapters.md)), starting every worker with a **fresh context window** (`fork` reserved strictly for explicit warm deep-dive branches) and communicating via **sparse context pointers** (`session_id`, `run_id`, `run_dir`, `team_dir`, `role_spec`, `--reads` path). Join all spawned workers before finishing.
+- **Optional `DESIGN-IT-TWICE` mode**: For interface or architecture search, seed `swarm-config.json` with constraint-divergent `ant` prompts (e.g., minimal entry-point leverage, maximal flexibility, common-caller ergonomics, ports-and-adapters) and have `analyst` compare solutions by depth, locality, and seam placement.
 
 ## User Commands
 
