@@ -230,7 +230,7 @@ export function buildSessionStartNotice(root: string, host: MemoryHost): string 
   const reminders = readReminders(root);
   const unharvested = findUnharvestedSessions(root);
   const model = memoryModelSettings(root);
-  const hasModel = Boolean(model.baseUrl && model.model);
+  const hasModel = model.provider === 'omp' || Boolean(model.baseUrl && model.model);
   const lines: string[] = [];
   const jobs = readMemoryHookJobs(root);
   const failedJobs = jobs.filter(job => job.state === 'failed');

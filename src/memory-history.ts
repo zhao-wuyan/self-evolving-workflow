@@ -240,7 +240,7 @@ async function importTranscript(
   if (host !== 'agy' && offset > info.size) throw new InputError('Transcript is shorter than its saved extraction offset');
   const errorCount = host === 'agy' ? await countAgyErrorSteps(path, offset, info.size) : 0;
   const settings = allowUnconfiguredModel ? memoryModelSettings(root) : undefined;
-  const skipModel = Boolean(allowUnconfiguredModel && (!settings?.baseUrl || !settings?.model));
+  const skipModel = Boolean(allowUnconfiguredModel && settings?.provider !== 'omp' && (!settings?.baseUrl || !settings?.model));
   let remembered = 0;
   let processed = 0;
   for await (const turn of turnReaders[host](target, session, offset, info.size)) {

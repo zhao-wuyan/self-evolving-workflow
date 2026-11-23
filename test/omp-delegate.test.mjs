@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'node:test';
-import { delegateOmp } from '../dist/workflow-delegate.js';
+import { delegateOmp, delegateOmpModel } from '../dist/workflow-delegate.js';
 import { executeOmpWorker } from '../dist/omp-worker.js';
 import { fixture } from './evolve-workflow-support.mjs';
 
@@ -149,4 +149,133 @@ test('OMP worker knowledge tools record the selected Run, not an unrelated Run',
   assert.ok(bound.knowledge_reads.searches.some(search => search.query === 'permission'));
   assert.deepEqual(untouched.skill_reads.reads, []);
   assert.equal(untouched.knowledge_reads?.searches?.length ?? 0, 0);
+});
+test('OMP memory worker runs without tools and passes its system and prompt through untouched', async () => {
+  const system = 'You are the OMP memory model. Store durable facts only.';
+  const prompt = 'Remember that the release gate requires a clean worktree.';
+  let options;
+  let prompted;
+  const sdk = fakeSdk(async createOptions => {
+    options = createOptions;
+    let listener;
+    return { session: {
+      getActiveToolNames() { return []; },
+      subscribe(handler) { listener = handler; return () => {}; },
+      async prompt(text) {
+        prompted = text;
+        listener({ type:'message_end', message:{role:'assistant',stopReason:'stop',content:[{type:'text',text:'Stored the release gate fact.'}]} });
+      },
+      async dispose() {},
+    } };
+  });
+  const response = await executeOmpWorker({request_id:'memory',cwd:process.cwd(),prompt,mode:'memory',model:'@memory',system}, { cwd: process.cwd() }, sdk);
+  assert.equal(response.error, undefined);
+  assert.equal(response.output, 'Stored the release gate fact.');
+  assert.equal(prompted, prompt, 'prompt must be forwarded byte-for-byte');
+  assert.equal(options.systemPrompt, system, 'system must be forwarded byte-for-byte');
+  assert.equal(options.modelPattern, '@memory');
+  assert.equal(options.enableMCP, false);
+  assert.equal(options.enableLsp, false);
+  assert.equal(options.restrictToolNames, true);
+  assert.deepEqual(options.toolNames, []);
+  assert.deepEqual(options.customTools, []);
+  for (const guide of ['Analysis only', 'Implement only', 'evolve_read_skill', 'Do not create or complete Runs']) {
+    assert.ok(!prompted.includes(guide), 'memory prompt must not contain the ' + guide + ' guide');
+    assert.ok(!options.systemPrompt.includes(guide), 'memory system must not contain the ' + guide + ' guide');
+  }
+});
+
+test('OMP memory worker rejects a Run binding or a missing system before creating a session', async t => {
+  const f = fixture('evolve-omp-memory-invalid-');
+  t.after(f.cleanup);
+  const opened = f.open('memory', 'ew-analyze');
+  const running = f.next('memory', opened.orchestration_revision);
+  let created = 0;
+  let prompted = false;
+  const sdk = fakeSdk(async () => {
+    created += 1;
+    return { session: {
+      getActiveToolNames() { return []; },
+      subscribe() { return () => {}; },
+      async prompt() { prompted = true; },
+      async dispose() {},
+    } };
+  });
+  const base = {request_id:'memory-invalid',cwd:process.cwd(),prompt:'Remember this',mode:'memory',model:'@memory'};
+  const bound = await executeOmpWorker({...base, system:'Store facts only.', binding:{root:f.root,session:'memory',run:running.run_id}}, { cwd: process.cwd() }, sdk);
+  assert.match(bound.error, /Invalid Evolve OMP worker request/);
+  assert.equal(bound.output, undefined);
+  const missing = await executeOmpWorker({...base, system:''}, { cwd: process.cwd() }, sdk);
+  assert.match(missing.error, /Invalid Evolve OMP worker request/);
+  assert.equal(missing.output, undefined);
+  assert.equal(created, 0, 'invalid memory requests must not create a session');
+  assert.equal(prompted, false);
+});
+
+test('OMP memory worker refuses SDK tools that widen its empty boundary', async () => {
+  let options;
+  let prompted = false;
+  let disposed = false;
+  const sdk = fakeSdk(async createOptions => {
+    options = createOptions;
+    return { session: {
+      getActiveToolNames() { return ['read']; },
+      subscribe() { return () => {}; },
+      async prompt() { prompted = true; },
+      async dispose() { disposed = true; },
+    } };
+  });
+  const response = await executeOmpWorker({request_id:'memory-tools',cwd:process.cwd(),prompt:'Store this',mode:'memory',model:'@memory',system:'Store facts only.'}, { cwd: process.cwd() }, sdk);
+  assert.match(response.error, /tool boundary/);
+  assert.equal(response.output, undefined);
+  assert.deepEqual(options.toolNames, []);
+  assert.equal(options.restrictToolNames, true);
+  assert.equal(prompted, false);
+  assert.equal(disposed, true);
+});
+
+test('OMP memory worker reports length and provider error stops as failures, not results', async () => {
+  for (const [message, pattern] of [
+    [{ stopReason:'length' }, /length/i],
+    [{ stopReason:'error', errorMessage:'Provider denied the memory request' }, /Provider denied/],
+  ]) {
+    const sdk = fakeSdk(async () => {
+      let listener;
+      return { session: {
+        getActiveToolNames() { return []; },
+        subscribe(handler) { listener = handler; return () => {}; },
+        async prompt() {
+          listener({ type:'message_end', message:{role:'assistant',...message,content:[{type:'text',text:'partial answer'}]} });
+        },
+        async dispose() {},
+      } };
+    });
+    const response = await executeOmpWorker({request_id:'memory-' + message.stopReason,cwd:process.cwd(),prompt:'Store this',mode:'memory',model:'@memory',system:'Store facts only.'}, { cwd: process.cwd() }, sdk);
+    assert.match(response.error, pattern);
+    assert.equal(response.output, undefined, 'partial output must not be reported as success');
+  }
+});
+
+test('delegateOmpModel sends a binding-free memory request pinned to @memory', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'evolve-omp-memory-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const executable = join(root, 'omp.mjs');
+  const capture = join(root, 'request.json');
+  const previous = process.env.OMP_EXECUTABLE;
+  process.env.OMP_EXECUTABLE = executable;
+  t.after(() => { if (previous === undefined) delete process.env.OMP_EXECUTABLE; else process.env.OMP_EXECUTABLE = previous; });
+  writeFileSync(executable, readRequest + `
+    const {writeFileSync}=await import('node:fs');
+    writeFileSync(${JSON.stringify(capture)}, JSON.stringify(request));
+    console.log(JSON.stringify({type:'evolve_worker_result',request_id:request.request_id,output:'Stored the delegated fact.'}));
+  `);
+  const system = 'You are the OMP memory model.';
+  assert.equal(await delegateOmpModel(root, system, 'Remember the delegated fact.', 5000), 'Stored the delegated fact.');
+  const request = JSON.parse(readFileSync(capture, 'utf8'));
+  assert.equal(request.mode, 'memory');
+  assert.equal(request.model, '@memory');
+  assert.equal(request.system, system);
+  assert.equal(request.prompt, 'Remember the delegated fact.');
+  assert.equal(request.cwd, root);
+  assert.equal(request.binding, undefined);
 });

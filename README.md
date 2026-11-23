@@ -110,6 +110,8 @@ evolve experience disable   # 停止采集，不删除已发布经验
 
 采集默认关闭，候选经验须经确认才发布。详见[经验检索](skills/ew-knowledge/references/knowledge-route.md#个人跨项目经验可选)和[审阅发布](skills/ew-knowledge/references/closeout-protocol.md#个人跨项目经验审阅)。
 
+在 OMP 会话中，未配置独立 HTTP 模型时，知识提炼和 Session 审阅会复用 OMP 的 `memory` 模型角色与认证，无需另填 API 地址。独立终端可用 `EVOLVE_MODEL_PROVIDER=omp` 显式选择；已有 HTTP 模型配置继续生效，也可用 `EVOLVE_MODEL_PROVIDER=http` 固定使用 HTTP。生成的知识候选仍须审阅批准后发布。
+
 项目 Skill、引导文件、审阅后的 Wiki 和 OpenViking 项目配置可以提交；运行产物和凭据留在本地。
 
 ## 迁移与开发

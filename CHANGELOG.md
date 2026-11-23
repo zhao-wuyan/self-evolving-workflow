@@ -7,6 +7,7 @@ All notable changes to `self-evolving-workflow` are documented in this file.
 - 同步上游 v0.3.1，保留 OpenViking 集成与 OMP 原生安装目录支持。
 - OpenViking 远端 Memory 支持 `kb get --pick`、`q-N:idx` 和批量读取，文本输出继续保存远端读取证据。
 - 共用模型客户端接纳上游响应校验，正确报告截断、仅推理输出和服务端错误。
+- OMP 会话中的知识提炼与审阅可复用 `@memory` 角色及认证，使用无工具 SDK 会话；未配置独立 HTTP 模型时自动选择，候选审批流程保持。
 
 ## [0.3.1] - 2026-11-23
 
