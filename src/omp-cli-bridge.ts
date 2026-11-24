@@ -3,9 +3,10 @@ import { basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { InputError } from './common.js';
 
-const commands: Record<string, true> = { session: true, run: true, skill: true, experience: true, openviking: true, kb: true, code: true };
-const skillActions: Record<string, true> = { list: true, install: true, status: true, validate: true, inspect: true, workflows: true };
+const commands: Record<string, true> = { session: true, run: true, skill: true, experience: true, openviking: true, kb: true, code: true, history: true };
+const skillActions: Record<string, true> = { list: true, install: true, sync: true, status: true, validate: true, inspect: true, workflows: true };
 const codeActions: Record<string, true> = { build: true, sync: true, search: true, graph: true, callers: true, callees: true, trace: true };
+const historyActions: Record<string, true> = { collect: true, list: true, search: true, show: true };
 
 function hasOnlyEpisodicKind(argv: string[]): boolean {
   const kinds: string[] = [];
@@ -26,13 +27,16 @@ function hasOnlyEpisodicKind(argv: string[]): boolean {
 export async function runBundledWorkflow(root: string, argv: unknown, signal?: AbortSignal, agentKind?: 'main' | 'sub') {
   if (!Array.isArray(argv) || !argv.length || argv.some(arg => typeof arg !== 'string' || arg.includes('\0')) ||
       !(Object.hasOwn(commands, argv[0]) || argv.length === 1 && argv[0] === '--help')) {
-    throw new InputError('Supply a workflow control argv array (session/run/skill/code/kb/experience/openviking/--help)');
+    throw new InputError('Supply a workflow control argv array (session/run/skill/code/history/kb/experience/openviking/--help)');
   }
   if (argv[0] === 'skill' && !Object.hasOwn(skillActions, argv[1] ?? 'list')) {
-    throw new InputError('OMP supports Skill list/install/status/validate/inspect/workflows');
+    throw new InputError('OMP supports Skill list/install/sync/status/validate/inspect/workflows');
   }
   if (argv[0] === 'code' && !Object.hasOwn(codeActions, argv[1] ?? '')) {
     throw new InputError('OMP supports Code Graph build/sync/search/graph/callers/callees/trace');
+  }
+  if (argv[0] === 'history' && !Object.hasOwn(historyActions, argv[1] ?? '')) {
+    throw new InputError('OMP supports history collect/list/search/show');
   }
   if (argv[0] === 'experience' && !['status', 'search', 'get'].includes(argv[1])) {
     throw new InputError('OMP may only read personal experience (status/search/get)');
@@ -41,13 +45,14 @@ export async function runBundledWorkflow(root: string, argv: unknown, signal?: A
     const isHarvest = argv[1] === 'harvest' && ['session', 'receipt', 'conversation', 'skill'].includes(argv[2]);
     const isCandidatesShow = argv[1] === 'candidates' && argv[2] === 'show';
     const isReadOnlyKb = argv[1] === 'sources' || argv[1] === 'lint';
+    const isReminders = argv[1] === 'reminders' && (argv[2] === undefined || argv[2] === 'ack' || argv[2].startsWith('-'));
     const isEpisodicWrite = (argv[1] === 'add' || argv[1] === 'update') && hasOnlyEpisodicKind(argv);
     if (argv[1] === 'add' || argv[1] === 'update') {
       if (!isEpisodicWrite) {
         throw new InputError('OMP kb add/update requires --kind episodic; Wiki publication requires explicit approval');
       }
-    } else if (!isHarvest && !isCandidatesShow && !isReadOnlyKb) {
-      throw new InputError('OMP knowledge closeout supports harvest, candidates show, sources, lint, and episodic add/update only; publication requires explicit approval');
+    } else if (!isHarvest && !isCandidatesShow && !isReadOnlyKb && !isReminders) {
+      throw new InputError('OMP knowledge closeout supports harvest, candidates show, sources, lint, reminders, and episodic add/update only; publication requires explicit approval');
     }
   }
   if (argv[0] === 'openviking' && argv[1] !== 'policy') throw new InputError('OMP Agent may only manage OpenViking policy');

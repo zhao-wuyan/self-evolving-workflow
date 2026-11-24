@@ -661,3 +661,47 @@ test('OMP before_agent_start injects routing guidance once and skips revive', as
   assert.match(withBlocks.systemPrompt[1].text, /OMP Evolve plugin routing:/);
   assert.equal(await h.event('before_agent_start', { reason: 'prompt', systemPrompt: withBlocks.systemPrompt }), undefined);
 });
+
+test('OMP workflow supports v0.6.0 history signals, skill sync, and kb reminders while rejecting unknown actions', async t => {
+  const f = fixture('evolve-omp-v060-bridge-');
+  const prevEnv = {
+    HOME: process.env.HOME,
+    USERPROFILE: process.env.USERPROFILE,
+    CODEX_HOME: process.env.CODEX_HOME,
+    CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
+  };
+  t.after(async () => {
+    for (const [key, value] of Object.entries(prevEnv)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+    await closeHarnesses(f.root);
+    f.cleanup();
+  });
+  const isoHome = join(f.root, '.tmp-home');
+  process.env.HOME = isoHome;
+  process.env.USERPROFILE = isoHome;
+  process.env.CODEX_HOME = join(isoHome, 'codex');
+  process.env.CLAUDE_CONFIG_DIR = join(isoHome, 'claude');
+  f.write('skills/demo-sync/SKILL.md', '---\nname: demo-sync\ndescription: "Demo sync skill"\nversion: 0.1.0\n---\n\n# Demo Sync\n');
+  const h = harness(f.root);
+  await h.event('session_start');
+
+  const collected = await h.call('workflow', { argv: ['history', 'collect', '--host', 'codex'] });
+  assert.equal(collected.exit_code, 0);
+  const listed = await h.call('workflow', { argv: ['history', 'list', '--host', 'codex'] });
+  assert.equal(listed.exit_code, 0);
+  const searched = await h.call('workflow', { argv: ['history', 'search', 'demo', '--host', 'codex'] });
+  assert.equal(searched.exit_code, 0);
+
+  const synced = await h.call('workflow', { argv: ['skill', 'sync', '--scope', 'project', '--host', 'omp', '--skill', 'demo-sync'] });
+  assert.equal(synced.exit_code, 0);
+  assert.equal(existsSync(join(f.root, '.omp/skills/demo-sync/SKILL.md')), true);
+
+  const reminders = await h.call('workflow', { argv: ['kb', 'reminders'] });
+  assert.equal(reminders.exit_code, 0);
+  const acked = await h.call('workflow', { argv: ['kb', 'reminders', 'ack'] });
+  assert.equal(acked.exit_code, 0);
+
+  await assert.rejects(runBundledWorkflow(f.root, ['history', 'purge']), /history collect\/list\/search\/show/);
+  await assert.rejects(runBundledWorkflow(f.root, ['kb', 'reminders', 'delete']), /knowledge closeout supports/);
+});
