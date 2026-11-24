@@ -44,7 +44,7 @@ function harness(root, session = randomUUID(), history = []) {
       state.entries.push({ id: randomUUID(), type: 'custom', customType, data });
     },
   });
-  const event = async name => handlers[name]?.({ type: name }, ctx);
+  const event = async (name, extra = {}) => handlers[name]?.({ type: name, ...extra }, ctx);
   const call = async (name, args, id = randomUUID(), signal) => {
     const result = await tools['evolve_' + name].execute(id, args, signal, undefined, ctx);
     return result.isError ? result : JSON.parse(result.content[0].text);
@@ -568,4 +568,70 @@ test('OMP ignore migrates old directory rules without exposing runtime data', as
   assert.deepEqual(f.git('check-ignore', '--no-index', '--', ...runtime, '.evolve/openviking.json', '.evolve/evolution.json').split('\n'), runtime);
   await handler('apply', h.ctx);
   assert.match(prompt, /规则已齐全/);
+});
+
+test('OMP workflow supports code graph queries, episodic memory writes and lint while blocking wiki writes', async t => {
+  const f = fixture('evolve-omp-code-kb-');
+  t.after(async () => { await closeHarnesses(f.root); f.cleanup(); });
+  f.write('src/sample.ts', 'export function computeChecksum(input: string) { return input.length; }\n');
+  const h = harness(f.root);
+  await h.event('session_start');
+
+  const built = await h.call('workflow', { argv: ['code', 'build'] });
+  assert.equal(built.exit_code, 0);
+  const found = await h.call('workflow', { argv: ['code', 'search', 'computeChecksum'] });
+  assert.equal(found.exit_code, 0);
+  const symbols = JSON.parse(found.stdout);
+  assert.ok(Array.isArray(symbols) && symbols.some(item => item.node?.name === 'computeChecksum'));
+
+  const added = await h.call('workflow', {
+    argv: ['kb', 'add', 'Use OMP built-in tools for episodic memory.', '--kind', 'episodic', '--type', 'work_fact', '--session', 'omp-test', '--evidence', 'fixture:omp-kb'],
+  });
+  assert.equal(added.exit_code, 0);
+  const addedId = JSON.parse(added.stdout).id;
+  assert.ok(addedId);
+
+  const updated = await h.call('workflow', {
+    argv: ['kb', 'update', addedId, 'Use OMP built-in tools for episodic memory (verified).', '--kind=episodic'],
+  });
+  assert.equal(updated.exit_code, 0);
+
+  const searched = await h.call('memory_search', { query: 'episodic memory' });
+  assert.ok(searched.results.some(item => item.id === addedId));
+
+  const linted = await h.call('workflow', { argv: ['kb', 'lint'] });
+  assert.equal(linted.exit_code, 0);
+
+  await assert.rejects(runBundledWorkflow(f.root, ['code', 'unknown']), /Code Graph/);
+  await assert.rejects(runBundledWorkflow(f.root, ['kb', 'add', 'no kind']), /requires --kind episodic/);
+  await assert.rejects(runBundledWorkflow(f.root, ['kb', 'add', 'wiki write', '--kind', 'wiki']), /requires --kind episodic/);
+  await assert.rejects(runBundledWorkflow(f.root, ['kb', 'add', 'mixed', '--kind', 'episodic', '--kind', 'wiki']), /requires --kind episodic/);
+  await assert.rejects(runBundledWorkflow(f.root, ['kb', 'update', addedId, 'no kind']), /requires --kind episodic/);
+  await assert.rejects(runBundledWorkflow(f.root, ['kb', 'propose', 'draft.json']), /publication requires explicit approval/);
+});
+
+test('OMP before_agent_start injects routing guidance once and skips revive', async t => {
+  const f = fixture('evolve-omp-guidance-');
+  t.after(async () => { await closeHarnesses(f.root); f.cleanup(); });
+  const h = harness(f.root);
+  await h.event('session_start');
+
+  const revived = await h.event('before_agent_start', { reason: 'revive', systemPrompt: 'Base prompt' });
+  assert.equal(revived, undefined);
+
+  const first = await h.event('before_agent_start', { reason: 'prompt', systemPrompt: 'Base prompt' });
+  assert.equal(typeof first?.systemPrompt, 'string');
+  assert.match(first.systemPrompt, /^Base prompt\n\nOMP Evolve plugin routing:/);
+  assert.match(first.systemPrompt, /evolve_workflow/);
+  assert.match(first.systemPrompt, /evolve_wiki_context/);
+  assert.equal(await h.event('before_agent_start', { reason: 'prompt', systemPrompt: first.systemPrompt }), undefined);
+
+  const blocks = [{ type: 'text', text: 'Static prefix' }];
+  const withBlocks = await h.event('before_agent_start', { reason: 'prompt', systemPrompt: blocks });
+  assert.ok(Array.isArray(withBlocks?.systemPrompt));
+  assert.equal(withBlocks.systemPrompt.length, 2);
+  assert.deepEqual(withBlocks.systemPrompt[0], { type: 'text', text: 'Static prefix' });
+  assert.equal(withBlocks.systemPrompt[1].type, 'text');
+  assert.match(withBlocks.systemPrompt[1].text, /OMP Evolve plugin routing:/);
+  assert.equal(await h.event('before_agent_start', { reason: 'prompt', systemPrompt: withBlocks.systemPrompt }), undefined);
 });

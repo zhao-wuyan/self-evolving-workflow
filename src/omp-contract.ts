@@ -41,6 +41,16 @@ export interface OmpCommandContext extends OmpContext {
   };
 }
 
+export interface OmpBeforeAgentStartEvent {
+  type: 'before_agent_start';
+  prompt?: string;
+  reason?: string;
+  systemPrompt?: string | unknown[];
+}
+export interface OmpBeforeAgentStartResult {
+  systemPrompt?: string | unknown[];
+}
+
 interface Schema {
   optional(): Schema;
 }
@@ -69,6 +79,8 @@ export interface OmpExtensionApi {
     execute(id: string, args: Record<string, unknown>, signal: AbortSignal | undefined,
       onUpdate: unknown, ctx: OmpCommandContext): Promise<OmpToolResult>;
   }): void;
+  on(event: 'before_agent_start',
+    handler: (event: OmpBeforeAgentStartEvent, ctx: OmpContext) => OmpBeforeAgentStartResult | void | Promise<OmpBeforeAgentStartResult | void>): void;
   on(event: 'session_start' | 'session_switch' | 'session_branch' | 'session_tree' | 'session_clear' | 'session_shutdown',
     handler: (event: { type: string }, ctx: OmpContext) => void | Promise<void>): void;
   appendEntry(type: string, data: { eventId: string }): void;

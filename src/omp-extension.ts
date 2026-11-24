@@ -15,6 +15,31 @@ import { runBundledWorkflow } from './omp-cli-bridge.js';
 import type { KnowledgeSourceBinding, OmpContext, OmpExtensionApi, OmpInvocationContext, OmpToolResult, RunBinding } from './omp-contract.js';
 
 const associationType = 'self-evolving-workflow.knowledge.v1';
+const ompRoutingGuidance = [
+  'OMP Evolve plugin routing: use built-in Evolve tools instead of running `evolve` or `node dist/workflow-cli.js` in bash.',
+  '- Wiki & memory lookup: `evolve_wiki_context`, `evolve_wiki_reference`, `evolve_memory_search`, `evolve_memory_get`.',
+  '- Bound Run Skill & artifact reads: `evolve_run_binding`, `evolve_read_skill`, `evolve_read_artifact`.',
+  '- Code graph, episodic memory writes, lint, Session/Run/Skill control & harvest: `evolve_workflow` with argv (e.g. `["code","search","<symbol>"]`, `["code","graph","<id>"]`, `["kb","add","<memory>","--kind","episodic",...]`, `["kb","update","<id>","<memory>","--kind","episodic"]`, `["kb","lint"]`, `["session",...]`, `["run",...]`, `["skill",...]`, `["kb","harvest",...]`).',
+].join('\n');
+
+function appendGuidanceToSystemPrompt(systemPrompt: string | unknown[] | undefined): string | unknown[] | undefined {
+  if (typeof systemPrompt === 'string') {
+    if (systemPrompt.includes(ompRoutingGuidance)) return undefined;
+    return systemPrompt ? `${systemPrompt}\n\n${ompRoutingGuidance}` : ompRoutingGuidance;
+  }
+  if (Array.isArray(systemPrompt)) {
+    const exists = systemPrompt.some(block =>
+      block === ompRoutingGuidance ||
+      (typeof block === 'object' && block !== null && 'text' in block && block.text === ompRoutingGuidance));
+    if (exists) return undefined;
+    const first = systemPrompt[0];
+    const entry = typeof first === 'object' && first !== null && 'text' in first
+      ? ('type' in first ? { type: 'text', text: ompRoutingGuidance } : { text: ompRoutingGuidance })
+      : ompRoutingGuidance;
+    return [...systemPrompt, entry];
+  }
+  return ompRoutingGuidance;
+}
 interface SourceLease { identity: string; pending: Promise<KnowledgeSources>; selected?: KnowledgeSourceBinding }
 function toolResult(value: unknown): OmpToolResult {
   return { content: [{ type: 'text', text: JSON.stringify(value) }], details: value };
@@ -123,6 +148,11 @@ export default function ompExtension(api: OmpExtensionApi) {
       api.appendEntry(associationType, { eventId: event.id });
     } finally { store.close(); }
   });
+  api.on('before_agent_start', event => {
+    if (event.reason === 'revive') return;
+    const systemPrompt = appendGuidanceToSystemPrompt(event.systemPrompt);
+    return systemPrompt === undefined ? undefined : { systemPrompt };
+  });
 
   const z = api.zod;
   const lookup = z.object({ repository: z.string().optional(), task: z.string().optional(),
@@ -193,7 +223,7 @@ export default function ompExtension(api: OmpExtensionApi) {
   });
   api.registerTool({
     name: 'evolve_workflow', label: 'Evolve workflow', approval: 'exec',
-    description: 'Run session, run (including run task), skill control and knowledge closeout through the bundled CLI using argv (no shell, no global evolve). Use ["kb","harvest","session",sessionId,"--project",projectId] to generate review candidates with the OMP memory role; inspect via ["kb","candidates","show",receiptId,"--project",projectId]. This tool does not publish Wiki changes. For OpenViking policy use ["openviking","policy"] to inspect; identify an existing reproducible Skill entry, runner and scenarios from the repository or verified Run evidence, then pass --entry, --runner and --scenarios to preview. Never guess tests. Summarize the preview; re-submit the same arguments with --apply <preview_id> to request approval for a local Git commit, not a release. Personal experience accepts status/search/get only. Install OMP project Skills with ["skill","install","--scope","project","--host","omp","--yes"] into .omp/skills/, then commit them. Inspect skill status before upgrading; --upgrade replaces local modifications without merging.',
+    description: 'Run session, run (including run task), skill control, code graph (build/sync/search/graph/callers/callees/trace), episodic memory writes/lint (kb add/update with --kind episodic, kb sources/lint) and knowledge closeout through the bundled CLI using argv (no shell, no global evolve). Use ["code","search","<symbol>"] or ["code","graph","<id>"] for local code graph queries; use ["kb","add","<memory>","--kind","episodic",...] or ["kb","update","<id>","<memory>","--kind","episodic"] to record working memory; use ["kb","harvest","session",sessionId,"--project",projectId] to generate review candidates with the OMP memory role; inspect via ["kb","candidates","show",receiptId,"--project",projectId]. This tool does not publish Wiki changes. For OpenViking policy use ["openviking","policy"] to inspect; identify an existing reproducible Skill entry, runner and scenarios from the repository or verified Run evidence, then pass --entry, --runner and --scenarios to preview. Never guess tests. Summarize the preview; re-submit the same arguments with --apply <preview_id> to request approval for a local Git commit, not a release. Personal experience accepts status/search/get only. Install OMP project Skills with ["skill","install","--scope","project","--host","omp","--yes"] into .omp/skills/, then commit them. Inspect skill status before upgrading; --upgrade replaces local modifications without merging.',
     parameters: z.object({ argv: z.array(z.string()) }),
     execute: (id, args, signal, _onUpdate, ctx) => invoke(id, ctx, signal, async (context, guard) => {
       const argv = args.argv;

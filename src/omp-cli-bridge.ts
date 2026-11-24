@@ -3,23 +3,52 @@ import { basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { InputError } from './common.js';
 
-const commands: Record<string, true> = { session: true, run: true, skill: true, experience: true, openviking: true, kb: true };
+const commands: Record<string, true> = { session: true, run: true, skill: true, experience: true, openviking: true, kb: true, code: true };
 const skillActions: Record<string, true> = { list: true, install: true, status: true, validate: true, inspect: true, workflows: true };
+const codeActions: Record<string, true> = { build: true, sync: true, search: true, graph: true, callers: true, callees: true, trace: true };
+
+function hasOnlyEpisodicKind(argv: string[]): boolean {
+  const kinds: string[] = [];
+  for (let i = 2; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--') break;
+    if (arg === '--kind') {
+      const next = argv[++i];
+      if (next === undefined) return false;
+      kinds.push(next);
+    } else if (arg.startsWith('--kind=')) {
+      kinds.push(arg.slice('--kind='.length));
+    }
+  }
+  return kinds.length > 0 && kinds.every(kind => kind === 'episodic');
+}
 
 export async function runBundledWorkflow(root: string, argv: unknown, signal?: AbortSignal, agentKind?: 'main' | 'sub') {
   if (!Array.isArray(argv) || !argv.length || argv.some(arg => typeof arg !== 'string' || arg.includes('\0')) ||
       !(Object.hasOwn(commands, argv[0]) || argv.length === 1 && argv[0] === '--help')) {
-    throw new InputError('Supply a workflow control argv array (session/run/skill/experience/openviking/--help)');
+    throw new InputError('Supply a workflow control argv array (session/run/skill/code/kb/experience/openviking/--help)');
   }
   if (argv[0] === 'skill' && !Object.hasOwn(skillActions, argv[1] ?? 'list')) {
     throw new InputError('OMP supports Skill list/install/status/validate/inspect/workflows');
   }
+  if (argv[0] === 'code' && !Object.hasOwn(codeActions, argv[1] ?? '')) {
+    throw new InputError('OMP supports Code Graph build/sync/search/graph/callers/callees/trace');
+  }
   if (argv[0] === 'experience' && !['status', 'search', 'get'].includes(argv[1])) {
     throw new InputError('OMP may only read personal experience (status/search/get)');
   }
-  if (argv[0] === 'kb' && !(argv[1] === 'harvest' && ['session', 'receipt', 'conversation', 'skill'].includes(argv[2]) ||
-      argv[1] === 'candidates' && argv[2] === 'show')) {
-    throw new InputError('OMP knowledge closeout supports harvest and candidates show only; publication requires explicit approval');
+  if (argv[0] === 'kb') {
+    const isHarvest = argv[1] === 'harvest' && ['session', 'receipt', 'conversation', 'skill'].includes(argv[2]);
+    const isCandidatesShow = argv[1] === 'candidates' && argv[2] === 'show';
+    const isReadOnlyKb = argv[1] === 'sources' || argv[1] === 'lint';
+    const isEpisodicWrite = (argv[1] === 'add' || argv[1] === 'update') && hasOnlyEpisodicKind(argv);
+    if (argv[1] === 'add' || argv[1] === 'update') {
+      if (!isEpisodicWrite) {
+        throw new InputError('OMP kb add/update requires --kind episodic; Wiki publication requires explicit approval');
+      }
+    } else if (!isHarvest && !isCandidatesShow && !isReadOnlyKb) {
+      throw new InputError('OMP knowledge closeout supports harvest, candidates show, sources, lint, and episodic add/update only; publication requires explicit approval');
+    }
   }
   if (argv[0] === 'openviking' && argv[1] !== 'policy') throw new InputError('OMP Agent may only manage OpenViking policy');
   if (argv[0] === 'openviking' && argv.slice(2).some(arg => !/^(?:--(?:entry|runner|scenarios|apply)(?:=|$))/.test(arg) && arg.startsWith('-'))) {
