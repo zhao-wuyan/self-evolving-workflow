@@ -4,12 +4,34 @@ All notable changes to `self-evolving-workflow` are documented in this file.
 
 ## [Unreleased]
 
+- 同步上游 v0.6.0（新增跨宿主历史信号收集 `evolve history`、Agent 原生自进化路线与 `evolve skill sync` / `validate --all`），保留 OpenViking 集成、个人跨项目经验与 OMP 宿主支持。
 - 同步上游 v0.5.0（含多宿主插件与 Marketplace 文档），保留 OpenViking 集成、个人跨项目经验与 OMP Skills 说明。
 - `kb lint` 兼容异步 OpenViking 知识源；三宿主插件导出与含 OMP 的普通 Skills 安装分别选择宿主，避免误写 Codex 插件目录。
 - 同步上游 v0.3.1，保留 OpenViking 集成与 OMP 原生安装目录支持。
 - OpenViking 远端 Memory 支持 `kb get --pick`、`q-N:idx` 和批量读取，文本输出继续保存远端读取证据。
 - 共用模型客户端接纳上游响应校验，正确报告截断、仅推理输出和服务端错误。
 - OMP 会话中的知识提炼与审阅可复用 `@memory` 角色及认证，使用无工具 SDK 会话；未配置独立 HTTP 模型时自动选择，候选审批流程保持。
+
+## [0.6.0] - 2026-11-24
+
+### Highlights
+
+- **Incremental Cross-Host Signal Collection & Run History Search (`src/history-signals.ts`, `src/memory-history.ts`, `src/memory-reminders.ts`, `src/search-format.ts`, `src/knowledge-cli.ts`, `src/workflow-cli.ts`)**:
+  - Added `evolve history collect|list|search|show` to incrementally index and search Codex, Claude Code, and Antigravity (`agy`) execution histories (`byte_offset` cursors in `.evolve/history-signals.db` skip unchanged transcripts and re-scan only new bytes).
+  - Unified four signal sources (`transcript`, `memory`, `wiki`, and opt-in incremental `--llm`) with tool call/result/error parsing, noise-filtered `detectEntrySignals()`, `--role` parity across `--source signals|all`, and compact output rendering.
+- **Agent-Executed `workflow-evolve` & Strengthened Skill Packaging/Sync (`skills/workflow-evolve/SKILL.md`, `skills/ew-skill-design/SKILL.md`, `src/workflow-skills.ts`, `src/workflow-install.ts`, `src/retrospective.ts`, `src/skill-design.ts`, `src/skill-replay.ts`, `src/closeout.ts`)**:
+  - Streamlined `workflow-evolve` (`v0.5.0`) to an Agent-driven 4-step loop (`Collect -> Four-Way Triage & Strategy -> Execute Modify/Create -> Validate & Close`), keeping `evolve-loop.mjs` as an optional offline replay harness.
+  - Added deterministic `evolve session review --no-llm` aggregation (covering `.evolve/runs/<session>/<run>/outputs/retrospective.json` and `memory.db`), `evolve skill sync` for project-local Skill distribution to host directories, project Skill discovery in `skill workflows`, `skill validate --all` scoping to committed project packages with `#heading` / `agents/openai.yaml` / `session-mode` checks, CRLF-tolerant `skill-replay` verification, optional `--skill` in `kb candidates route`, and `candidate_routes` tracking in `closeout.db`.
+- **CodeGraph Lock & Dependency Update (`package.json`, `src/code.ts`, `test/unified-search.test.mjs`)**:
+  - Updated `@colbymchenry/codegraph` to `1.6.4` and recognized `LockUnavailableError` in `isCodeLockError()` so mixed search gracefully degrades when the index is rebuilding.
+
+### Verification
+
+- `npm run build`: passed
+- `npm run test:ew-layout`: passed
+- `node dist/workflow-cli.js skill validate --all`: 32/32 passed
+- `test/history-signals.test.mjs`, `test/evolve-workflow.test.mjs`, `test/integration.test.mjs`, and 12 unit/lifecycle suites: 142/142 passed
+- `npm pack --dry-run`: 349 files, 8.5 MB unpacked
 
 ## [0.5.0] - 2026-11-24
 

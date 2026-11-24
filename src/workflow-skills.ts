@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { posix } from 'node:path';
+import { existsSync } from 'node:fs';
+import { join, posix } from 'node:path';
 import { parseDocument } from 'yaml';
 import { InputError, requireText } from './common.js';
 import { isWikiCategory, type WikiCategory } from './wiki-entry.js';
@@ -261,4 +262,154 @@ export function bindWorkflowSkill(root: string, command: string, commit = workfl
   };
   for (const link of links) readWorkflowLink(root, skill, entry, link);
   return skill;
+}
+
+function headingSlug(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .replace(/[`*_~]/g, '')
+    .replace(/[^\p{L}\p{N}\s-]/gu, '')
+    .trim()
+    .replace(/\s+/g, '-');
+}
+
+function hasHeadingFragment(markdown: string, fragment: string): boolean {
+  const decoded = decodeURIComponent(fragment).trim().toLowerCase();
+  const targetSlug = headingSlug(decoded);
+  for (const match of markdown.matchAll(/^#{1,6}\s+(.+?)\s*#*$/gm)) {
+    const rawHeading = match[1].trim().toLowerCase();
+    if (rawHeading === decoded || headingSlug(rawHeading) === targetSlug) return true;
+  }
+  return false;
+}
+
+function resolvePackageMarkdownLink(
+  root: string,
+  skill: WorkflowSkill,
+  from: string,
+  destination: string,
+): { path: string; fragment?: string } {
+  const hashIdx = destination.indexOf('#');
+  const rawPath = hashIdx >= 0 ? destination.slice(0, hashIdx) : destination;
+  const fragment = hashIdx >= 0 ? destination.slice(hashIdx + 1) : undefined;
+  const path = linkPath(from, rawPath);
+  readWorkflowMarkdown(root, skill, path);
+  return { path, ...(fragment ? { fragment } : {}) };
+}
+
+export function discoverWorkflowCommands(root: string, commit = workflowHead(root)): string[] {
+  const discovered = new Set<string>();
+  for (const skillRoot of projectSkillRoots) {
+    const raw = git(root, 'ls-tree', '-r', '--name-only', '-z', commit, '--', skillRoot).toString('utf8');
+    if (!raw) continue;
+    for (const file of raw.split('\0')) {
+      if (!file.endsWith('/SKILL.md')) continue;
+      const rel = file.slice(skillRoot.length + 1, -'/SKILL.md'.length);
+      if (/^[a-z0-9]+(?:-[a-z0-9]+)*$/i.test(rel)) {
+        discovered.add(rel);
+        if (rel === 'ew-odyssey') {
+          for (const mode of odysseyModes) discovered.add(`ew-odyssey-${mode}`);
+        }
+      } else if (/^ew-orchestrate\/steps\/([a-z0-9]+(?:-[a-z0-9]+)*)$/i.test(rel)) {
+        const step = rel.split('/').at(-1)!;
+        discovered.add(step);
+      }
+    }
+  }
+  return [...discovered].sort();
+}
+
+export function validateWorkflowSkill(root: string, command: string, commit = workflowHead(root)) {
+  let skill: WorkflowSkill;
+  try {
+    skill = bindWorkflowSkill(root, command, commit);
+  } catch (error) {
+    const normalized = workflowName(command);
+    if (error instanceof InputError && /Workflow package is unavailable/.test(error.message)) {
+      const diskCandidates = [
+        join(root, 'skills', normalized, 'SKILL.md'),
+        join(root, 'skills', 'ew-orchestrate', 'steps', normalized, 'SKILL.md'),
+      ];
+      if (diskCandidates.some(path => existsSync(path))) {
+        throw new InputError(`${error.message} (uncommitted changes exist on disk; commit before running skill validate)`);
+      }
+    }
+    throw error;
+  }
+  const entryText = workflowBlob(root, commit, `${skill.package_path}/${skill.entry}`).toString('utf8');
+  const header = workflowHeader(entryText);
+  const description = requireText(header.description, 'Skill description');
+  if (header['session-mode'] !== undefined && header['session-mode'] !== 'none' && header['session-mode'] !== 'run') {
+    throw new InputError(`Invalid session-mode in ${skill.skill_id}: ${String(header['session-mode'])}`);
+  }
+  const mode = odyssey.get(workflowName(command));
+  const prepPath = mode ? `references/prepare/odyssey-${mode}.md` : undefined;
+  const modeHeader = prepPath ? workflowHeader(workflowBlob(root, commit, `${skill.package_path}/${prepPath}`).toString('utf8')) : undefined;
+  if (header['session-mode'] === 'run' && !(modeHeader?.contract ?? header.contract)) {
+    throw new InputError(`Stateful Skill (session-mode: run) requires a contract: ${skill.skill_id}`);
+  }
+  if (header.version !== undefined) {
+    const ver = String(header.version).trim();
+    if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(ver)) {
+      throw new InputError(`Invalid semver version in ${skill.skill_id}: ${ver}`);
+    }
+  }
+  // 校验 required_links 与入口正文中相对 Markdown 链接及其 #heading 锚点。
+  const rawLinks = Array.isArray(modeHeader?.required_links ?? header.required_links)
+    ? (modeHeader?.required_links ?? header.required_links) as unknown[]
+    : [];
+  for (const item of rawLinks) {
+    if (typeof item !== 'string') continue;
+    const { path, fragment } = resolvePackageMarkdownLink(root, skill, skill.entry, item);
+    if (fragment) {
+      const target = readWorkflowMarkdown(root, skill, path);
+      if (!hasHeadingFragment(target.markdown, fragment)) {
+        throw new InputError(`Missing Markdown heading #${fragment} in ${path}`);
+      }
+    }
+  }
+  for (const match of entryText.matchAll(/\[[^\]]*\]\(\s*(<[^>]+>|[^\s)]+)/g)) {
+    const dest = match[1].replace(/^<|>$/g, '');
+    if (!dest || dest.startsWith('#') || /^[a-z][a-z0-9+.-]*:/i.test(dest)) continue;
+    const { path, fragment } = resolvePackageMarkdownLink(root, skill, skill.entry, dest);
+    if (fragment) {
+      const target = readWorkflowMarkdown(root, skill, path);
+      if (!hasHeadingFragment(target.markdown, fragment)) {
+        throw new InputError(`Missing Markdown heading #${fragment} in ${path}`);
+      }
+    }
+  }
+  // 校验宿主调用对等性（disable-model-invocation 与 agents/openai.yaml）。
+  const openaiTree = findTreeMember(root, commit, `${skill.package_path}/agents/openai.yaml`);
+  if (openaiTree?.type === 'blob') {
+    const openaiDoc = parseDocument(workflowBlob(root, commit, `${skill.package_path}/agents/openai.yaml`).toString('utf8'), {
+      strict: true, uniqueKeys: true,
+    });
+    if (openaiDoc.errors.length) {
+      throw new InputError(`Invalid agents/openai.yaml in ${skill.skill_id}: ${openaiDoc.errors[0].message.split('\n')[0]}`);
+    }
+    const openaiJs = openaiDoc.toJS() as { policy?: { allow_implicit_invocation?: unknown } } | null;
+    const disabledInSkill = header['disable-model-invocation'] === true;
+    const disabledInOpenAi = openaiJs?.policy?.allow_implicit_invocation === false;
+    if (disabledInSkill !== disabledInOpenAi) {
+      throw new InputError(
+        `Invocation parity mismatch in ${skill.skill_id}: disable-model-invocation (${disabledInSkill}) vs agents/openai.yaml allow_implicit_invocation=false (${disabledInOpenAi})`,
+      );
+    }
+  }
+  // 校验 <!-- evolve:learning:... --> 块配对与数量统计。
+  const starts = [...entryText.matchAll(/<!-- evolve:learning:([a-f0-9]{20}) -->/g)].length;
+  const ends = [...entryText.matchAll(/<!-- \/evolve:learning -->/g)].length;
+  if (starts !== ends) {
+    throw new InputError(`Unbalanced learning markers in ${skill.skill_id}: ${starts} start vs ${ends} end`);
+  }
+  return {
+    ...skill,
+    description,
+    session_mode: (header['session-mode'] as string | undefined) ?? 'unspecified',
+    disable_model_invocation: header['disable-model-invocation'] === true,
+    ...(header.version !== undefined ? { version: String(header.version) } : {}),
+    validated: true,
+  };
 }

@@ -37,6 +37,7 @@ interface ActiveLockHolder {
 
 export function isCodeLockError(error: unknown): boolean {
   if (error instanceof CodeIndexLockedError) return true;
+  if (error instanceof Error && error.name === 'LockUnavailableError') return true;
   const message = error instanceof Error ? error.message : String(error);
   return LOCK_ERROR_PATTERN.test(message);
 }
@@ -105,7 +106,7 @@ function readActiveLockHolder(lockPath: string, excludeSelf = false): ActiveLock
 function toCodeIndexLockedError(error: unknown, dir?: string): CodeIndexLockedError | null {
   if (error instanceof CodeIndexLockedError) return error;
   const message = error instanceof Error ? error.message : String(error);
-  if (LOCK_ERROR_PATTERN.test(message)) return new CodeIndexLockedError(message);
+  if (isCodeLockError(error)) return new CodeIndexLockedError(message);
   if (dir && TRANSIENT_DB_PATTERN.test(message)) {
     const active = readActiveLockHolder(join(dir, 'evolve-write.lock'))
       ?? readActiveLockHolder(join(dir, 'codegraph.lock'), true);

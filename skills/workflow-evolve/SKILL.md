@@ -1,103 +1,80 @@
 ---
 name: workflow-evolve
 disable-model-invocation: true
-description: "Modify Skill packages via execution history review, replay, and Agy confirmation."
-argument-hint: "--skill <skills/<id>/SKILL.md> --iterations <n> --scenarios <file> (--session <id> | --execution <id> --project <id> | --history <file> | --review <file>) [--run-dir <dir>] [--bank <file>] [--auto]"
-session-mode: run
-required_links:
-  - references/auto-loop.md
-contract:
-  contract_version: 2.1
-  consumes: []
-  produces:
-    - path: outputs/evolution-report.json
-      kind: workflow-evolution-report
-      schema: workflow-evolution/1.0
-      role: primary
-      alias: latest-workflow-evolution
-      required: true
-  gates:
-    entry:
-      - explicit iteration count is a positive integer
-      - target Skill package is committed and replayable
-    exit:
-      - every applied round has an Agy confirmation receipt
-      - baseline and candidate scenarios pass
-      - failed applications are rolled back
-version: 0.4.0
+description: "Agent-driven Skill evolution: collect incremental signals from host run histories, memory, and wiki; propose a Skill modify/create strategy; apply and validate."
+argument-hint: "[--session <id>] [--skill <id>] [--host codex|claude|agy|all] [--since <7d>] [--query <text>]"
+session-mode: none
+version: 0.5.0
 ---
 
 # Workflow Evolution
 
-Run this Skill on explicit user `/workflow-evolve` invocation to modify Skill/Harness behavior (`skills/<id>/SKILL.md`) from completed Session/Run or execution evidence. Route ordinary project coding, business-code bugs, failing project tests, or single user clarifications to regular task execution and episodic memory (`evolve kb add --kind episodic`) rather than Skill evolution. Routing to `ew-skill-design` follows `ew-knowledge` `references/knowledge-route.md` rule 8 (`evolve skill workflows show ew-knowledge`): candidates needing a new Skill contract/lifecycle gate, new artifacts/outputs, cross-Skill routing/multi-stage branching, at least 3 stable steps, `consolidate_recommended` bloat consolidation, or an explicit new/migrated Skill route to `ew-skill-design`. `--iterations <n>` is required; `--auto` enables unattended `apply` and rollback after the Agy confirmation gate.
+Run this Skill on explicit user `/workflow-evolve` invocation. The **Agent directly executes** the evolution loop using local CLI evidence tools rather than wrapping execution in external runner loops.
 
-- Read [the automatic loop](references/auto-loop.md) for argument parsing, state, retries, and stop conditions.
-- Read [history review](references/history-review.md) when reconstructing execution evidence or building a transcript fixture.
-- Read [the Agy gate](references/agy-gate.md) when preparing or validating Agy discussion and confirmation payloads, quality filters, and `priority` placement rules.
+## Workflow
 
-## Proposal Quality Bar
+### 1. Collect & Search Historical Signals
 
-- **Deterministic check before prose**: Convert mechanical failures (fixed syntactic patterns, banned APIs, import shapes, schema/file-location rules, unwired lint/hook/test checks) into deterministic lint/hook/test/CI checks rather than adding Skill prose rules.
-- **Prune sediment and no-ops**: Reject proposals that restate default model behavior, duplicate existing body/learnings, or cache trivial environment lookups; `retire` or `supersede` stale learnings instead of stacking rules.
-- **Concise positive wording**: Express each proposed `instruction` and `when` trigger as a direct positive action anchored on sharp leading words (pair any unavoidable hard guardrail with its positive target).
-
-## Entry Contract
+Gather evidence across host transcripts, episodic memory, Wiki/Session state, and closeout candidates before proposing any change:
 
 ```text
-evolve-loop.mjs
-  --skill <skills/<id>/SKILL.md>
-  --iterations <positive integer>
-  --scenarios <JSON file with >=1 baseline failure and >=1 baseline pass>
-  [--runner <replay runner>]
-  (--session <Session ID> | --execution <Skill execution ID> --project <source project ID> | --history <transcript-evidence/1.0 JSON> | --review <serialized Session review> | --allow-empty-history)
-  [--run-dir <dir>] [--output-dir <dir>] [--max-retries <n>] [--agy <executable>] [--bank <file>] [--auto]
+# 1) Incrementally collect signals (skips already-scanned byte offsets and unchanged records)
+evolve history collect [--host codex|claude|agy|all] [--session <id>] [--llm]
+
+# 2) List & search historical runs across Codex, Claude Code, and Agy (includes tool calls & errors)
+evolve history list [--signals-only] [--since 7d] [--format compact]
+evolve history search "<query>" [--role user|assistant|tool|error] [--skill <id>] [--signals-only] [--format compact]
+evolve history show <session-id> --anchor <anchor-id> --include-tools [--context 5]
+
+# 3) Inspect episodic memory, deterministic session review, and closeout/reminder state
+evolve kb search "<topic>" --kind episodic [--session <id>]
+evolve session review <session-id> --no-llm
+evolve kb reminders
 ```
 
-- **Run output requirement**: Inside an Evolve Run (`session-mode: run`), pass `--run-dir <run_dir>` (or set `RUN_DIR`) so `evolve-loop.mjs` emits `outputs/evolution-report.json` with `_meta`; omit `--run-dir` only for standalone invocations outside a Run.
-- **`--execution` requires `--project`**: Supply `--project <source-project-id>` alongside `--execution <id>` (omitting `--project` fails immediately).
-- **Default runner**: `scripts/codex-memory-replay.mjs` (runs `codex exec` in an isolated scratch workspace using the replay CLI against the target Git commit and returns loaded document hashes + `knowledge-reads/1.0`). Scenario `input` needs `task` plus `expected` (exact text) and/or `rubric` (string or list judged by a separate read-only `codex exec`); failures return `feedback`. Set `AGENT_MEMORY_DB` to an absolute path when replay should query existing memories; raise `CODEX_REPLAY_TIMEOUT_MS` / `EVOLVE_REPLAY_TIMEOUT_MS` for rubric judging.
-- **pass^k**: A scenario may set `"samples": <1-10>`; it passes only when every sample passes (baseline and candidate alike).
-- **Scenario bank**: `--bank <file>` (default `.evolve/evolution/bank/<skill-id>.json`) keeps verified scenarios as baseline passes and records addressed signal IDs; later runs replay the bank and skip addressed signals. Point `--bank` at a tracked file to share it.
-- **Clean commit required**: Commit target Skill package changes before running (`evolve-loop.mjs` verifies the target package directory is clean before each round, and `evolve skill replay` creates isolated worktrees under `<git-dir>/evolve-replay/`).
-- **Agy receipts**: Preserve both discussion and confirmation JSON per round; apply only when `approved: true`.
-- **Automatic project review**: OpenViking lifecycle supplies one fixed `--review` with real Run sources, a project business runner, and `EVOLVE_KNOWLEDGE_SNAPSHOT`. Zero attributable signals exit without a candidate (`no_signals`); discussion evidence must be a subset of the review sources. This path is independent of `--session`/`--execution`/`--history`, which use the scenario bank's addressed-signal filtering.
-- **Installed CLI**: Set `EVOLVE_CLI` to the installed `workflow-cli.js`; `AGENT_MEMORY_CLI` remains accepted for compatibility with the OpenViking lifecycle and is used as a fallback when `EVOLVE_CLI` is absent. The replay runner resolves `required_links` from the requested Git commit; project `node_modules` is not required.
+- Always inspect exact message/tool anchors (`history show --include-tools`) rather than relying on unverified summaries alone.
+- *Done when*: Relevant historical signals across host transcripts, `memory.db`, `workflow.db`, and `closeout.db` are gathered with concrete source IDs.
 
-## Operations and Versions
+### 2. Formulate Evolution Strategy & Obtain Confirmation
 
-| Operation | When | Command |
+Before editing any file, run **Four-Way Triage** on every collected signal:
+
+| Attribution | Route | Action |
 | --- | --- | --- |
-| `add` | New attributable judgement/workflow defect with no covering learning or deterministic check | `evolve skill draft <entry> <instruction> --priority <p> --evidence <ref>` |
-| `supersede` | A Run read an existing learning and still failed, or the learning needs sharper positive framing | `evolve skill draft ... --supersedes <learning-id>` |
-| `retire` | `evolve skill learnings <entry>` marks `retire_candidate` / `unused`, the body absorbed it, or it is a no-op/sediment rule | `evolve skill retire <entry> <learning-id>... --evidence <ref> [--reason <text>]` |
-| consolidate | `skill learnings` reports `consolidate_recommended` (inline > 3 or total > 8) | Route to `ew-skill-design` package mode; `add` is blocked in the loop |
+| Fixed syntactic pattern, banned API, schema check, or missing lint/test/hook | **Deterministic check** | Fix in repo code/lint/test/CI — do not add Skill prose |
+| Project-wide invariant, domain fact, or stale/conflicting Wiki knowledge | **Wiki update (`ew-knowledge`)** | Stage via `evolve kb propose` → human-approved `evolve kb apply` |
+| Defect, redundancy, or bloat in an existing Skill (`skills/<id>/` or `skills/ew-orchestrate/steps/<id>/`) | **Skill modification** | `patch` (targeted edit to `SKILL.md` / `references/*.md`), `consolidate` (merge bloated rules/learnings), or `retire` (prune stale/no-op rules) |
+| Reusable new workflow (`>= 3` stable steps, distinct trigger, or new contract/outputs) | **Skill creation** | Scaffold a new package under `skills/<new-id>/` following `evolve skill workflows show ew-skill-design` |
 
-Each candidate commit carries `Evolve-Draft`, `Evolve-Operation` and `Evolve-Evidence` trailers and bumps the frontmatter `version` (patch for learnings, minor for package redesigns when the designer left it unchanged). Receipts live in `<git-dir>/evolve-replay/` with refs `refs/evolve/replays/<id>`. `evolve skill rollback <receipt>` reverts the candidate even after later unrelated commits, provided candidate files remain unchanged since the replay commit.
+Present a concise **Self-Evolution Strategy** to the user and obtain explicit approval before editing:
+- **Evidence & attribution**: Exact `session_id` / `anchor` / `memory_id` / `run_id` citations.
+- **Target & operation**: Target Skill ID/path and operation (`patch` | `consolidate` | `retire` | `create`), plus any deferred Wiki or code-check items.
+- **File-level plan & verification**: Exact files to modify/create and the validation/regression checks to run.
+- *Done when*: The user explicitly approves the proposed strategy and target Skill scope.
 
-### Handoff from `ew-knowledge` (`kb candidates route`)
+### 3. Execute Skill Modification or Creation
 
-When `evolve kb candidates route <closeout-id> <candidate-id> --skill <skill-id>` returns `route: "skill-addition"`, inspect the closeout record with `evolve kb candidates show <receipt-id> --project <source-project-id>` and map inputs as follows:
+Apply the approved strategy directly in the workspace while preserving package craft (`evolve skill workflows show ew-skill-design`):
 
-1. **Target & history flag**:
-   - `--skill skills/<skill-id>/SKILL.md`
-   - Session receipt (`kb harvest session`): pass `--session <session_id>`.
-   - Standalone Skill receipt (`kb harvest skill`): pass `--execution <execution_id> --project <source-project-id>` (`<execution_id>` from `kb candidates show`'s `session_id` / execution ID).
-   - Direct transcript fixture: pass `--history <transcript-evidence/1.0 JSON>`.
-2. **`--scenarios` construction**: Author a JSON array of `>= 2` items (`{ id, input: { task, expected }, baseline: boolean, knowledge_reads? }`):
-   - At least one failing baseline scenario (`"baseline": false`) reproducing the defect in `candidate.content` and `candidate.sources` with the expected fixed output.
-   - At least one passing baseline scenario (`"baseline": true`) ensuring unaffected behavior stays green.
+- **Targeted edits over blind appending**: Edit the relevant section in `SKILL.md` or branch-specific `references/*.md` (for example `ew-orchestrate/steps/<id>/references/workflow.md` or `ew-odyssey/references/odyssey-<mode>.md`) instead of stacking comment blocks at the top/bottom of `SKILL.md`.
+- **Skill creation (`skills/<new-id>/`)**:
+  - Choose `disable-model-invocation: true` (user-only `/skill`, zero context load) vs model-invoked (`description` with crisp branch triggers).
+  - Choose `session-mode: none` (standalone) vs `session-mode: run` (with `contract_version: 2.1`, `consumes`, `produces`, `gates`).
+  - Keep `SKILL.md` focused on frontmatter, routing table, core invariants, and ordered steps with checkable `Done when` criteria; move branch details into `references/`.
+- **Positive framing & pruning**: State target actions positively, pair unavoidable hard guardrails with their positive target, delete no-ops/sediment, and bump frontmatter `version` (`patch` for fixes, `minor` for consolidations/new packages).
+- *Done when*: Target Skill files are edited or scaffolded cleanly with valid relative links and updated `version`.
 
-## Automatic Invocation
+### 4. Validate, Verify & Close the Loop
 
-```powershell
-# PowerShell (use `\` line continuation on POSIX shells)
-node skills/workflow-evolve/scripts/evolve-loop.mjs `
-  --skill skills/<id>/SKILL.md `
-  --iterations 3 `
-  --scenarios .evolve/evolution/scenarios.json `
-  --session <session-id> `
-  --run-dir <run_dir> `
-  --auto
-```
+1. **Static package validation** (after committing or inside a commit-bound check):
+   - Run `evolve skill validate <id>` (or `evolve skill validate --all`) to verify strict YAML, `name` parity, `required_links` & `#heading` fragments, `session-mode` vs `contract`, `disable-model-invocation` vs `agents/openai.yaml` parity, and balanced learning markers.
+2. **Behavioral verification**:
+   - Verify the fix/new workflow with targeted regression checks or an isolated verification subagent against concrete failing & passing scenarios.
+3. **Close the loop**:
+   - Record the verified evolution via `evolve kb add "..." --kind episodic --type verified_fix --evidence <anchor>`.
+   - Acknowledge handled reminders (`evolve kb reminders ack`) and sync evolved or new project Skills to host directories (`evolve skill sync [--scope project|user] [--host codex|claude|agy|all]`).
+- *Done when*: Static validation and verification checks pass, and verification state + any remaining follow-ups are recorded.
 
-Writes round state under `.evolve/evolution/<timestamp>/` (and `outputs/evolution-report.json` when `--run-dir <run_dir>` is passed). Seal the Run with `evolve run complete` only when `state.status` is `completed` (or `done_with_concerns` if `confirmed_pending_apply` awaiting manual `apply`); on `regression_detected`, `agy_rejected`, `replay_failed`, `consolidation_required`, `confirmation_rejected`, `rolled_back`, or `failed`, transition the Run with `evolve run transition ... failed|blocked` (`no_attributable_signals` exits with zero Skill changes; `consolidation_required` hands off to `ew-skill-design`).
+## Optional Offline Replay Harness
+
+When automated multi-round Git-worktree replay is explicitly requested, the legacy runner pipeline remains available in [auto-loop.md](references/auto-loop.md), [history-review.md](references/history-review.md), and [agy-gate.md](references/agy-gate.md).

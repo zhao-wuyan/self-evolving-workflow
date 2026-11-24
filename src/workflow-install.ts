@@ -252,16 +252,47 @@ function writeManifest(path: string, manifest: InstallManifest): void {
   writeJsonAtomic(path, manifest);
 }
 
-export function workflowDocuments(): WorkflowDocument[] {
+export function workflowDocuments(root?: string): WorkflowDocument[] {
   const documents: WorkflowDocument[] = JSON.parse(readFileSync(join(bundle, 'workflows', 'index.json'), 'utf8'));
   const skills = shippedSkills();
-  return documents.filter(item => skills.includes(item.path.split('/')[1]));
+  const base = documents.filter(item => skills.includes(item.path.split('/')[1]));
+  if (!root || resolve(root) === resolve(bundle)) return base;
+  const projectSkillsDir = join(resolve(root), 'skills');
+  if (!existsSync(projectSkillsDir)) return base;
+  const seen = new Set(base.map(item => item.id));
+  const extra: WorkflowDocument[] = [];
+  for (const entry of readdirSync(projectSkillsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const rel = `skills/${entry.name}/SKILL.md`;
+    if (existsSync(join(resolve(root), rel)) && !seen.has(entry.name)) {
+      seen.add(entry.name);
+      extra.push({ id: entry.name, path: rel });
+    }
+    if (entry.name === 'ew-orchestrate') {
+      const stepsDir = join(projectSkillsDir, 'ew-orchestrate', 'steps');
+      if (!existsSync(stepsDir)) continue;
+      for (const step of readdirSync(stepsDir, { withFileTypes: true })) {
+        if (!step.isDirectory()) continue;
+        const stepRel = `skills/ew-orchestrate/steps/${step.name}/SKILL.md`;
+        if (existsSync(join(resolve(root), stepRel)) && !seen.has(step.name)) {
+          seen.add(step.name);
+          extra.push({ id: step.name, path: stepRel });
+        }
+      }
+    }
+  }
+  return [...base, ...extra];
 }
 
-export function workflowDocument(id: string) {
+export function workflowDocument(id: string, root?: string) {
   const name = id === 'odyssey' || id === 'skill-design' ? 'ew-' + id : workflowName(id);
-  const document = workflowDocuments().find(item => item.id === name);
+  const docs = workflowDocuments(root);
+  const document = docs.find(item => item.id === name) ?? docs.find(item => item.id === id);
   if (!document) throw new InputError('Unknown workflow: ' + id);
+  if (root) {
+    const projectFile = join(resolve(root), document.path);
+    if (existsSync(projectFile)) return readFileSync(projectFile, 'utf8');
+  }
   return readFileSync(join(bundle, document.path), 'utf8');
 }
 
@@ -1493,6 +1524,118 @@ export function exportPlugins(root: string, outDir: string, options: PluginInsta
     out_dir: destination,
     skills: selectedSkills,
     targets,
+  };
+}
+
+export function syncProjectSkills(
+  root: string,
+  options: { scope?: InstallScope; host?: string; skill?: string[]; force?: boolean } = {},
+) {
+  const resolvedRoot = resolve(root);
+  const projectSkillsDir = join(resolvedRoot, 'skills');
+  if (!existsSync(projectSkillsDir)) throw new InputError(`Project skills directory not found: ${projectSkillsDir}`);
+  const available = readdirSync(projectSkillsDir, { withFileTypes: true })
+    .filter(item => item.isDirectory() && existsSync(join(projectSkillsDir, item.name, 'SKILL.md')))
+    .map(item => item.name)
+    .sort();
+  const requested = options.skill ?? [];
+  const selected = requested.length
+    ? requested.map(name => {
+        if (!available.includes(name)) throw new InputError(`Project Skill package not found: skills/${name}`);
+        return name;
+      })
+    : available.filter(name => !nonShippedSkills.has(name));
+  if (!selected.length) throw new InputError('No project Skill packages found to sync');
+
+  const scope: InstallScope = options.scope ?? 'project';
+  const filePath = manifestPath(resolvedRoot, scope);
+  const manifest = readManifest(filePath);
+  const hostList = options.host
+    ? parseInstallHosts(options.host)
+    : installHosts.filter(host => {
+        const target = scopeAndHost(resolvedRoot, scope, host);
+        return Boolean(manifest.targets[resolve(target.skillsDir)]) || existsSync(target.skillsDir);
+      });
+  const selectedHosts = hostList.length ? hostList : [...installHosts];
+  const now = new Date().toISOString();
+
+  const targetResults = selectedHosts.map(host => {
+    const target = scopeAndHost(resolvedRoot, scope, host);
+    const skillsDir = target.skillsDir;
+    if (lstatSync(skillsDir, { throwIfNoEntry: false })?.isSymbolicLink()) throw new InputError('Use a regular skills directory');
+    mkdirSync(skillsDir, { recursive: true });
+    const targetKey = resolve(skillsDir);
+    const existingRecord = manifest.targets[targetKey];
+    const skillRecords: Record<string, InstalledSkillRecord> = { ...(existingRecord?.skills ?? {}) };
+    const installed: string[] = [];
+    const upgraded: string[] = [];
+    const kept: string[] = [];
+
+    for (const name of selected) {
+      const sourceDir = join(projectSkillsDir, name);
+      const dest = join(skillsDir, name);
+      const sourceHash = directorySha256(sourceDir);
+      const sourceVer = skillVersion(sourceDir);
+      const destInfo = lstatSync(dest, { throwIfNoEntry: false });
+      if (destInfo?.isSymbolicLink()) throw new InputError('Use a regular skill directory: ' + dest);
+      const exists = Boolean(destInfo);
+      const currentDiskHash = destInfo?.isDirectory() ? directorySha256(dest) : undefined;
+      const isSameContent = Boolean(currentDiskHash && currentDiskHash === sourceHash);
+      if (!exists || options.force || !isSameContent) {
+        const stage = mkdtempSync(join(skillsDir, '.evolve-sync-'));
+        try {
+          const staged = join(stage, name);
+          cpSync(sourceDir, staged, { recursive: true, force: false, errorOnExist: true });
+          if (exists) {
+            const backup = join(stage, `${name}.backup`);
+            renameSync(dest, backup);
+            try {
+              renameSync(staged, dest);
+            } catch (error) {
+              if (!existsSync(dest) && existsSync(backup)) renameSync(backup, dest);
+              throw error;
+            }
+            upgraded.push(name);
+          } else {
+            renameSync(staged, dest);
+            installed.push(name);
+          }
+        } finally {
+          if (dirname(stage) === skillsDir) rmSync(stage, { recursive: true, force: true });
+        }
+        const prev = skillRecords[name];
+        skillRecords[name] = {
+          version: sourceVer,
+          sha256: sourceHash,
+          installed_at: prev?.installed_at ?? now,
+          updated_at: now,
+        };
+      } else {
+        kept.push(name);
+      }
+    }
+
+    manifest.targets[targetKey] = {
+      scope,
+      host,
+      skills_dir: skillsDir,
+      agents_dir: target.agentsDir,
+      instructions: target.instructions,
+      updated_at: now,
+      package_version: bundlePackageVersion(),
+      skills: skillRecords,
+      ...(existingRecord?.agents ? { agents: existingRecord.agents } : {}),
+    };
+    return { host, skills_dir: skillsDir, installed, upgraded, kept };
+  });
+
+  writeManifest(filePath, manifest);
+  return {
+    status: 'synced',
+    scope,
+    skills: selected,
+    manifest_path: filePath,
+    targets: targetResults,
   };
 }
 

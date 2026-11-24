@@ -302,4 +302,15 @@ test('unified search keeps kb results when code index is locked on mixed scope',
   const legacyBusy = await search({ wiki, memory, code: busyCode }, 'calibration', { scope: 'all' });
   assert.equal(legacyBusy.wiki.results.length, 1);
   assert.deepEqual(legacyBusy.code, []);
+
+  const unavailableCode = {
+    search: async () => {
+      const error = new Error('A rebuild of this index is in progress; retry when it finishes.');
+      error.name = 'LockUnavailableError';
+      throw error;
+    },
+  };
+  const mixedUnavailable = await unifiedSearch({ kb, code: unavailableCode }, 'calibration', { mode: 'context' });
+  assert.equal(mixedUnavailable.references.length, 1);
+  assert.deepEqual(mixedUnavailable.code, []);
 });

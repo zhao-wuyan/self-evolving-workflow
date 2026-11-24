@@ -1,9 +1,10 @@
-import { lstatSync } from 'node:fs';
-import { join } from 'node:path';
+import { createHash } from 'node:crypto';
+import { existsSync, lstatSync, readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { buildSessionSignalPrompt } from './agent-memory-prompts.js';
 import { parseReceipt, readSessionTransitions, readSkillExecution } from './closeout.js';
-import { InputError, requireText } from './common.js';
-import { extractMemoryInputs, validateConversationMessages, type ConversationMessage } from './memory.js';
+import { InputError, LEGACY_AGENT_MEMORY_DIR, requireText, resolveEvolveStorage } from './common.js';
+import { defaultMemoryDbPath, extractMemoryInputs, MemoryStore, validateConversationMessages, type ConversationMessage } from './memory.js';
 import type { LlmClient } from './upstream/llm.js';
 import { readCompletionTranscriptRefs, readTranscriptSnapshots } from './transcript-evidence.js';
 import type { Wiki } from './wiki.js';
@@ -122,10 +123,92 @@ function readSkillFiles(value: unknown, run: ReviewedRun): NonNullable<ReviewedR
   return [...files].map(([path, sha256]) => ({ path, sha256 }));
 }
 
+function collectDeterministicNativeSignals(
+  root: string,
+  session: ReturnType<typeof readEvolveSessions>[number],
+): SkillSignal[] {
+  const signals: SkillSignal[] = [];
+  const signalId = (parts: unknown[]) => createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 16);
+  for (const run of session.runs) {
+    const src = `evolve:${session.id}#${run.id}`;
+    if (run.retry_of_run_id) {
+      signals.push({
+        id: signalId(['retry', session.id, run.id]),
+        kind: 'retry',
+        summary: `Run ${run.id} (${run.task.command}) retried ${run.retry_of_run_id}${run.summary ? `: ${run.summary}` : ''}`,
+        sources: [src],
+        runIds: [run.retry_of_run_id, run.id].sort(),
+      });
+    }
+    if (run.status === 'failed' || run.status === 'blocked' || run.status === 'cancelled') {
+      signals.push({
+        id: signalId([run.status, session.id, run.id]),
+        kind: run.status === 'cancelled' ? 'aborted' : 'error',
+        summary: `Run ${run.id} (${run.task.command}) ${run.status}${run.summary ? `: ${run.summary}` : ''}`,
+        sources: [src],
+        runIds: [run.id],
+      });
+    } else if (run.verdict === 'done_with_concerns') {
+      signals.push({
+        id: signalId(['concerns', session.id, run.id]),
+        kind: 'workflow_issue',
+        summary: `Run ${run.id} (${run.task.command}) finished done_with_concerns${run.summary ? `: ${run.summary}` : ''}`,
+        sources: [src],
+        runIds: [run.id],
+      });
+    }
+    const retroPath = resolveEvolveStorage(
+      root,
+      ['runs', session.id, run.id, 'outputs', 'retrospective.json'],
+      join(resolve(root), LEGACY_AGENT_MEMORY_DIR, 'workflow', 'runs', session.id, run.id, 'outputs', 'retrospective.json'),
+    );
+    if (existsSync(retroPath)) {
+      try {
+        const retro = JSON.parse(readFileSync(retroPath, 'utf8')) as {
+          insights?: Array<{ id?: string; lens?: string; summary?: string; route?: string; evidence?: string[] }>;
+        };
+        for (const insight of retro.insights ?? []) {
+          if (!insight.id || !insight.summary || insight.route === 'none' || insight.route === 'skipped') continue;
+          signals.push({
+            id: signalId(['retro', session.id, insight.id]),
+            kind: 'workflow_issue',
+            summary: `[retro:${insight.lens ?? 'lens'}:${insight.route ?? 'route'}] ${insight.summary}`,
+            sources: Array.isArray(insight.evidence) && insight.evidence.length ? insight.evidence : [src],
+            runIds: [run.id],
+          });
+        }
+      } catch {
+        // 忽略损坏的 retrospective 文件。
+      }
+    }
+  }
+  const memDb = defaultMemoryDbPath(root);
+  if (existsSync(memDb)) {
+    const store = new MemoryStore(memDb, { readOnly: true });
+    try {
+      const relevant = new Set(['correction', 'error', 'verified_fix', 'workflow_issue']);
+      const list = store.list({ session: session.id, limit: 100 });
+      for (const item of list.results) {
+        if (!relevant.has(item.type)) continue;
+        signals.push({
+          id: signalId(['memory', session.id, item.id]),
+          kind: signalKind(item.type),
+          summary: item.content,
+          sources: item.sourceMessageIds.length ? item.sourceMessageIds : [`memory:${item.id}`],
+          runIds: [],
+        });
+      }
+    } finally {
+      store.close();
+    }
+  }
+  return signals;
+}
+
 export async function reviewSession(
   root: string,
   session: string,
-  options: { model: () => LlmClient; transcript?: ConversationMessage[] },
+  options: { model?: () => LlmClient; transcript?: ConversationMessage[]; deterministicOnly?: boolean },
 ) {
   session = requireText(session, 'Session ID');
   if (!/^[a-z0-9][a-z0-9_-]*$/i.test(session)) throw new InputError('Invalid Session ID');
@@ -159,7 +242,18 @@ export async function reviewSession(
       messages.push({ ...message, id: `conversation:${session}#${message.id}` });
     }
     validateConversationMessages(messages);
-    return { session, evidence: messages.length, runs, signals: await extractSignals(messages, session, options.model, evidenceRuns) };
+    const deterministic = collectDeterministicNativeSignals(root, native);
+    let llmSignals: SkillSignal[] = [];
+    if (!options.deterministicOnly && options.model) {
+      try {
+        llmSignals = await extractSignals(messages, session, options.model, evidenceRuns);
+      } catch {
+        // 未配置 LLM 或抽取失败时自动降级保留确定性信号，不阻断 Agent 侧审查。
+        if (!deterministic.length) throw new InputError('Session review LLM extraction failed and no deterministic signals were found');
+      }
+    }
+    const merged = [...new Map([...deterministic, ...llmSignals].map(signal => [signal.id, signal])).values()];
+    return { session, evidence: messages.length, runs, signals: merged };
   }
   const directory = join(root, '.workflow', 'sessions', session);
   if (!lstatSync(directory, { throwIfNoEntry: false })?.isDirectory()) {
@@ -256,6 +350,7 @@ export async function reviewSession(
   const messages = [...evidence.values()].sort((left, right) =>
     new Date(left.timestamp).getTime() - new Date(right.timestamp).getTime()
   );
+  if (!options.model) throw new InputError('Session review requires an extraction model for legacy sessions');
   return { session, evidence: messages.length, runs: [...runs.values()],
     signals: await extractSignals(messages, session, options.model, evidenceRuns) };
 }

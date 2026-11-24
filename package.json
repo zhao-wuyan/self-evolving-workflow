@@ -1,6 +1,6 @@
 {
   "name": "self-evolving-workflow",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Self-Evolving Workflow with a local code graph, a Markdown wiki, and agent memory search",
   "repository": {
     "type": "git",
@@ -77,7 +77,7 @@
     "prepack": "npm run build"
   },
   "dependencies": {
-    "@colbymchenry/codegraph": "1.2.0",
+    "@colbymchenry/codegraph": "1.6.4",
     "@node-rs/jieba": "2.0.1",
     "@types/emscripten": "^1.41.6",
     "graphology": "0.26.0",

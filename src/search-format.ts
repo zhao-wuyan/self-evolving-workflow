@@ -320,3 +320,43 @@ export function renderKbGetCompact(value: unknown): string {
     return `[${header}]${loc}${sources}\n${item.content ?? ''}`;
   }).join('\n---\n') + '\n';
 }
+
+export function renderHistoryListCompact(items: Array<Record<string, unknown>>): string {
+  if (!items.length) return '(no sessions)\n';
+  return items.map(item => {
+    const signals = Array.isArray(item.signals) && item.signals.length ? ` | signals=${item.signals.join(',')}` : '';
+    const inc = item.has_new_bytes ? ' | [new]' : '';
+    const title = item.title ? `\n    ${item.title}` : '';
+    return `- ${item.host} | ${item.session} | ${item.updated_at} | msgs=${item.message_count} tools=${item.tool_count} errs=${item.error_count}${signals}${inc}${title}`;
+  }).join('\n') + '\n';
+}
+
+export function renderHistorySearchCompact(payload: {
+  total: number;
+  results: ReadonlyArray<object>;
+}): string {
+  const lines = [`total: ${payload.total}`];
+  if (!payload.results.length) return lines.join('\n') + '\n(no matches)\n';
+  for (const raw of payload.results) {
+    const item = raw as Record<string, unknown>;
+    const sigs = Array.isArray(item.signals) && item.signals.length
+      ? item.signals.join(',')
+      : item.signal_type ? String(item.signal_type) : undefined;
+    const meta = [item.source_kind ?? 'transcript', item.host, item.session, item.anchor, item.role ?? item.signal_type, sigs, item.timestamp].filter(Boolean).join(' | ');
+    lines.push(`- ${meta}\n    ${item.snippet ?? item.summary ?? ''}`);
+  }
+  return lines.join('\n') + '\n';
+}
+
+export function renderHistoryShowCompact(payload: {
+  host: string;
+  session: string;
+  entries: Array<Record<string, unknown>>;
+}): string {
+  const lines = [`${payload.host}:${payload.session} (${payload.entries.length} entries)`];
+  for (const item of payload.entries) {
+    const sigs = Array.isArray(item.signals) && item.signals.length ? ` [${item.signals.join(',')}]` : '';
+    lines.push(`[${item.id}] ${item.role}/${item.kind}${sigs} ${item.timestamp}\n  ${String(item.content ?? '').replace(/\s+/g, ' ').trim()}`);
+  }
+  return lines.join('\n') + '\n';
+}

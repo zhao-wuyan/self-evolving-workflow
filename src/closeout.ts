@@ -26,12 +26,22 @@ type SkillCompletionStatus = 'succeeded' | 'failed' | 'cancelled';
 const terminalStatuses = new Set<unknown>(['succeeded', 'failed', 'cancelled']);
 const maintenanceSkills = new Set(['ew-knowledge', 'workflow-closeout', 'workflow-evolve']);
 
+export interface CandidateRouteState {
+  route: 'wiki' | 'skill-addition' | 'skill-design';
+  status: 'routed' | 'applied' | 'rolled_back';
+  skill_id?: string;
+  design_task_id?: string;
+  design_receipt_id?: string;
+  updated_at: string;
+}
+
 interface Candidate {
   id: string;
   content: string;
   sources: string[];
   matched_entry: string | null;
   related_entries?: Array<{ id: string; relation: 'same_content' | 'overlap' | 'conflict'; sources: string[] }>;
+  route_state?: CandidateRouteState;
 }
 
 async function compareReferences(wiki: Wiki, content: string, model: () => LlmClient): Promise<Candidate['related_entries']> {
@@ -296,6 +306,69 @@ function addCloseoutColumn(db: ReturnType<typeof openDb>, column: 'session_id' |
   }
 }
 
+function ensureCandidateRoutesTable(db: ReturnType<typeof openDb>): void {
+  db.exec(`CREATE TABLE IF NOT EXISTS candidate_routes (
+    closeout_id TEXT NOT NULL,
+    candidate_id TEXT NOT NULL,
+    route TEXT NOT NULL,
+    status TEXT NOT NULL,
+    skill_id TEXT,
+    design_task_id TEXT,
+    design_receipt_id TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (closeout_id, candidate_id)
+  )`);
+}
+
+export function recordCandidateRoute(wiki: Wiki, input: {
+  closeoutId: string;
+  candidateId: string;
+  route: CandidateRouteState['route'];
+  status: CandidateRouteState['status'];
+  skillId?: string;
+  designTaskId?: string;
+  designReceiptId?: string;
+}): CandidateRouteState {
+  const path = ledgerPath(wiki);
+  mkdirSync(dirname(path), { recursive: true });
+  const db = openDb(path);
+  try {
+    ensureCandidateRoutesTable(db);
+    const updatedAt = new Date().toISOString();
+    db.prepare(`
+      INSERT INTO candidate_routes (
+        closeout_id, candidate_id, route, status, skill_id, design_task_id, design_receipt_id, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(closeout_id, candidate_id) DO UPDATE SET
+        route = excluded.route,
+        status = excluded.status,
+        skill_id = COALESCE(excluded.skill_id, candidate_routes.skill_id),
+        design_task_id = COALESCE(excluded.design_task_id, candidate_routes.design_task_id),
+        design_receipt_id = COALESCE(excluded.design_receipt_id, candidate_routes.design_receipt_id),
+        updated_at = excluded.updated_at
+    `).run(
+      input.closeoutId,
+      input.candidateId,
+      input.route,
+      input.status,
+      input.skillId ?? null,
+      input.designTaskId ?? null,
+      input.designReceiptId ?? null,
+      updatedAt,
+    );
+    return {
+      route: input.route,
+      status: input.status,
+      ...(input.skillId ? { skill_id: input.skillId } : {}),
+      ...(input.designTaskId ? { design_task_id: input.designTaskId } : {}),
+      ...(input.designReceiptId ? { design_receipt_id: input.designReceiptId } : {}),
+      updated_at: updatedAt,
+    };
+  } finally {
+    db.close();
+  }
+}
+
 export function readHarvest(wiki: Wiki, project: string, receipt: string) {
   const id = closeoutId(requireText(project, 'source project ID'), requireText(receipt, 'completion receipt ID'));
   const path = ledgerPath(wiki);
@@ -313,9 +386,32 @@ export function readHarvest(wiki: Wiki, project: string, receipt: string) {
       receipt_id?: string | null;
     } | undefined;
     if (!row) throw new NotFoundError('Completion has not been harvested');
+    const candidates = JSON.parse(String(row.candidates)) as Candidate[];
+    const hasRoutes = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE name = 'candidate_routes' AND type = 'table'").get());
+    if (hasRoutes) {
+      const routes = db.prepare('SELECT candidate_id, route, status, skill_id, design_task_id, design_receipt_id, updated_at FROM candidate_routes WHERE closeout_id = ?')
+        .all(id) as Array<{
+          candidate_id: string; route: CandidateRouteState['route']; status: CandidateRouteState['status'];
+          skill_id: string | null; design_task_id: string | null; design_receipt_id: string | null; updated_at: string;
+        }>;
+      const routeMap = new Map(routes.map(item => [item.candidate_id, item]));
+      for (const candidate of candidates) {
+        const state = routeMap.get(candidate.id);
+        if (state) {
+          candidate.route_state = {
+            route: state.route,
+            status: state.status,
+            ...(state.skill_id ? { skill_id: state.skill_id } : {}),
+            ...(state.design_task_id ? { design_task_id: state.design_task_id } : {}),
+            ...(state.design_receipt_id ? { design_receipt_id: state.design_receipt_id } : {}),
+            updated_at: state.updated_at,
+          };
+        }
+      }
+    }
     return {
       id,
-      candidates: JSON.parse(String(row.candidates)) as Candidate[],
+      candidates,
       ...(row.session_id ? { session_id: row.session_id } : {}),
       ...(row.receipt_id ? { receipt_id: row.receipt_id } : {}),
     };

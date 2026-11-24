@@ -2,10 +2,12 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { recordCandidateRoute } from './closeout.js';
 import { InputError, LEGACY_AGENT_MEMORY_DIR, requireText, resolveEvolveStorage } from './common.js';
 import type { SkillRouteDecision } from './skill-route.js';
 import { draftSkillAddition } from './skill-addition.js';
 import { changeSkillVersion, replaySkillAddition, replaySkillPackage } from './skill-replay.js';
+import { Wiki } from './wiki.js';
 import { projectSkillRoots } from './workflow-skills.js';
 
 export const SKILL_DESIGN_TASK_VERSION = 'skill-design-task/1.0';
@@ -76,9 +78,17 @@ function stringList(value: unknown, field: string): string[] {
 }
 
 export function resolveSkillEntry(root: string, skillId: string): string {
-  for (const skillRoot of projectSkillRoots) {
-    const entry = `${skillRoot}/${skillId}/SKILL.md`;
-    if (existsSync(resolve(root, entry))) return entry;
+  const candidates = [skillId];
+  if (!skillId.startsWith('ew-')) candidates.push(`ew-${skillId}`);
+  for (const candidate of candidates) {
+    for (const skillRoot of projectSkillRoots) {
+      for (const entry of [
+        `${skillRoot}/${candidate}/SKILL.md`,
+        `${skillRoot}/ew-orchestrate/steps/${candidate}/SKILL.md`,
+      ]) {
+        if (existsSync(resolve(root, entry))) return entry;
+      }
+    }
   }
   const existingRoot = projectSkillRoots.find(skillRoot => existsSync(resolve(root, skillRoot)));
   return `${existingRoot ?? 'skills'}/${skillId}/SKILL.md`;
@@ -206,9 +216,14 @@ export function reviewSkillDesign(root: string, designId: string) {
   const draft = receipt.design.draft;
   if (draft.mode === 'package') {
     const skillId = requireText(draft.skill_id, 'Skill package ID');
-    const packagePath = task.target.entry ? dirname(task.target.entry).replaceAll('\\', '/') : `skills/${skillId}`;
+    const packagePath = task.target.entry
+      ? dirname(task.target.entry).replaceAll('\\', '/')
+      : dirname(resolveSkillEntry(root, skillId)).replaceAll('\\', '/');
     const entry = `${packagePath}/SKILL.md`;
-    if (task.target.skill_id !== skillId || task.target.entry !== entry || draft.package_path !== packagePath || draft.entry !== entry) {
+    if ((task.target.skill_id && task.target.skill_id !== skillId) ||
+        (task.target.entry && task.target.entry !== entry) ||
+        draft.package_path !== packagePath ||
+        draft.entry !== entry) {
       throw new InputError('Skill package target does not match its task');
     }
     if (!Array.isArray(draft.changes) || !draft.changes.length) throw new InputError('Skill package design has no files');
@@ -283,5 +298,18 @@ export function applySkillDesign(root: string, designId: string, rollback = fals
   const result = changeSkillVersion(root, receipt.replay_receipt_id, rollback);
   receipt.status = rollback ? 'rolled_back' : 'applied';
   saveReceipt(root, receipt);
+  const task = readTask(root, receipt.task_id);
+  const resolvedSkillId = typeof receipt.design.draft.skill_id === 'string'
+    ? receipt.design.draft.skill_id
+    : task.target.skill_id;
+  recordCandidateRoute(new Wiki(root), {
+    closeoutId: task.source.closeout_id,
+    candidateId: task.source.candidate_id,
+    route: 'skill-design',
+    status: rollback ? 'rolled_back' : 'applied',
+    ...(resolvedSkillId ? { skillId: resolvedSkillId } : {}),
+    designTaskId: task.id,
+    designReceiptId: receipt.id,
+  });
   return { ...result, design_id: designId, replay_receipt_id: receipt.replay_receipt_id };
 }
