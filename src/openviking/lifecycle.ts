@@ -13,7 +13,7 @@ import { bindWorkflowSkill, findProjectSkillAsset, isProjectSkillPath, projectSk
 import { Wiki, readWikiPages } from '../wiki.js';
 import { readPolicy, readProject, privateProjectUri, projectFile, replaceJson } from './config.js';
 import { ensureDirectory, isMissing, OpenVikingClient, OpenVikingError } from './client.js';
-import { downloadAsset, loadRelease, manifestBytes, publishRelease, readProjectHead, releaseIsAncestor, sha256, stableJson } from './assets.js';
+import { downloadAsset, loadRelease, manifestBytes, publishRelease, readProjectHead, releaseIsAncestor, sha256, stableJson, type ProgressReporter } from './assets.js';
 import { acknowledgeKnowledge, cacheRelease, exportMemory, exportWiki, fileRecord, sourceWikiHashes, type WikiPublicationChanges, type MemorySelection } from './knowledge.js';
 import { applyAssetCommit, assertCleanIndex, assertManagedClean, createAssetCommit, gitBytes, gitText, skillAssets } from './git.js';
 import { freezeKnowledge, frozenKnowledgeHash } from './frozen.js';
@@ -57,7 +57,7 @@ function recoverableInstalledSkills(root: string) {
   })).sort();
 }
 
-export async function initializeProject(root: string, policyPath?: string, projectId?: string, agentsHost?: InstallHost, skillsHost?: InstallHost) {
+export async function initializeProject(root: string, policyPath?: string, projectId?: string, agentsHost?: InstallHost, skillsHost?: InstallHost, onProgress?: ProgressReporter) {
   const client = new OpenVikingClient();
   const existing = readProject(root);
   if (existing) {
@@ -70,8 +70,9 @@ export async function initializeProject(root: string, policyPath?: string, proje
       return locked(folder, async () => {
         const manifest: ProjectManifest = JSON.parse(readFileSync(join(folder, 'manifest.json'), 'utf8'));
         const bytes = new Map(manifest.files.map(file => [file.path, readFileSync(join(folder, 'assets', file.path))]));
+        onProgress?.({ phase: 'prepare', label: '恢复未完成的远端发布' });
         await ensureDirectory(client, existing.root_uri);
-        const head = await publishRelease(client, existing, manifest, bytes, null);
+        const head = await publishRelease(client, existing, manifest, bytes, null, onProgress);
         const consumed = JSON.parse(readFileSync(join(folder, 'knowledge.json'), 'utf8'));
         acknowledgeKnowledge(root, consumed.wiki, consumed.memory);
         saveJob(join(folder, 'published.json'), head);
@@ -96,6 +97,7 @@ export async function initializeProject(root: string, policyPath?: string, proje
   }
   const repositories = [...new Set(readWikiPages(root, true).flatMap(page => page.entry?.repositories ?? []))];
   if (!projectId && repositories.length > 1) throw new InputError('OPENVIKING_PROJECT_ID_REQUIRED');
+  onProgress?.({ phase: 'prepare', label: '检查 OpenViking 服务连接' });
   const health = await client.health();
   const id = projectId ?? repositories[0] ?? randomUUID();
   const project: OpenVikingProject = { schema_version: 'evolve-openviking-project/1.0', project_id: id,
@@ -106,6 +108,7 @@ export async function initializeProject(root: string, policyPath?: string, proje
     const wiki = exportWiki(root);
     const memory = exportMemory(root);
     if (JSON.stringify(recoverableInstalledSkills(root)) !== JSON.stringify(recovered)) throw new InputError('OPENVIKING_LOCAL_CHANGED');
+    onProgress?.({ phase: 'prepare', label: '安装项目 Skills 与 Agent 定义' });
     const installed = installSkills(root, [], skillsHost, { agentsHost });
     const skillsRoot = relative(root, installed.skills_dir).split('\\').join('/');
     const added: AssetFile[] = [];
@@ -127,6 +130,7 @@ export async function initializeProject(root: string, policyPath?: string, proje
       const emptyPolicy = Buffer.from(JSON.stringify({ schema_version: 'evolve-openviking-policy/1.0', targets: [] }, null, 2) + '\n');
       added.push(fileRecord(defaultEvolutionPolicyPath, emptyPolicy)); bodies.set(defaultEvolutionPolicyPath, emptyPolicy);
     }
+    onProgress?.({ phase: 'git', label: `建立本地 Git 资产基线（${added.length} 个文件）` });
     const commit = createAssetCommit(root, base, added, bodies, [], 'chore: 建立 OpenViking 项目资产基线');
     // 新安装包属于本次操作；仅移除逐字节未变的临时副本，让 Git 安全地创建跟踪文件。
     for (const file of added.filter(file => isProjectSkillPath(file.path))) {
@@ -152,7 +156,7 @@ export async function initializeProject(root: string, policyPath?: string, proje
     saveJob(join(folder, 'knowledge.json'), { wiki: wiki.consumed, memory: memory.consumed, local_only_wiki: wiki.localOnly });
     saveJob(join(folder, 'manifest.json'), manifest);
     await ensureDirectory(client, project.root_uri);
-    const head = await publishRelease(client, project, manifest, skills.bytes, null);
+    const head = await publishRelease(client, project, manifest, skills.bytes, null, onProgress);
     acknowledgeKnowledge(root, wiki.consumed, memory.consumed);
     saveJob(join(folder, 'published.json'), head);
     saveJob(join(root, '.agent-memory', 'openviking', 'materialized.json'), { release_id: head.release_id, files: skills.files });

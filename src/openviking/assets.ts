@@ -139,8 +139,16 @@ export async function downloadAsset(client: OpenVikingClient, project: OpenVikin
 async function existingBytes(client: OpenVikingClient, uri: string) {
   try { return await client.download(uri); } catch (error) { if (!isMissing(error)) throw error; }
 }
+export interface PublishProgress {
+  phase: 'prepare' | 'git' | 'check' | 'upload' | 'verify' | 'finalize';
+  label: string;
+  current?: number;
+  total?: number;
+}
+export type ProgressReporter = (progress: PublishProgress) => void;
+
 export async function publishRelease(client: OpenVikingClient, project: OpenVikingProject, manifest: ProjectManifest,
-  bytes: ReadonlyMap<string, Buffer>, expectedHead: Buffer | null): Promise<ProjectHead> {
+  bytes: ReadonlyMap<string, Buffer>, expectedHead: Buffer | null, onProgress?: ProgressReporter): Promise<ProjectHead> {
   validateManifest(manifest, project);
   await client.identity(project);
   await client.assertCapabilities();
@@ -160,10 +168,12 @@ export async function publishRelease(client: OpenVikingClient, project: OpenViki
   await ensureDirectory(client, `${root}/releases/${release}`);
   let operations: WriteOperation[] = [];
   let size = 0;
+  let uploaded = 0;
   const flush = async () => {
     if (!operations.length) return;
     const batch = operations;
     operations = []; size = 0;
+    onProgress?.({ phase: 'upload', label: '上传项目资产', current: uploaded, total: uploaded + batch.length });
     try { await client.batchWrite(root, batch, true); }
     catch (error) {
       if (!(error instanceof OpenVikingError) || error.status !== 409 && error.code !== 'OPENVIKING_RESULT_UNKNOWN') throw error;
@@ -173,9 +183,15 @@ export async function publishRelease(client: OpenVikingClient, project: OpenViki
         if (!existing.equals(Buffer.from(operation.content_base64, 'base64'))) throw new InputError('OPENVIKING_IMMUTABLE_CONFLICT');
       }
     }
+    uploaded += batch.length;
+    onProgress?.({ phase: 'upload', label: '上传项目资产', current: uploaded, total: uploaded });
   };
+  let checked = 0;
+  onProgress?.({ phase: 'check', label: '检查远端已有资产', current: 0, total: unique.size });
   for (const [uri, body] of unique) {
     const existing = await existingBytes(client, uri);
+    checked++;
+    onProgress?.({ phase: 'check', label: '检查远端已有资产', current: checked, total: unique.size });
     if (existing) { if (!existing.equals(body)) throw new InputError('OPENVIKING_IMMUTABLE_CONFLICT'); continue; }
     if (size + body.length > 4 * 1024 * 1024) await flush();
     operations.push({ uri, mode: 'replace', if_absent: true, content_base64: body.toString('base64') }); size += body.length;
@@ -194,8 +210,13 @@ export async function publishRelease(client: OpenVikingClient, project: OpenViki
       if (!existing.equals(raw)) throw new InputError('OPENVIKING_IMMUTABLE_CONFLICT');
     }
   }
-  for (const [downloadUri, body] of [...unique, [uri, raw] as const]) {
+  const verifyItems: Array<readonly [string, Buffer]> = [...unique, [uri, raw] as const];
+  let verified = 0;
+  onProgress?.({ phase: 'verify', label: '校验远端资产', current: 0, total: verifyItems.length });
+  for (const [downloadUri, body] of verifyItems) {
     if (!(await client.download(downloadUri)).equals(body)) throw new InputError('OPENVIKING_ASSET_HASH_MISMATCH');
+    verified++;
+    onProgress?.({ phase: 'verify', label: '校验远端资产', current: verified, total: verifyItems.length });
   }
   if (manifest.memory.length) await ensureDirectory(client, `${root}/releases/${release}/memory`);
   for (const memory of manifest.memory) {
@@ -207,6 +228,7 @@ export async function publishRelease(client: OpenVikingClient, project: OpenViki
       ...(existing ? { expected_sha256: sha256(existing) } : { if_absent: true as const }) }], false);
     if (!(await client.download(uri)).equals(body)) throw new InputError('OPENVIKING_ASSET_HASH_MISMATCH');
   }
+  onProgress?.({ phase: 'finalize', label: '写入远端版本指针' });
   const head: ProjectHead = { schema_version: 'evolve-project-head/1.0', project_id: project.project_id, release_id: release, manifest_sha256: release };
   const pointer = Buffer.from(stableJson(head));
   try {

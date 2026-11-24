@@ -458,6 +458,12 @@ test('OMP OpenViking initialization failures explain recovery without altering u
 test('OMP OpenViking initialization changes Git and publishes only after confirmation', async t => {
   const server = await protocol(t);
   const f = projectFixture(t, server, { profile: false, minimalSkills: true });
+  const previousExperienceConfig = process.env.EVOLVE_EXPERIENCE_CONFIG;
+  process.env.EVOLVE_EXPERIENCE_CONFIG = join(f.root, '.agent-memory', 'experience-test.json');
+  t.after(() => {
+    if (previousExperienceConfig === undefined) delete process.env.EVOLVE_EXPERIENCE_CONFIG;
+    else process.env.EVOLVE_EXPERIENCE_CONFIG = previousExperienceConfig;
+  });
   f.git('rm', '-r', 'agents'); f.git('commit', '-qm', '测试: 不预置根目录 Agent');
   f.write('.workflow/knowhow/migration.md', '---\ntitle: Legacy deployment notes\n---\n\nKeep this deployment note local.\n');
   f.evolve('kb', 'import', '--project', 'legacy-project', '--apply');
@@ -466,17 +472,27 @@ test('OMP OpenViking initialization changes Git and publishes only after confirm
   const { handler } = h.commands['evolve-openviking'];
   const before = f.git('rev-parse', 'HEAD');
   let approve = false;
+  let approveExperience = false;
   let output;
+  const statusUpdates = [];
+  const widgetUpdates = [];
   const ctx = Object.assign(h.ctx, { hasUI: true, ui: {
     notify(message, level) { assert.equal(level, 'info', message); output = message; },
-    async confirm(_title, message) {
+    setStatus(key, text) { statusUpdates.push([key, text]); },
+    setWidget(key, lines) { widgetUpdates.push([key, lines]); },
+    setWorkingMessage() {},
+    async confirm(title, message) {
+      if (title.includes('个人经验')) return approveExperience;
       assert.match(message, /\.evolve\/evolution\.json.*只同步资产/);
       return approve;
     },
   } });
+  await handler('help', ctx);
+  assert.match(output, /\.evolve\/evolution\.json/);
+  await handler('status', ctx);
+  assert.match(output, /OpenViking 状态/);
+  assert.match(output, /未初始化/);
   await handler('', ctx);
-  assert.match(output, /\.evolve\/evolution\.json，缺失则创建空策略/);
-  await handler('init', ctx);
   assert.match(output, /已取消/);
   assert.equal(f.git('rev-parse', 'HEAD'), before);
   assert.equal(existsSync(join(f.root, '.evolve/openviking.json')), false);
@@ -485,12 +501,22 @@ test('OMP OpenViking initialization changes Git and publishes only after confirm
   assert.equal(existsSync(join(f.root, '.omp/agent/agents')), false);
   assert.equal(existsSync(join(f.root, '.omp/skills')), false);
 
-  // 模拟上次初始化安装后留下的原版包，本次确认后应直接接管。
+  // 模拟上次初始化安装后留下的原版包，本次确认后应直接接管（省略 init 子命令直接运行）。
   f.evolve('skill', 'install', 'ew-knowledge', '--host', 'omp', '--yes');
   approve = true;
-  await handler('init', ctx);
+  approveExperience = true;
+  await handler('', ctx);
   assert.match(output, /项目初始化完成/);
+  assert.match(output, /个人经验：已开启/);
   assert.match(output, /1 条 Wiki 未匹配审批记录，已保留在本地，未上传/);
+  assert.ok(statusUpdates.some(([, text]) => typeof text === 'string' && text.includes('校验远端资产')));
+  assert.equal(statusUpdates.at(-1)[1], undefined);
+  assert.ok(widgetUpdates.some(([, lines]) => Array.isArray(lines) && lines.some(line => line.includes('%'))));
+  assert.equal(widgetUpdates.at(-1)[1], undefined);
+  const initOutput = output;
+  await handler('status', ctx);
+  assert.match(output, /已连通/);
+  assert.match(output, /当前仓库已开启采集/);
   assert.notEqual(f.git('rev-parse', 'HEAD'), before);
   const project = JSON.parse(f.git('show', 'HEAD:.evolve/openviking.json'));
   assert.equal(project.evolution_policy, '.evolve/evolution.json');
@@ -505,7 +531,7 @@ test('OMP OpenViking initialization changes Git and publishes only after confirm
   assert.equal(binding.package_path, '.omp/skills/ew-orchestrate/steps/ew-companion');
   assert.equal(f.git('ls-tree', '-r', '--name-only', 'HEAD', '--', '.omp/agent/agents'), '');
   const { head } = await readProjectHead(f.client, project);
-  assert.ok(output.includes(head.release_id));
+  assert.ok(initOutput.includes(head.release_id));
   const release = await loadRelease(f.client, project, head.release_id);
   assert.ok(release.files.some(file => file.path === '.omp/skills/ew-orchestrate/SKILL.md'));
   assert.equal(release.files.some(file => file.path.startsWith('.omp/agent/agents/')), false);

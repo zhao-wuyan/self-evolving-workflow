@@ -32,8 +32,8 @@ omp plugin install 'https://github.com/zhao-wuyan/self-evolving-workflow/release
 | `/evolve-status` | 查看当前项目的 Session、最近 Run 和 Skill 安装状态。 |
 | `/evolve-ignore check` / `/evolve-ignore apply` | 检查或补齐仓库根 `.gitignore` 的 Evolve 运行产物规则。 |
 | `/evolve-migrate [旧项目目录]` | 预览并确认导入 Maestro Flow 的旧知识。 |
-| `/evolve-experience enable` | 为当前仓库开启个人经验采集；发布前需审阅确认。 |
-| `/evolve-openviking init` | 启用项目资产同步；首次自动准备 `.evolve/evolution.json`。 |
+| `/evolve-experience` | 单独管理个人经验库（`enable` / `pending` / `review` / `publish` / `search`）。 |
+| `/evolve-openviking` / `/evolve-openviking status` | 一站式初始化 OpenViking 项目资产同步（首次自动准备 `.evolve/evolution.json` 并可顺手开启个人经验采集），或查看当前同步状态。 |
 
 输入命令名后加空格，可查看支持的子命令。后两项需要先[配置 OpenViking](docs/openviking-integration-plan.md#可拔插后端与故障策略)。
 

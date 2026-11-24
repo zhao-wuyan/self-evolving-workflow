@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { InputError } from '../common.js';
@@ -46,13 +46,29 @@ export function createAssetCommit(root: string, base: string, files: AssetFile[]
   const env = { ...process.env, GIT_INDEX_FILE: join(temporary, 'index') };
   try {
     gitBytes(root, ['read-tree', base], undefined, env);
-    for (const path of removed) gitBytes(root, ['update-index', '--force-remove', '--', workflowPath(path)], undefined, env);
-    for (const file of files) {
-      workflowPath(file.path);
-      const body = bytes.get(file.path);
-      if (!body || body.length !== file.size || sha256(body) !== file.sha256) throw new InputError('OPENVIKING_ASSET_HASH_MISMATCH');
-      const hash = gitText(root, ['hash-object', '-w', '--stdin'], body);
-      gitBytes(root, ['update-index', '--add', '--cacheinfo', `${file.mode},${hash},${file.path}`], undefined, env);
+    if (removed.length) {
+      const removedInput = Buffer.from(removed.map(path => workflowPath(path)).join('\0') + '\0');
+      gitBytes(root, ['update-index', '--force-remove', '-z', '--stdin'], removedInput, env);
+    }
+    if (files.length) {
+      const staged = join(temporary, 'blobs');
+      mkdirSync(staged);
+      const names: string[] = [];
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        workflowPath(file.path);
+        const body = bytes.get(file.path);
+        if (!body || body.length !== file.size || sha256(body) !== file.sha256) throw new InputError('OPENVIKING_ASSET_HASH_MISMATCH');
+        const name = String(i);
+        writeFileSync(join(staged, name), body);
+        names.push(name);
+      }
+      const gitDir = gitText(root, ['rev-parse', '--absolute-git-dir']);
+      const hashes = gitText(staged, ['hash-object', '-w', '--no-filters', '--stdin-paths'], names.join('\n') + '\n', { ...env, GIT_DIR: gitDir })
+        .split(/\r?\n/).filter(Boolean);
+      if (hashes.length !== files.length) throw new InputError('OPENVIKING_ASSET_HASH_MISMATCH');
+      const indexInfo = files.map((file, i) => `${file.mode} ${hashes[i]}\t${file.path}`).join('\0') + '\0';
+      gitBytes(root, ['update-index', '-z', '--index-info'], Buffer.from(indexInfo), env);
     }
     const tree = gitText(root, ['write-tree'], undefined, env);
     if (tree === gitText(root, ['rev-parse', base + '^{tree}'])) return base;

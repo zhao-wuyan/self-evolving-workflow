@@ -36,8 +36,11 @@ export interface OmpContext {
 export interface OmpCommandContext extends OmpContext {
   hasUI: boolean;
   ui: {
-    notify(message: string, level: 'info' | 'error'): void;
+    notify(message: string, level: 'info' | 'warning' | 'error'): void;
     confirm(title: string, message: string): Promise<boolean>;
+    setStatus?(key: string, text: string | undefined): void;
+    setWidget?(key: string, content: string[] | undefined, options?: { placement?: 'aboveEditor' | 'belowEditor' }): void;
+    setWorkingMessage?(message?: string): void;
   };
 }
 
