@@ -129,12 +129,14 @@ function loadDraft(root: string, data: unknown) {
 
 function packagePathForSkill(root: string, skillId: string, requested?: unknown): string {
   if (!/^[a-z0-9][a-z0-9-]*$/i.test(skillId)) throw new InputError('Invalid Skill ID for package design');
-  if (typeof requested === 'string' && projectSkillRoots.some(skillRoot => requested === `${skillRoot}/${skillId}`)) {
+  if (typeof requested === 'string' && projectSkillRoots.some(skillRoot =>
+    requested === `${skillRoot}/${skillId}` || requested === `${skillRoot}/ew-orchestrate/steps/${skillId}`)) {
     return requested;
   }
   for (const skillRoot of projectSkillRoots) {
-    const candidate = `${skillRoot}/${skillId}`;
-    if (existsSync(resolve(root, candidate, 'SKILL.md'))) return candidate;
+    for (const candidate of [`${skillRoot}/${skillId}`, `${skillRoot}/ew-orchestrate/steps/${skillId}`]) {
+      if (existsSync(resolve(root, candidate, 'SKILL.md'))) return candidate;
+    }
   }
   const existingRoot = projectSkillRoots.find(skillRoot => existsSync(resolve(root, skillRoot)));
   return `${existingRoot ?? 'skills'}/${skillId}`;
@@ -263,8 +265,17 @@ function runOnce(
     const item = record(value);
     const path = repoPath(worktree, requireText(item.path, 'loaded file'));
     if (!path.startsWith(`${packagePath}/`)) throw new InputError(`Replay loaded a file outside the selected Skill: ${path}`);
-    const expected = sha256(git(worktree, ['show', `${commit}:${path}`]));
-    if (expected !== item.sha256) throw new InputError(`Replay loaded different Skill bytes: ${path}`);
+    const blobBytes = git(worktree, ['show', `${commit}:${path}`]);
+    const expected = sha256(blobBytes);
+    if (expected !== item.sha256) {
+      // 兼容 Windows core.autocrlf=true 检出工作树产生的 CRLF 与 Git LF blob 的字节差异。
+      const worktreeFile = join(worktree, path);
+      const diskBytes = existsSync(worktreeFile) ? readFileSync(worktreeFile) : undefined;
+      const normalize = (buf: Buffer) => buf.toString('utf8').replace(/\r\n/g, '\n');
+      if (!diskBytes || sha256(diskBytes) !== item.sha256 || normalize(diskBytes) !== normalize(blobBytes)) {
+        throw new InputError(`Replay loaded different Skill bytes: ${path}`);
+      }
+    }
     return { path, sha256: expected };
   });
   if (requireEntry && !loaded.some(item => item.path === entry)) {

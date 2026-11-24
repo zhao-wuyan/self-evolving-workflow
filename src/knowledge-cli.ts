@@ -11,9 +11,13 @@ import {
   parseMemoryHosts,
 } from './memory-config.js';
 import {
-  handleMemoryHook, handleSessionStartHook, memoryHookTarget, readHostConversationMessages,
-  readMemoryConversation, syncMemoryHost,
+  handleMemoryHook, handleSessionStartHook, listAgentHistory, memoryHookTarget,
+  readHostConversationMessages, readMemoryConversation, searchAgentHistory, showAgentHistory,
+  syncMemoryHost, type HistoryEntryRole,
 } from './memory-history.js';
+import {
+  collectHistorySignals, queryCollectedSignals, readHistoryCursorMap, type SignalSourceKind,
+} from './history-signals.js';
 import { acknowledgeReminders, readReminders } from './memory-reminders.js';
 import {
   drainMemoryHookJobs, enqueueMemoryHook, hasPendingMemoryHookJobs, readMemoryHookInput,
@@ -26,7 +30,7 @@ import { KnowledgeStore, type KnowledgeFilters, type KnowledgeInput, type Knowle
 import { initWiki, Wiki } from './wiki.js';
 import {
   harvestCompletion, harvestConversation, publishReference, readCloseoutCandidate, readCompletionReceipts,
-  readHarvest, readSkillCompletions, recordSkillCompletion,
+  readHarvest, readSkillCompletions, recordCandidateRoute, recordSkillCompletion,
 } from './closeout.js';
 import { reviewSession, reviewSkillExecution } from './retrospective.js';
 import { draftSkillAddition, draftSkillRetirement } from './skill-addition.js';
@@ -41,6 +45,9 @@ import {
   projectCodeGraphItem,
   projectKnowledgeHit,
   renderCodeSearchCompact,
+  renderHistoryListCompact,
+  renderHistorySearchCompact,
+  renderHistoryShowCompact,
   renderKbGetCompact,
   renderKbSearchCompact,
   renderUnifiedContextCompact,
@@ -96,6 +103,10 @@ export function knowledgeHelp(invocation: 'evolve' = 'evolve') {
   code build|sync                          Build or update the project code graph
   code search <query>                      Find code symbols
   code graph <id> [to-id]                   Follow callers/callees or trace a path (--direction, --depth)
+  history collect                          Incrementally collect signals from transcripts, memory, wiki, or LLM
+  history list                             List Codex, Claude Code and Agy sessions in this project
+  history search [<query>]                 Search collected signals and host transcripts (--signals-only, --role)
+  history show <session-id>                Inspect full messages and tool calls around an --anchor
   session review <id>                      Review Session execution signals
   skill review|draft|replay|apply|rollback   Review and evolve a Skill from evidence
                                            draft --supersedes <learning-id> replaces an existing learning
@@ -232,6 +243,17 @@ export const knowledgeOptions = {
   schema: { type: 'string' },
   force: { type: 'boolean' },
   propose: { type: 'boolean' },
+  since: { type: 'string' },
+  'signals-only': { type: 'boolean' },
+  regex: { type: 'boolean' },
+  role: { type: 'string' },
+  source: { type: 'string' },
+  llm: { type: 'boolean' },
+  'all-projects': { type: 'boolean' },
+  anchor: { type: 'string' },
+  context: { type: 'string' },
+  'include-tools': { type: 'boolean' },
+  'no-llm': { type: 'boolean' },
 } as const;
 
 
@@ -522,7 +544,7 @@ async function executeGetTargets(
 export async function runKnowledgeCli(argv: string[], invocation: 'evolve' = 'evolve') {
   const { values, positionals } = parseArgs({ args: argv, options: knowledgeOptions, allowPositionals: true });
   const [command, action, ...args] = positionals;
-  if (command && !['kb', 'search', 'code', 'session', 'skill'].includes(command)) {
+  if (command && !['kb', 'search', 'code', 'history', 'session', 'skill'].includes(command)) {
     throw new InputError('Unknown command: ' + command);
   }
   if (values.help || !command) {
@@ -1057,11 +1079,27 @@ export async function runKnowledgeCli(argv: string[], invocation: 'evolve' = 'ev
           explicitSkillIntent: values['skill-intent'],
           ...(skillEntry && existsSync(skillEntry) ? { learnings: learningBloat(readSkillLearnings(skillEntry)) } : {}),
         });
-        if (decision.route !== 'skill-design') return print(decision);
-        if (!values.skill) throw new InputError('Skill-design route requires --skill <skill-id> for the replay/apply chain');
+        if (decision.route !== 'skill-design') {
+          recordCandidateRoute(wiki, {
+            closeoutId,
+            candidateId,
+            route: decision.route,
+            status: 'routed',
+            ...(values.skill ? { skillId: values.skill } : {}),
+          });
+          return print(decision);
+        }
         const task = createSkillDesignTask(root, {
           closeoutId, candidateId, content: candidate.content, sources: candidate.sources,
           decision, skillId: values.skill, skillVersion: values['skill-version'],
+        });
+        recordCandidateRoute(wiki, {
+          closeoutId,
+          candidateId,
+          route: 'skill-design',
+          status: 'routed',
+          ...(values.skill ? { skillId: values.skill } : {}),
+          designTaskId: task.id,
         });
         return print({ ...decision, design_task: task });
       }
@@ -1149,10 +1187,207 @@ export async function runKnowledgeCli(argv: string[], invocation: 'evolve' = 'ev
       }
     }
 
+    if (command === 'history') {
+      const hosts = values.host === undefined ? undefined : parseMemoryHosts(values.host);
+      if (action === 'collect') {
+        const requestedSources = values.source
+          ? values.source.split(',').map(item => item.trim()).filter(Boolean)
+          : ['transcript', 'memory', 'wiki'];
+        if (values.llm && !requestedSources.includes('llm')) requestedSources.push('llm');
+        const validSources = new Set<SignalSourceKind>(['transcript', 'memory', 'wiki', 'llm']);
+        if (!requestedSources.length || requestedSources.some(item => !validSources.has(item as SignalSourceKind))) {
+          throw new InputError('source must be transcript, memory, wiki, or llm');
+        }
+        const stats = await collectHistorySignals({
+          root,
+          hosts,
+          session: values.session,
+          sources: requestedSources as SignalSourceKind[],
+          allProjects: Boolean(values['all-projects']),
+          ...(requestedSources.includes('llm') ? { llm: modelClient } : {}),
+        });
+        if (stats.failures.length > 0) process.exitCode = 1;
+        return print(stats);
+      }
+      if (action === 'list') {
+        const summaries = await listAgentHistory({
+          root,
+          hosts,
+          session: values.session,
+          since: values.since,
+          signalsOnly: Boolean(values['signals-only']),
+          allProjects: Boolean(values['all-projects']),
+          limit,
+        });
+        const cursors = readHistoryCursorMap(root);
+        const enriched = summaries.map(item => {
+          const cursor = cursors.get(`${item.host}:${item.session}`);
+          return {
+            ...item,
+            collected_offset: cursor?.byte_offset ?? 0,
+            collected_signals: cursor?.signal_count ?? 0,
+            has_new_bytes: !cursor || cursor.path !== item.path || cursor.file_size > cursor.byte_offset,
+          };
+        });
+        if (format === 'compact') {
+          process.stdout.write(renderHistoryListCompact(enriched as Array<Record<string, unknown>>));
+          return;
+        }
+        return print(enriched);
+      }
+      if (action === 'search') {
+        const query = args.join(' ').trim() || undefined;
+        const roles = values.role
+          ? values.role.split(',').map(item => item.trim()).filter(Boolean) as HistoryEntryRole[]
+          : undefined;
+        if (roles?.some(role => !['user', 'assistant', 'tool', 'error'].includes(role))) {
+          throw new InputError('role must be user, assistant, tool, or error');
+        }
+        const sourceSpec = (values.source ?? 'all').split(',').map(item => item.trim()).filter(Boolean);
+        const validSearchSources = new Set(['all', 'signals', 'transcript', 'memory', 'wiki', 'llm']);
+        if (!sourceSpec.length || sourceSpec.some(item => !validSearchSources.has(item))) {
+          throw new InputError('source must be all, signals, transcript, memory, wiki, or llm');
+        }
+        const searchLimitValue = limit ?? 20;
+        const searchPage = page ?? 1;
+        const specificSignalKinds = sourceSpec.filter((item): item is SignalSourceKind =>
+          ['memory', 'wiki', 'llm'].includes(item));
+        const onlyCollectedSignals = sourceSpec.includes('signals') ||
+          (specificSignalKinds.length > 0 && !sourceSpec.includes('all') && !sourceSpec.includes('transcript'));
+        if (onlyCollectedSignals) {
+          const sourceKinds: SignalSourceKind[] | undefined = sourceSpec.includes('signals')
+            ? (specificSignalKinds.length ? specificSignalKinds : undefined)
+            : specificSignalKinds;
+          const result = queryCollectedSignals(root, {
+            query,
+            regex: Boolean(values.regex),
+            hosts: hosts as string[] | undefined,
+            session: values.session,
+            sourceKinds,
+            roles,
+            skill: values.skill,
+            since: values.since,
+            limit: searchLimitValue,
+            page: searchPage,
+          });
+          if (format === 'compact') {
+            process.stdout.write(renderHistorySearchCompact(result));
+            return;
+          }
+          return print(result);
+        }
+        if (sourceSpec.includes('transcript') && !sourceSpec.includes('all')) {
+          const result = await searchAgentHistory({
+            root,
+            query,
+            regex: Boolean(values.regex),
+            hosts,
+            session: values.session,
+            roles,
+            skill: values.skill,
+            signalsOnly: Boolean(values['signals-only']),
+            since: values.since,
+            allProjects: Boolean(values['all-projects']),
+            includeTools: values['include-tools'] ?? true,
+            limit: searchLimitValue,
+            page: searchPage,
+          });
+          if (format === 'compact') {
+            process.stdout.write(renderHistorySearchCompact(result));
+            return;
+          }
+          return print(result);
+        }
+        // source === 'all': 合并已收集信号（transcript/memory/wiki/llm）与实时日志扫描并按事件维度去重。
+        const collected = queryCollectedSignals(root, {
+          query,
+          regex: Boolean(values.regex),
+          hosts: hosts as string[] | undefined,
+          session: values.session,
+          roles,
+          skill: values.skill,
+          since: values.since,
+          limit: 100,
+          page: 1,
+        });
+        const live = (query || values['signals-only'] || values.skill || values.session || roles?.length)
+          ? await searchAgentHistory({
+              root,
+              query,
+              regex: Boolean(values.regex),
+              hosts,
+              session: values.session,
+              roles,
+              skill: values.skill,
+              signalsOnly: Boolean(values['signals-only']),
+              since: values.since,
+              allProjects: Boolean(values['all-projects']),
+              includeTools: values['include-tools'] ?? true,
+              limit: 100,
+              page: 1,
+            })
+          : { total: 0, results: [] };
+        const mergedMap = new Map<string, Record<string, unknown>>();
+        const transcriptSignalAnchors = new Set<string>();
+        for (const sig of collected.results) {
+          if (sig.source_kind === 'transcript') transcriptSignalAnchors.add(sig.anchor);
+          mergedMap.set(`${sig.anchor}::${sig.source_kind}::${sig.signal_type}`, { ...sig });
+        }
+        for (const hit of live.results) {
+          if (!transcriptSignalAnchors.has(hit.anchor)) {
+            mergedMap.set(`${hit.anchor}::live`, { source_kind: 'transcript', ...hit });
+          }
+        }
+        const merged = [...mergedMap.values()].sort((left, right) =>
+          String(right.timestamp).localeCompare(String(left.timestamp)));
+        const start = (searchPage - 1) * searchLimitValue;
+        const paged = merged.slice(start, start + searchLimitValue);
+        const result = {
+          total: merged.length,
+          results: paged,
+          pagination: {
+            page: searchPage,
+            limit: searchLimitValue,
+            previousPage: searchPage > 1 ? searchPage - 1 : null,
+            nextPage: start + searchLimitValue < merged.length ? searchPage + 1 : null,
+          },
+        };
+        if (format === 'compact') {
+          process.stdout.write(renderHistorySearchCompact(result));
+          return;
+        }
+        return print(result);
+      }
+      if (action === 'show') {
+        if (hosts && hosts.length > 1) throw new InputError('Choose one host for history show');
+        const result = await showAgentHistory({
+          root,
+          session: requireText(args[0] ?? values.session, 'Session ID'),
+          host: hosts?.[0],
+          anchor: values.anchor,
+          context: numberOption(values.context, 'context'),
+          includeTools: values['include-tools'] ?? true,
+          allProjects: Boolean(values['all-projects']),
+          page,
+          limit,
+        });
+        if (format === 'compact') {
+          process.stdout.write(renderHistoryShowCompact(result as unknown as {
+            host: string; session: string; entries: Array<Record<string, unknown>>;
+          }));
+          return;
+        }
+        return print(result);
+      }
+      throw new InputError(`Unknown history command: ${action ?? ''}. Expected collect, list, search or show`);
+    }
+
     if (command === 'session' && action === 'review') {
       const transcript = values.transcript ? JSON.parse(readFileSync(values.transcript, 'utf8')) : undefined;
       if (transcript !== undefined && !Array.isArray(transcript)) throw new InputError('Transcript must be a JSON message array');
-      return print(await reviewSession(root, requireText(args[0], 'Session ID'), { model: modelClient, transcript }));
+      return print(await reviewSession(root, requireText(args[0], 'Session ID'), {
+        model: modelClient, transcript, deterministicOnly: Boolean(values['no-llm']),
+      }));
     }
 
     if (command === 'skill' && action === 'review') {

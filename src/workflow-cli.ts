@@ -14,11 +14,11 @@ import {
   type WorktreeSpec,
 } from './orchestrator.js';
 import { WorkflowStore, workflowId, type Mutation, type WorkflowStep } from './workflow-runtime.js';
-import { bindWorkflowSkill, commandNames, isProjectSkillEntry, workflowBlob, workflowHeader, workflowPath, workflowStrings } from './workflow-skills.js';
+import { bindWorkflowSkill, commandNames, discoverWorkflowCommands, isProjectSkillEntry, validateWorkflowSkill, workflowBlob, workflowHeader, workflowPath, workflowStrings } from './workflow-skills.js';
 import { wikiLookupScope } from './workflow-knowledge.js';
 import {
   exportPlugins, installPlugins, installSkills, installStatus, installWorkflow,
-  pluginStatus, workflowDocument, workflowDocuments,
+  pluginStatus, syncProjectSkills, workflowDocument, workflowDocuments,
 } from './workflow-install.js';
 import { runOpenVikingCli, openVikingHelp } from './openviking/cli.js';
 import { readProject } from './openviking/config.js';
@@ -45,7 +45,7 @@ const options = {
   stream: bool, timeout: string, force: bool, 'delete-branch': bool, branch: string, 'base-ref': string,
   project: string, global: bool, apply: bool, 'knowhow-only': bool,
   scope: string, host: string, skill: strings, yes: bool, upgrade: bool, prune: bool, plugin: bool,
-  commit: string, relation: string, related: string, approval: string, limit: string,
+  commit: string, relation: string, related: string, approval: string, limit: string, all: bool,
 } as const;
 
 const usage = [
@@ -59,10 +59,11 @@ const usage = [
   'evolve run artifact-read <run> <alias> --session <id> [--scope <Wiki scope JSON>]',
   'evolve run decide <decision-id> --verdict proceed|fix|escalate --summary <text> [--confidence <0-100>] [--target-step <step-id>] [--evidence <ref>] --session <id> [--actor <id>]',
   'evolve run task controller|add|update|delete|list --session <id> --run <id>',
-  'evolve skill install|upgrade [<package>...] [--plugin] [--scope project|user] [--host codex|claude|agy|omp|all] [--path <dir>] [--yes]',
+  'evolve skill install|upgrade|sync [<package>...] [--plugin] [--scope project|user] [--host codex|claude|agy|omp|all] [--path <dir>] [--yes]',
   'evolve skill status [--plugin] [--scope project|user] [--host codex|claude|agy|omp|all]',
   'evolve skill validate|workflows [show <id>]',
-  'evolve agent exec <prompt> --to codex|agy|claude|omp --mode analysis|write [--timeout <ms>]',
+  'evolve history collect|list|search|show [options]',
+  'evolve agent exec <prompt> --to codex|agy|claude|omp --mode analysis|write [--worktree <name> | --isolate] [--agent-session <id>] [--stream] [--timeout <ms>]',
   'evolve agent providers|list|get|create|send|delete|worktree [options]',
   'evolve experience enable|disable|status|pending|review|publish|search|get',
 ].join('\n');
@@ -99,7 +100,7 @@ const agentHelp = [
   '  evolve skill workflows show agent-usage',
 ].join('\n');
 
-const knowledgeCommands = new Set(['code', 'kb', 'search']);
+const knowledgeCommands = new Set(['code', 'kb', 'search', 'history']);
 const skillEvolutionActions = new Set(['review', 'draft', 'replay', 'apply', 'rollback', 'retire', 'learnings', 'design']);
 
 function needsWasmCodeGraph(group: string | undefined, action: string | undefined, values: Record<string, unknown>): boolean {
@@ -399,9 +400,9 @@ async function runWorkflowCli(argv: string[]) {
     relation: values.relation, related: values.related, approval: values.approval, limit: values.limit,
   }));
   if (group === 'skill' && action === 'workflows') {
-    if (!args.length) return print(workflowDocuments());
+    if (!args.length) return print(workflowDocuments(root));
     if (args[0] === 'show' && args.length === 2) {
-      process.stdout.write(workflowDocument(args[1]));
+      process.stdout.write(workflowDocument(args[1], root));
       return;
     }
     throw new InputError('Usage: evolve skill workflows [show <id>]');
@@ -434,12 +435,36 @@ async function runWorkflowCli(argv: string[]) {
         upgrade, prune: Boolean(values.prune), force: Boolean(values.force),
       }));
     }
+    if (action === 'sync') {
+      return print(syncProjectSkills(root, {
+        scope: installScope(),
+        host: values.host,
+        skill: [...(values.skill ?? []), ...args],
+        force: Boolean(values.force),
+      }));
+    }
     if (action === 'status' && !args.length) {
       return print(values.plugin
         ? pluginStatus(root, { scope: installScope(), host: values.host })
         : installStatus(root, { scope: installScope(), host: values.host }));
     }
-    if (action === 'validate') return print(bindWorkflowSkill(root, requireText(args[0], 'Skill command')));
+    if (action === 'validate') {
+      if (values.all) {
+        const commands = discoverWorkflowCommands(root);
+        if (!commands.length) throw new InputError('No committed Skill packages found in this project');
+        const results = commands.map(command => {
+          try {
+            return { command, ok: true, result: validateWorkflowSkill(root, command) };
+          } catch (error) {
+            return { command, ok: false, error: error instanceof Error ? error.message : String(error) };
+          }
+        });
+        const failed = results.filter(item => !item.ok);
+        if (failed.length) process.exitCode = 1;
+        return print({ total: results.length, passed: results.length - failed.length, failed: failed.length, results });
+      }
+      return print(validateWorkflowSkill(root, requireText(args[0], 'Skill command')));
+    }
     if (action === 'inspect') {
       const entry = workflowPath(requireText(args[0], 'Skill entry'));
       const commit = requireText(values.commit, 'Skill commit');
@@ -450,7 +475,12 @@ async function runWorkflowCli(argv: string[]) {
       for (const link of required_links) workflowBlob(root, commit, packagePath + workflowPath(link.split('#', 1)[0], '.md'));
       return print({ entry, commit, header, required_links });
     }
-    if (!action || action === 'list') return print(commandNames.map(command => ({ command })));
+    if (!action || action === 'list') {
+      const custom = discoverWorkflowCommands(root).filter(
+        name => !commandNames.includes(name) && name !== 'ew-orchestrate' && name !== 'ew-odyssey',
+      );
+      return print([...commandNames, ...custom].map(command => ({ command })));
+    }
     throw new InputError('Unknown Skill command: ' + action);
   }
   if (group === 'agent' && action === 'exec') {

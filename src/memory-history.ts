@@ -3,8 +3,8 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { InputError, NotFoundError, openDb, pageOffset, pagination, searchLimit } from './common.js';
-import { memoryHosts, memoryModelSettings, type MemoryHost } from './memory-config.js';
-import { recordConversationSignals, buildSessionStartNotice } from './memory-reminders.js';
+import { memoryHosts, memoryModelSettings, parseMemoryHosts, type MemoryHost } from './memory-config.js';
+import { buildSessionStartNotice, detectEntrySignals, recordConversationSignals } from './memory-reminders.js';
 import type { ConversationMessage, MemoryStore } from './memory.js';
 import type { LlmClient } from './upstream/llm.js';
 
@@ -315,7 +315,12 @@ function workspacePath(uri: string): string | undefined {
   }
 }
 
-function* agyTranscripts(root: string, session: string | undefined, full: boolean): Generator<Transcript> {
+function* agyTranscripts(
+  root: string,
+  session: string | undefined,
+  _full: boolean,
+  allProjects = false,
+): Generator<Transcript & { cwd?: string }> {
   const seen = new Set<string>();
   for (const dirName of ['antigravity-cli', 'antigravity']) {
     const home = join(homedir(), '.gemini', dirName);
@@ -329,13 +334,14 @@ function* agyTranscripts(root: string, session: string | undefined, full: boolea
         const { conversation_id: id, workspace_uris: raw } = row;
         if (typeof id !== 'string' || !/^[\w-]+$/.test(id) || seen.has(id) || !readableText(raw)) continue;
         const uris: unknown = JSON.parse(raw);
-        if (!Array.isArray(uris) || typeof uris[0] !== 'string' || !projectContains(root, workspacePath(uris[0]))) continue;
+        const firstUri = Array.isArray(uris) && typeof uris[0] === 'string' ? workspacePath(uris[0]) : undefined;
+        if (!allProjects && !projectContains(root, firstUri)) continue;
         const directory = join(home, 'brain', id, '.system_generated', 'logs');
         const names = ['transcript_full.jsonl', 'transcript.jsonl'];
         const path = names.map(name => join(directory, name)).find(existsSync);
         if (path) {
           seen.add(id);
-          yield { path, session: id };
+          yield { path, session: id, ...(firstUri ? { cwd: firstUri } : {}) };
         }
       }
     } finally {
@@ -344,8 +350,14 @@ function* agyTranscripts(root: string, session: string | undefined, full: boolea
   }
 }
 
-function* savedTranscripts(host: MemoryHost, root: string, session?: string, full = false): Generator<Transcript> {
-  if (host === 'agy') return yield* agyTranscripts(root, session, full);
+function* savedTranscripts(
+  host: MemoryHost,
+  root: string,
+  session?: string,
+  full = false,
+  allProjects = false,
+): Generator<Transcript & { cwd?: string }> {
+  if (host === 'agy') return yield* agyTranscripts(root, session, full, allProjects);
   if (host === 'claude') {
     const projects = join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'projects');
     if (!existsSync(projects)) return;
@@ -370,6 +382,571 @@ function* savedTranscripts(host: MemoryHost, root: string, session?: string, ful
       }
     }
   }
+}
+
+export type HistoryEntryRole = 'user' | 'assistant' | 'tool' | 'error';
+export type HistoryEntryKind = 'message' | 'tool_call' | 'tool_result' | 'error';
+
+export interface HistoryEntry {
+  id: string;
+  host: MemoryHost;
+  session: string;
+  role: HistoryEntryRole;
+  kind: HistoryEntryKind;
+  timestamp: string;
+  content: string;
+  toolName?: string;
+  signals: string[];
+  location: { path: string; byteOffset: number };
+}
+
+export interface HostTranscriptRef {
+  host: MemoryHost;
+  session: string;
+  cwd?: string;
+  path: string;
+  size: number;
+  mtimeMs: number;
+}
+
+export interface HistorySessionSummary {
+  host: MemoryHost;
+  session: string;
+  cwd?: string;
+  path: string;
+  started_at?: string;
+  updated_at: string;
+  title?: string;
+  message_count: number;
+  tool_count: number;
+  error_count: number;
+  signals: string[];
+}
+
+export interface HistorySearchHit {
+  host: MemoryHost;
+  session: string;
+  anchor: string;
+  role: HistoryEntryRole;
+  kind: HistoryEntryKind;
+  timestamp: string;
+  toolName?: string;
+  signals?: string[];
+  snippet: string;
+  truncated: boolean;
+}
+
+export function parseSinceMs(since?: string): number | undefined {
+  if (!since) return undefined;
+  const relativeMatch = /^(\d+)([mhdw])$/i.exec(since.trim());
+  if (relativeMatch) {
+    const count = Number(relativeMatch[1]);
+    const unit = relativeMatch[2].toLowerCase();
+    const mult = unit === 'm' ? 60_000 : unit === 'h' ? 3_600_000 : unit === 'd' ? 86_400_000 : 604_800_000;
+    return Date.now() - count * mult;
+  }
+  const parsed = Date.parse(since);
+  if (!Number.isFinite(parsed)) throw new InputError(`Invalid --since value: ${since}`);
+  return parsed;
+}
+
+function serializeCompact(value: unknown): string {
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function clipText(text: string, max = 300, matchIndex = 0): { snippet: string; truncated: boolean } {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  if (normalized.length <= max) return { snippet: normalized, truncated: false };
+  const start = matchIndex > 60 ? Math.max(0, Math.min(matchIndex - 60, normalized.length - max)) : 0;
+  const slice = normalized.slice(start, start + max);
+  const snippet = (start > 0 ? '…' : '') + slice + (start + max < normalized.length ? '…' : '');
+  return { snippet, truncated: true };
+}
+
+async function inspectHostTranscript(
+  host: MemoryHost,
+  transcript: Transcript & { cwd?: string },
+  root: string,
+  size: number,
+  allProjects: boolean,
+): Promise<{ session: string; cwd?: string } | undefined> {
+  if (host === 'agy') {
+    return transcript.session ? { session: transcript.session, cwd: transcript.cwd } : undefined;
+  }
+  if (host === 'codex') {
+    for await (const { row } of transcriptRows(transcript.path, 0, size)) {
+      const header = row?.type === 'session_meta' ? object(row.payload) : undefined;
+      if (header && readableText(header.id) &&
+          (transcript.session === undefined || transcript.session === header.id) &&
+          (allProjects || projectContains(root, header.cwd)) &&
+          object(header.source)?.subagent === undefined) {
+        return { session: header.id, cwd: readableText(header.cwd) ? header.cwd : undefined };
+      }
+      return undefined;
+    }
+    return undefined;
+  }
+  for await (const { row } of transcriptRows(transcript.path, 0, size)) {
+    if (!row || !readableText(row.sessionId) || !readableText(row.cwd)) continue;
+    if ((transcript.session === undefined || row.sessionId === transcript.session) &&
+        (allProjects || projectContains(root, row.cwd))) {
+      return { session: row.sessionId, cwd: row.cwd };
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
+export async function discoverHostTranscripts(
+  root: string,
+  options: { hosts?: readonly MemoryHost[]; session?: string; allProjects?: boolean } = {},
+): Promise<HostTranscriptRef[]> {
+  const resolvedRoot = realpathSync(root);
+  const hosts = options.hosts?.length ? options.hosts : memoryHosts;
+  const allProjects = Boolean(options.allProjects);
+  const refs: HostTranscriptRef[] = [];
+  for (const host of hosts) {
+    for (const transcript of savedTranscripts(host, resolvedRoot, options.session, true, allProjects)) {
+      const info = statSync(transcript.path, { throwIfNoEntry: false });
+      if (!info?.isFile()) continue;
+      let matched: { session: string; cwd?: string } | undefined;
+      try {
+        matched = await inspectHostTranscript(host, transcript, resolvedRoot, info.size, allProjects);
+      } catch {
+        continue;
+      }
+      if (!matched) continue;
+      refs.push({
+        host,
+        session: matched.session,
+        ...(matched.cwd ? { cwd: matched.cwd } : {}),
+        path: transcript.path,
+        size: info.size,
+        mtimeMs: info.mtimeMs,
+      });
+    }
+  }
+  return refs;
+}
+
+function makeHistoryEntry(
+  partial: Omit<HistoryEntry, 'signals'>,
+  explicitError = false,
+): HistoryEntry {
+  return {
+    ...partial,
+    signals: detectEntrySignals(partial.role, partial.content, explicitError, partial.kind),
+  };
+}
+
+function parseCodexRow(
+  entry: TranscriptRow,
+  session: string,
+  path: string,
+  includeTools: boolean,
+  previousAssistant: string | undefined,
+): { items: HistoryEntry[]; nextAssistant: string | undefined } {
+  const { row, start } = entry;
+  const timestamp = readableText(row?.timestamp) ? row.timestamp : new Date(0).toISOString();
+  const completed = codexCompletedMessage(entry, session, path);
+  if (completed) {
+    if (previousAssistant === completed.content) return { items: [], nextAssistant: previousAssistant };
+    return {
+      items: [makeHistoryEntry({
+        id: completed.id, host: 'codex', session, role: 'assistant', kind: 'message',
+        timestamp: String(completed.timestamp), content: completed.content, location: { path, byteOffset: start },
+      })],
+      nextAssistant: completed.content,
+    };
+  }
+  const msg = codexMessage(entry, session, path);
+  if (msg) {
+    return {
+      items: [makeHistoryEntry({
+        id: msg.id, host: 'codex', session, role: msg.role === 'user' ? 'user' : 'assistant', kind: 'message',
+        timestamp: String(msg.timestamp), content: msg.content, location: { path, byteOffset: start },
+      })],
+      nextAssistant: msg.role === 'assistant' ? msg.content : previousAssistant,
+    };
+  }
+  if (!includeTools) return { items: [], nextAssistant: previousAssistant };
+  const payload = object(row?.payload);
+  if (row?.type === 'response_item' && (payload?.type === 'function_call' || payload?.type === 'custom_tool_call')) {
+    const toolName = readableText(payload.name) ? payload.name : 'tool';
+    const argsText = payload.arguments !== undefined ? serializeCompact(payload.arguments)
+      : payload.input !== undefined ? serializeCompact(payload.input) : '';
+    const content = [toolName, argsText].filter(Boolean).join(' ');
+    return {
+      items: [makeHistoryEntry({
+        id: `codex:${session}:${start}:call`, host: 'codex', session, role: 'tool', kind: 'tool_call',
+        timestamp, content, toolName, location: { path, byteOffset: start },
+      })],
+      nextAssistant: previousAssistant,
+    };
+  }
+  if (row?.type === 'response_item' && (payload?.type === 'function_call_output' || payload?.type === 'custom_tool_call_output')) {
+    const outText = payload.output !== undefined ? serializeCompact(payload.output) : '';
+    if (!outText.trim()) return { items: [], nextAssistant: previousAssistant };
+    const signals = detectEntrySignals('tool', outText);
+    const isErr = signals.includes('tool_or_runtime_error');
+    return {
+      items: [makeHistoryEntry({
+        id: `codex:${session}:${start}:out`, host: 'codex', session,
+        role: isErr ? 'error' : 'tool', kind: isErr ? 'error' : 'tool_result',
+        timestamp, content: outText, location: { path, byteOffset: start },
+      }, isErr)],
+      nextAssistant: previousAssistant,
+    };
+  }
+  if (row?.type === 'event_msg' && payload?.type === 'turn_aborted') {
+    const reason = readableText(payload.reason) ? payload.reason : 'Turn aborted';
+    return {
+      items: [makeHistoryEntry({
+        id: `codex:${session}:${start}:abort`, host: 'codex', session, role: 'error', kind: 'error',
+        timestamp, content: reason, location: { path, byteOffset: start },
+      }, true)],
+      nextAssistant: previousAssistant,
+    };
+  }
+  return { items: [], nextAssistant: previousAssistant };
+}
+
+function parseClaudeRow(
+  entry: TranscriptRow,
+  session: string,
+  path: string,
+  includeTools: boolean,
+): HistoryEntry[] {
+  const { row, start } = entry;
+  if (!row || row.sessionId !== session || row.isSidechain || row.isMeta || row.isCompactSummary) return [];
+  const timestamp = readableText(row.timestamp) ? row.timestamp : new Date(0).toISOString();
+  const baseId = `claude:${session}:${readableText(row.uuid) ? row.uuid : start}`;
+  if (row.isApiErrorMessage) {
+    const message = object(row.message);
+    const text = typeof message?.content === 'string' ? message.content : serializeCompact(row.error ?? message ?? 'API error');
+    return [makeHistoryEntry({
+      id: `${baseId}:api-error`, host: 'claude', session, role: 'error', kind: 'error',
+      timestamp, content: text, location: { path, byteOffset: start },
+    }, true)];
+  }
+  if (row.type !== 'user' && row.type !== 'assistant') return [];
+  const message = object(row.message);
+  if (message?.role !== row.type) return [];
+  const parts = message.content;
+  if (typeof parts === 'string') {
+    if (!parts.trim()) return [];
+    return [makeHistoryEntry({
+      id: baseId, host: 'claude', session, role: row.type, kind: 'message',
+      timestamp, content: parts, location: { path, byteOffset: start },
+    })];
+  }
+  if (!Array.isArray(parts)) return [];
+  const items: HistoryEntry[] = [];
+  const textContent = messageText(parts, 'text');
+  if (textContent.trim()) {
+    items.push(makeHistoryEntry({
+      id: baseId, host: 'claude', session, role: row.type, kind: 'message',
+      timestamp, content: textContent, location: { path, byteOffset: start },
+    }));
+  }
+  if (!includeTools) return items;
+  parts.forEach((part, index) => {
+    if (!part || typeof part !== 'object') return;
+    if (part.type === 'tool_use') {
+      const toolName = readableText(part.name) ? part.name : 'tool';
+      const content = [toolName, part.input !== undefined ? serializeCompact(part.input) : ''].filter(Boolean).join(' ');
+      items.push(makeHistoryEntry({
+        id: `${baseId}:tool:${index}`, host: 'claude', session, role: 'tool', kind: 'tool_call',
+        timestamp, content, toolName, location: { path, byteOffset: start },
+      }));
+    } else if (part.type === 'tool_result') {
+      const text = typeof part.content === 'string' ? part.content : serializeCompact(part.content ?? '');
+      if (!text.trim()) return;
+      const isErr = part.is_error === true || detectEntrySignals('tool', text).includes('tool_or_runtime_error');
+      items.push(makeHistoryEntry({
+        id: `${baseId}:result:${index}`, host: 'claude', session,
+        role: isErr ? 'error' : 'tool', kind: isErr ? 'error' : 'tool_result',
+        timestamp, content: text, location: { path, byteOffset: start },
+      }, isErr));
+    }
+  });
+  return items;
+}
+
+function parseAgyRow(
+  entry: TranscriptRow,
+  session: string,
+  path: string,
+  includeTools: boolean,
+): HistoryEntry[] {
+  const { row, start } = entry;
+  if (!row || typeof row.step_index !== 'number' || !Number.isSafeInteger(row.step_index)) return [];
+  const timestamp = readableText(row.created_at) ? row.created_at : new Date(0).toISOString();
+  const baseId = `agy:${session}:${row.step_index}`;
+  const items: HistoryEntry[] = [];
+  if (row.status === 'ERROR') {
+    const errText = readableText(row.content) ? row.content
+      : row.error !== undefined ? serializeCompact(row.error) : `Step ${row.step_index} ERROR`;
+    items.push(makeHistoryEntry({
+      id: `${baseId}:error`, host: 'agy', session, role: 'error', kind: 'error',
+      timestamp, content: errText, location: { path, byteOffset: start },
+    }, true));
+    return items;
+  }
+  const msg = agyMessage(entry, session, path)?.item;
+  if (msg) {
+    items.push(makeHistoryEntry({
+      id: msg.id, host: 'agy', session, role: msg.role === 'user' ? 'user' : 'assistant', kind: 'message',
+      timestamp: msg.timestamp, content: msg.content, location: { path, byteOffset: start },
+    }));
+  }
+  if (includeTools && Array.isArray(row.tool_calls)) {
+    row.tool_calls.forEach((call, index) => {
+      if (!call || typeof call !== 'object') return;
+      const record = call as Record<string, unknown>;
+      const toolName = readableText(record.name) ? record.name
+        : readableText(record.tool_name) ? record.tool_name : 'tool';
+      const argsVal = record.arguments ?? record.args ?? record.input;
+      const content = [toolName, argsVal !== undefined ? serializeCompact(argsVal) : ''].filter(Boolean).join(' ');
+      items.push(makeHistoryEntry({
+        id: `${baseId}:tool:${index}`, host: 'agy', session, role: 'tool', kind: 'tool_call',
+        timestamp, content, toolName, location: { path, byteOffset: start },
+      }));
+    });
+  }
+  if (includeTools && (row.type === 'TOOL_RESPONSE' || row.source === 'TOOL') && readableText(row.content)) {
+    const isErr = detectEntrySignals('tool', row.content).includes('tool_or_runtime_error');
+    items.push(makeHistoryEntry({
+      id: `${baseId}:result`, host: 'agy', session,
+      role: isErr ? 'error' : 'tool', kind: isErr ? 'error' : 'tool_result',
+      timestamp, content: row.content, location: { path, byteOffset: start },
+    }, isErr));
+  }
+  return items;
+}
+
+export async function readHostHistoryEntries(
+  ref: Pick<HostTranscriptRef, 'host' | 'session' | 'path' | 'size'>,
+  options: { fromOffset?: number; includeTools?: boolean } = {},
+): Promise<{ entries: HistoryEntry[]; lastOffset: number }> {
+  const fromOffset = options.fromOffset ?? 0;
+  const includeTools = options.includeTools ?? true;
+  const entries: HistoryEntry[] = [];
+  let lastOffset = fromOffset;
+  let previousAssistant: string | undefined;
+  for await (const row of transcriptRows(ref.path, fromOffset, ref.size)) {
+    lastOffset = row.end;
+    if (ref.host === 'codex') {
+      const parsed = parseCodexRow(row, ref.session, ref.path, includeTools, previousAssistant);
+      previousAssistant = parsed.nextAssistant;
+      entries.push(...parsed.items);
+    } else if (ref.host === 'claude') {
+      entries.push(...parseClaudeRow(row, ref.session, ref.path, includeTools));
+    } else {
+      entries.push(...parseAgyRow(row, ref.session, ref.path, includeTools));
+    }
+  }
+  return { entries, lastOffset };
+}
+
+export async function listAgentHistory(options: {
+  root: string;
+  hosts?: readonly MemoryHost[];
+  session?: string;
+  since?: string;
+  signalsOnly?: boolean;
+  allProjects?: boolean;
+  limit?: number;
+}): Promise<HistorySessionSummary[]> {
+  const limit = searchLimit(options.limit ?? 20);
+  const sinceMs = parseSinceMs(options.since);
+  const refs = await discoverHostTranscripts(options.root, {
+    hosts: options.hosts,
+    session: options.session,
+    allProjects: options.allProjects,
+  });
+  const summaries: HistorySessionSummary[] = [];
+  for (const ref of refs) {
+    const fallbackTime = new Date(ref.mtimeMs).toISOString();
+    if (sinceMs !== undefined && ref.mtimeMs < sinceMs) continue;
+    let entries: HistoryEntry[];
+    try {
+      ({ entries } = await readHostHistoryEntries(ref, { includeTools: true }));
+    } catch {
+      continue;
+    }
+    if (!entries.length) continue;
+    const signals = [...new Set(entries.flatMap(item => item.signals))];
+    if (options.signalsOnly && !signals.length) continue;
+    const firstUser = entries.find(item => item.role === 'user' && item.kind === 'message');
+    const startedAt = entries[0]?.timestamp;
+    const updatedAt = entries.at(-1)?.timestamp ?? fallbackTime;
+    const updatedMs = Date.parse(updatedAt);
+    if (sinceMs !== undefined && Number.isFinite(updatedMs) && updatedMs < sinceMs) continue;
+    summaries.push({
+      host: ref.host,
+      session: ref.session,
+      ...(ref.cwd ? { cwd: ref.cwd } : {}),
+      path: ref.path,
+      ...(startedAt ? { started_at: startedAt } : {}),
+      updated_at: updatedAt,
+      ...(firstUser ? { title: clipText(firstUser.content, 100).snippet } : {}),
+      message_count: entries.filter(item => item.kind === 'message').length,
+      tool_count: entries.filter(item => item.kind === 'tool_call' || item.kind === 'tool_result').length,
+      error_count: entries.filter(item => item.role === 'error').length,
+      signals,
+    });
+  }
+  summaries.sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+  return summaries.slice(0, limit);
+}
+
+export async function searchAgentHistory(options: {
+  root: string;
+  query?: string;
+  regex?: boolean;
+  hosts?: readonly MemoryHost[];
+  session?: string;
+  roles?: readonly HistoryEntryRole[];
+  skill?: string;
+  signalsOnly?: boolean;
+  since?: string;
+  allProjects?: boolean;
+  includeTools?: boolean;
+  limit?: number;
+  page?: number;
+}): Promise<{ total: number; results: HistorySearchHit[]; pagination: ReturnType<typeof pagination> }> {
+  const limit = searchLimit(options.limit ?? 20);
+  const page = options.page ?? 1;
+  const offset = pageOffset(page, limit);
+  const sinceMs = parseSinceMs(options.since);
+  const includeTools = options.includeTools ?? true;
+  const queryText = options.query?.trim() ?? '';
+  if (!queryText && !options.signalsOnly && !options.skill && !options.session && !options.roles?.length) {
+    throw new InputError('Provide a search query, --signals-only, --role, --skill, or --session');
+  }
+  let regex: RegExp | undefined;
+  if (queryText && options.regex) {
+    try {
+      regex = new RegExp(queryText, 'i');
+    } catch {
+      throw new InputError(`Invalid search regex: ${queryText}`);
+    }
+  }
+  const needle = queryText.toLowerCase();
+  const skillNeedle = options.skill?.trim().toLowerCase();
+  const refs = await discoverHostTranscripts(options.root, {
+    hosts: options.hosts,
+    session: options.session,
+    allProjects: options.allProjects,
+  });
+  const hits: HistorySearchHit[] = [];
+  for (const ref of refs) {
+    let entries: HistoryEntry[];
+    try {
+      ({ entries } = await readHostHistoryEntries(ref, { includeTools }));
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (options.roles?.length && !options.roles.includes(entry.role)) continue;
+      if (sinceMs !== undefined) {
+        const ts = Date.parse(entry.timestamp);
+        if (Number.isFinite(ts) && ts < sinceMs) continue;
+      }
+      if (options.signalsOnly && entry.signals.length === 0 && entry.role !== 'error') continue;
+      if (skillNeedle && !entry.content.toLowerCase().includes(skillNeedle)) continue;
+      let matchIdx = 0;
+      if (queryText) {
+        if (regex) {
+          const found = regex.exec(entry.content);
+          if (!found) continue;
+          matchIdx = found.index;
+        } else {
+          const idx = entry.content.toLowerCase().indexOf(needle);
+          if (idx < 0) continue;
+          matchIdx = idx;
+        }
+      }
+      const { snippet, truncated } = clipText(entry.content, 300, matchIdx);
+      hits.push({
+        host: entry.host,
+        session: entry.session,
+        anchor: entry.id,
+        role: entry.role,
+        kind: entry.kind,
+        timestamp: entry.timestamp,
+        ...(entry.toolName ? { toolName: entry.toolName } : {}),
+        ...(entry.signals.length ? { signals: entry.signals } : {}),
+        snippet,
+        truncated,
+      });
+    }
+  }
+  hits.sort((left, right) => right.timestamp.localeCompare(left.timestamp));
+  const paged = hits.slice(offset, offset + limit);
+  return {
+    total: hits.length,
+    results: paged,
+    pagination: pagination(page, limit, offset + limit < hits.length),
+  };
+}
+
+export async function showAgentHistory(options: {
+  root: string;
+  session: string;
+  host?: MemoryHost;
+  anchor?: string;
+  context?: number;
+  includeTools?: boolean;
+  allProjects?: boolean;
+  page?: number;
+  limit?: number;
+}) {
+  const limit = searchLimit(options.limit ?? 20);
+  const refs = await discoverHostTranscripts(options.root, {
+    hosts: options.host ? [options.host] : memoryHosts,
+    session: options.session,
+    allProjects: options.allProjects,
+  });
+  if (!refs.length) throw new NotFoundError(`Conversation is unavailable in this project: ${options.session}`);
+  if (refs.length > 1) throw new InputError('Conversation exists in more than one host; specify --host');
+  const ref = refs[0];
+  const { entries } = await readHostHistoryEntries(ref, { includeTools: options.includeTools ?? true });
+  if (options.anchor) {
+    const context = options.context ?? 5;
+    if (!Number.isInteger(context) || context < 0 || context > 50) {
+      throw new InputError('context must be an integer between 0 and 50');
+    }
+    const idx = entries.findIndex(item => item.id === options.anchor || item.id.startsWith(options.anchor!));
+    if (idx < 0) throw new NotFoundError(`History anchor not found in session ${options.session}: ${options.anchor}`);
+    const start = Math.max(0, idx - context);
+    const end = Math.min(entries.length, idx + context + 1);
+    return {
+      host: ref.host,
+      session: ref.session,
+      path: ref.path,
+      anchor: entries[idx].id,
+      total: entries.length,
+      range: { start, end },
+      entries: entries.slice(start, end),
+    };
+  }
+  const page = options.page ?? 1;
+  const offset = pageOffset(page, limit);
+  return {
+    host: ref.host,
+    session: ref.session,
+    path: ref.path,
+    total: entries.length,
+    pagination: pagination(page, limit, offset + limit < entries.length),
+    entries: entries.slice(offset, offset + limit),
+  };
 }
 
 interface ConversationOptions {

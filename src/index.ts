@@ -102,4 +102,12 @@ export {
   type LintSeverity,
 } from './knowledge-lint.js';
 export { InputError, NotFoundError } from './common.js';
+export {
+  listAgentHistory, searchAgentHistory, showAgentHistory,
+  type HistoryEntry, type HistoryEntryKind, type HistoryEntryRole, type HistorySearchHit, type HistorySessionSummary,
+} from './memory-history.js';
+export {
+  collectHistorySignals, historySignalsDbPath, queryCollectedSignals, readHistoryCursorMap,
+  type CollectedSignalRecord, type HistoryCursorRecord, type SignalSourceKind,
+} from './history-signals.js';
 export type { LlmClient, ChatParams } from './upstream/llm.js';

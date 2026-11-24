@@ -1,6 +1,6 @@
 {
   "name": "self-evolving-workflow",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Self-Evolving Workflow: Session/Run orchestration, local code graph, Markdown wiki, episodic memory, and skill evolution.",
   "author": {
     "name": "catlog22"

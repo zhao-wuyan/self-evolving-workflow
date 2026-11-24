@@ -39,9 +39,20 @@ export interface UnharvestedSession {
 }
 
 const MAX_ACTIVE_REMINDERS = 20;
-const CORRECTION_PATTERN = /(?:不对|不是这样|搞错了|做错了|不要再|别再|重新来|为什么还是|没生效|漏掉了|你忘了|\b(?:wrong|incorrect|stop doing|instead|still failing|not working|forgot to|missed)\b)/i;
-const ERROR_PATTERN = /(?:SyntaxError|TypeError|ReferenceError|ENOENT|SQLITE_|unable to open database|timed out|HTTP 5\d\d|\bexit(?:ed)? with code [1-9])/i;
+export const CORRECTION_PATTERN = /(?:不对|不是这样|搞错了|做错了|不要再|别再|重新来|为什么还是|没生效|漏掉了|你忘了|\b(?:wrong|incorrect|stop doing|instead|still failing|not working|forgot to|missed)\b)/i;
+export const ERROR_PATTERN = /(?:SyntaxError|TypeError|ReferenceError|ENOENT|SQLITE_|unable to open database|timed out|HTTP 5\d\d|\bexit(?:ed)? with code [1-9]|\bError:\s|\bfatal:\s)/i;
 const CLOSEOUT_PATTERN = /(?:修复了|已解决|根因|真正原因|最佳实践|约束|规范|教训|踩坑|\b(?:root cause|workaround|invariant|fixed the|lesson learned)\b)/i;
+
+/** 对单条消息或工具输出执行确定性信号标签识别；不对 assistant 文本或 tool_call 入参误报错误。 */
+export function detectEntrySignals(role: string, content: string, explicitError = false, kind?: string): string[] {
+  const signals: string[] = [];
+  if (role === 'user' && CORRECTION_PATTERN.test(content)) signals.push('user_correction');
+  const isToolOutput = kind === 'tool_result' || (kind === undefined && role === 'tool');
+  if (explicitError || role === 'error' || (isToolOutput && ERROR_PATTERN.test(content))) {
+    signals.push('tool_or_runtime_error');
+  }
+  return signals;
+}
 
 export function remindersPath(root: string): string {
   return evolvePath(root, 'pending-reminders.json');

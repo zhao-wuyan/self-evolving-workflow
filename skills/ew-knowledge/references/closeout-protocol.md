@@ -61,18 +61,15 @@ evolve kb candidates publish --root <project> <closeout-id> <candidate-id> "<tit
 
 # 路径 B：问题可归因于具体 Skill 或需要新流程包时按序分流
 # 1) 先用 kb candidates route 判定路线（wiki | skill-addition | skill-design）
-evolve kb candidates route --root <project> <closeout-id> <candidate-id> --skill <skill-id> [--skill-version <version>]
-# 2) 可按来源补采信号（Session 用 session review；独立 Skill 用 skill review）
-evolve --root <project> session review <session-id>
-evolve --root <project> skill review <execution-id> --project <source-project-id>
+evolve kb candidates route --root <project> <closeout-id> <candidate-id> [--skill <skill-id>] [--skill-version <version>]
+# 2) 按需补充检索历史运行信号与会话摘要（纯本地增量，不依赖 LLM）
+evolve --root <project> history collect
+evolve --root <project> history search "<query>" --signals-only
+evolve --root <project> session review <session-id> --no-llm
 ```
 
 根据 `kb candidates route` 返回的 `route` 执行交接：
-- **`skill-design`**（满足 [knowledge-route.md](knowledge-route.md) 规则 8 结构化条件）：`kb candidates route` 同时创建 `design_task`。直接或自动路由转交 `ew-skill-design`，按 `evolve skill design task <task-id>` → `run <task-id> --runner <script>` → `review <design-id>` → `replay <design-id> --runner <script> --scenarios <json>` 执行；通过明确确认门禁后再运行 `evolve skill design apply <design-id>`，失败时用 `evolve skill design rollback <design-id>` 回滚。
-- **`skill-addition`**：转交 `workflow-evolve`（可运行 `skills/workflow-evolve/scripts/evolve-loop.mjs`），从 `evolve kb candidates show <receipt-id> --project <source-project-id>` 与原候选构造参数：
-  - 目标入口：`--skill skills/<skill-id>/SKILL.md`（若安装在宿主目录则为 `<skill-root>/<skill-id>/SKILL.md`，需先对齐已提交版本）。
-  - 归因证据来源（三选一）：Session 来源传 `--session <session_id>`；独立 Skill 来源传 `--execution <execution_id> --project <source-project-id>`（`<execution_id>` 取自 `kb candidates show` 的 `session_id` / 执行 ID）；或传归一化 `--history <transcript-evidence/1.0 JSON>`。
-  - `--scenarios <scenarios.json>` 构造要求：JSON 数组至少含 2 条场景——至少 1 条 `"baseline": false`（基于 `candidate.content` 与 `candidate.sources` 复现当前 Skill 失效行为并给出期望输出）与至少 1 条 `"baseline": true`（验证既有正常路径保持通过）。
+- **`skill-design` / `skill-addition`**：统一交由 Agent 执行的 **`workflow-evolve`**（新建或结构重构遵循 `ew-skill-design` 封装规范），先基于候选证据、`evolve history` 与 `memory.db` 给出《自进化策略》（Skill 修改或创建），经用户确认后实施并用 `evolve skill validate` 校验；若需使用离线自动化回放状态机，可继续按 `evolve skill design task/run/review/replay/apply` 或 `skills/workflow-evolve/scripts/evolve-loop.mjs` 执行。
 
 ### 5. Verify（回读确认）
 
