@@ -3,7 +3,7 @@ import {
   cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync,
   readdirSync, realpathSync, renameSync, rmSync, writeFileSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
@@ -14,6 +14,20 @@ import { workflowName } from './workflow-names.js';
 const bundle = fileURLToPath(new URL('../', import.meta.url));
 const source = join(bundle, 'skills');
 const agentsSource = join(bundle, 'agents');
+const assetsSource = join(bundle, 'assets');
+const PLUGIN_NAME = 'self-evolving-workflow';
+const PLUGIN_DISPLAY_NAME = 'Self-Evolving Workflow';
+const PLUGIN_AUTHOR = 'catlog22';
+const PLUGIN_REPOSITORY = 'https://github.com/catlog22/self-evolving-workflow';
+const PLUGIN_DESCRIPTION = 'Self-Evolving Workflow: Session/Run orchestration, local code graph, Markdown wiki, episodic memory, and skill evolution.';
+const PLUGIN_SHORT_DESCRIPTION = 'Self-evolving agent workflow';
+const PLUGIN_LONG_DESCRIPTION = 'Orchestrate tasks with recoverable Session/Run chains, local code graph, Markdown wiki, episodic memory, and sandboxed skill evolution.';
+const PLUGIN_SUGGESTED_PROMPTS = [
+  'Initialize Evolve workflow for this repository',
+  'Orchestrate a multi-step task with Evolve Session/Run',
+  'Search project wiki, code graph, and episodic memory',
+];
+const FALLBACK_LOGO_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none"><rect x="12" y="12" width="104" height="104" rx="24" fill="#111827"/><circle cx="64" cy="64" r="14" fill="#38BDF8"/></svg>\n';
 const hosts = {
   codex: {
     project: { path: ['.codex'], instructions: ['AGENTS.md'] },
@@ -63,6 +77,8 @@ interface InstallOptions {
   upgrade?: boolean;
   prune?: boolean;
   force?: boolean;
+  plugin?: boolean;
+  path?: string;
 }
 
 export interface InstallSkillsOptions {
@@ -70,6 +86,16 @@ export interface InstallSkillsOptions {
   prune?: boolean;
   force?: boolean;
   agentsHost?: InstallHost;
+}
+
+export interface PluginInstallOptions {
+  scope?: InstallScope;
+  host?: string;
+  skill?: string[];
+  yes?: boolean;
+  upgrade?: boolean;
+  force?: boolean;
+  path?: string;
 }
 
 export interface SkillInstallStatus {
@@ -103,9 +129,24 @@ interface TargetManifestRecord {
   agents?: Record<string, InstalledSkillRecord>;
 }
 
+interface PluginManifestRecord {
+  scope: InstallScope;
+  host: InstallHost;
+  plugin_dir: string;
+  marketplace_path?: string;
+  instructions?: string;
+  version: string;
+  sha256: string;
+  skills: string[];
+  agents: string[];
+  installed_at: string;
+  updated_at: string;
+}
+
 interface InstallManifest {
   schema_version: typeof INSTALL_MANIFEST_VERSION;
   targets: Record<string, TargetManifestRecord>;
+  plugins?: Record<string, PluginManifestRecord>;
 }
 
 interface InstallTarget {
@@ -184,7 +225,11 @@ function readManifest(path: string): InstallManifest {
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as Partial<InstallManifest>;
     if (parsed.schema_version === INSTALL_MANIFEST_VERSION && parsed.targets && typeof parsed.targets === 'object') {
-      return { schema_version: INSTALL_MANIFEST_VERSION, targets: parsed.targets };
+      return {
+        schema_version: INSTALL_MANIFEST_VERSION,
+        targets: parsed.targets,
+        ...(parsed.plugins && typeof parsed.plugins === 'object' ? { plugins: parsed.plugins } : {}),
+      };
     }
   } catch {
     // 损坏的旧记录不阻断重装，重建为空记录。
@@ -192,15 +237,19 @@ function readManifest(path: string): InstallManifest {
   return { schema_version: INSTALL_MANIFEST_VERSION, targets: {} };
 }
 
-function writeManifest(path: string, manifest: InstallManifest): void {
+function writeJsonAtomic(path: string, value: unknown): void {
   mkdirSync(dirname(path), { recursive: true });
-  const temp = join(dirname(path), `.install-manifest-${process.pid}-${Date.now()}.tmp`);
+  const temp = join(dirname(path), `.evolve-json-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}.tmp`);
   try {
-    writeFileSync(temp, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+    writeFileSync(temp, JSON.stringify(value, null, 2) + '\n', 'utf8');
     renameSync(temp, path);
   } finally {
     rmSync(temp, { force: true });
   }
+}
+
+function writeManifest(path: string, manifest: InstallManifest): void {
+  writeJsonAtomic(path, manifest);
 }
 
 export function workflowDocuments(): WorkflowDocument[] {
@@ -678,6 +727,8 @@ function buildManagedInstructions(skillsLabels: string[], newline: string) {
     '',
     `When a project uses Evolve Session/Run orchestration (\`ew-orchestrate\`) or the user invokes it, read the relevant package in ${locations} for a project installation and commit those packages so Evolve can bind Runs to a Git revision. Keep ordinary task orchestration (\`ew-orchestrate\`) separate from Skill/harness modification (\`workflow-evolve\`, explicit \`/workflow-evolve\` only).`,
     '',
+    'Ensure the `evolve` CLI is available (`evolve --version`); if missing, install it globally with `npm install -g self-evolving-workflow` before running Evolve commands.',
+    '',
     '## Knowledge Gate',
     '',
     '- Run `evolve search "<task keywords>" --mode context` before inspecting project files (default single-line compact JSON; add `--format compact` for terse plain text or `--verbose` for full metadata). Follow project instructions for knowledge scope, and inspect governing or truncated entries via `evolve kb get <id|q-N:idx>... --resolved` (or `--pick <n,...>`), recording Run knowledge reads.',
@@ -696,7 +747,7 @@ function buildManagedInstructions(skillsLabels: string[], newline: string) {
     '',
     '## Wiki Recording',
     '',
-    '- Propose Wiki knowledge when a reusable method, reference or constraint has sufficient evidence and a stable applicability scope. During a Run, stage findings and evidence in its required outputs/report; after the whole Session completes, run its returned `closeout_command`. For a standalone task, harvest the actual host conversation. Do not wait until closeout to save important working memory.',
+    '- Propose Wiki knowledge when a reusable method, reference or constraint has sufficient evidence and a stable applicability scope. During a Run or active task, record working lessons via `evolve kb add --kind episodic` and stage findings in required outputs/`report.md` — NEVER run `kb harvest` during task execution or between chain steps. Run the returned `closeout_command` only after `evolve session complete`, and run `kb harvest conversation` for a standalone task only on explicit closeout request or confirmed final completion.',
     '- Compare candidates with existing entries before proposing additions, updates or retirements. Keep suggestions, unresolved hypotheses and one-off task state in working memory; do not promote them as established Wiki knowledge.',
     '- `kb harvest` generates review candidates; an exact duplicate may only supplement sources through governance. `kb propose` stages a change without publishing it. Inspect the concrete change and apply it only within explicit human authorization for its IDs, targets and action; otherwise retain it for review. Follow `evolve skill workflows show ew-knowledge` for publication and conflict handling.',
     '',
@@ -709,8 +760,8 @@ function buildManagedInstructions(skillsLabels: string[], newline: string) {
     '| `evolve kb add "<memory>" --kind episodic --type <type> --scene <step> --session <session-id> --evidence <source-ref>` | Save an in-flight memory immediately; include real evidence references, not invented IDs. |',
     '| `evolve kb update <memory-id> "<revised memory>" --kind episodic` | Revise content while retaining original provenance. To replace sources, add repeated `--evidence <source-ref>` flags containing the full desired source list. |',
     '| `evolve kb delete <memory-id> --kind episodic` | Remove an exact memory when explicitly requested; do not use it to hide failed attempts. |',
-    '| `evolve kb harvest session <session-id> --project <project-id>` | After Evolve Session completion, collect evidence-backed Wiki candidates; prefer the returned `closeout_command`. |',
-    '| `evolve kb harvest conversation <conversation-id> --host <host> --project <project-id>` | Collect candidates after a standalone task using its actual conversation ID and host (`codex`, `claude` or `agy`). |',
+    '| `evolve kb harvest session <session-id> --project <project-id>` | Post-completion only: after `evolve session complete` finishes the whole Session (never mid-chain), collect evidence-backed Wiki candidates; prefer the returned `closeout_command`. |',
+    '| `evolve kb harvest conversation <conversation-id> --host <host> --project <project-id>` | Explicit/final closeout only: collect candidates after a standalone task is completely finished (never mid-task or between turns), using its actual conversation ID and host (`codex`, `claude` or `agy`). |',
     '| `evolve kb candidates show <receipt-id> --project <project-id>` | Inspect candidates using `receipt_id` from the harvest result and the same `--project` value. |',
     '| `evolve kb propose <change.json> --evidence <source-ref>` / `evolve kb changes <change-id>` | Stage and inspect a governed Wiki change; neither command publishes it. |',
     '| `evolve kb apply <change-id>` | Publish the inspected Wiki change after authorization, then read back the affected entry and change receipt. |',
@@ -719,8 +770,8 @@ function buildManagedInstructions(skillsLabels: string[], newline: string) {
     '',
     '## Closeout & Self-Evolution',
     '',
-    '- After `evolve session complete`, run its `closeout_command` (`evolve kb harvest session <id> --project <id>`). Do not auto-invoke `workflow-evolve` during task execution; only mention `/workflow-evolve` at closeout when `evolve_reminder` reflects a confirmed Skill or workflow defect.',
-    '- At standalone task closeout, check memory completeness and harvest reusable findings using the actual conversation ID and host as described above; zero eligible Wiki candidates is valid.',
+    '- After `evolve session complete` (never after intermediate Runs), run its `closeout_command` (`evolve kb harvest session <id> --project <id>`). Do not auto-invoke `workflow-evolve` during task execution; only mention `/workflow-evolve` at closeout when `evolve_reminder` reflects a confirmed Skill or workflow defect.',
+    '- During standalone task execution, save lessons via `evolve kb add --kind episodic` instead of calling `kb harvest`; run `kb harvest conversation` only when the user explicitly requests closeout (`/ew-knowledge`) or confirms the entire standalone task is finished (zero eligible Wiki candidates is valid).',
     '- Reserve `workflow-evolve` (`disable-model-invocation: true`) for explicit user requests to modify Skill/harness behavior (`skills/<id>/SKILL.md`), never for ordinary code bugs, failing tests, or routine task execution. Only suggest `/workflow-evolve` when repeated corrections (`>= 2`) or retries clearly expose a Skill/process gap; record the first user correction directly in episodic memory.',
     instructionEndMarker,
   ].join(newline);
@@ -930,6 +981,9 @@ export function installStatus(root: string, options: { scope?: InstallScope; hos
 }
 
 export async function installWorkflow(root: string, options: InstallOptions) {
+  if (options.plugin) {
+    return installPlugins(root, options);
+  }
   const shipped = shippedSkills();
   let scope: InstallScope = options.scope ?? 'project';
   let selectedHosts = options.host === undefined ? undefined : parseInstallHosts(options.host);
@@ -1040,5 +1094,564 @@ export async function installWorkflow(root: string, options: InstallOptions) {
     agents: summarizeAgentResults(targetResults),
     manifest_path: targetResults[0].manifest_path,
     workflows,
+  };
+}
+
+const pluginHosts = ['codex', 'claude', 'agy'] as const;
+type PluginHost = typeof pluginHosts[number];
+type PluginBundleKind = PluginHost | 'universal';
+
+function parsePluginHosts(value: string): PluginHost[] {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'all') return [...pluginHosts];
+  const selected = normalized.split(',').map(item => item.trim()).filter(Boolean);
+  if (!selected.length || selected.some(host => !pluginHosts.some(candidate => candidate === host))) {
+    throw new InputError('Choose codex, claude, agy or all for plugin bundles; use omp plugin install for the OMP extension');
+  }
+  return pluginHosts.filter(host => selected.includes(host));
+}
+
+interface ResolvedPluginTarget {
+  host: PluginHost;
+  pluginDir: string;
+  marketplaceDir?: string;
+  marketplacePath?: string;
+  marketplaceRelPath?: string;
+  instructions?: string;
+  skillsLabel?: string;
+  nextCommands: string[];
+}
+
+function claudeConfigRoot(): string {
+  return process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
+}
+
+function codexConfigRoot(): string {
+  return process.env.CODEX_HOME || join(homedir(), '.codex');
+}
+
+function buildPluginRulesMarkdown(): string {
+  return buildManagedInstructions(['skills/'], '\n')
+    .split('\n')
+    .filter(line => line !== instructionStartMarker && line !== instructionEndMarker)
+    .join('\n') + '\n';
+}
+
+function buildClaudePluginManifest(selectedSkills: string[], version: string) {
+  return {
+    name: PLUGIN_NAME,
+    version,
+    description: PLUGIN_DESCRIPTION,
+    author: { name: PLUGIN_AUTHOR },
+    repository: PLUGIN_REPOSITORY,
+    license: 'MIT',
+    keywords: ['workflow', 'orchestration', 'knowledge-graph', 'memory', 'wiki', 'skills'],
+    skills: selectedSkills.map(name => `./skills/${name}`),
+  };
+}
+
+function buildClaudeMarketplaceManifest(sourcePath: string, version: string) {
+  return {
+    $schema: 'https://anthropic.com/claude-code/marketplace.schema.json',
+    name: PLUGIN_NAME,
+    description: 'Self-Evolving Workflow marketplace for Session/Run orchestration, local code graph, Markdown wiki, episodic memory, and skill evolution.',
+    owner: { name: PLUGIN_AUTHOR },
+    plugins: [
+      {
+        name: PLUGIN_NAME,
+        source: sourcePath,
+        description: PLUGIN_DESCRIPTION,
+        version,
+        category: 'productivity',
+      },
+    ],
+  };
+}
+
+function buildCodexInterface() {
+  return {
+    displayName: PLUGIN_DISPLAY_NAME,
+    shortDescription: PLUGIN_SHORT_DESCRIPTION,
+    longDescription: PLUGIN_LONG_DESCRIPTION,
+    developerName: PLUGIN_AUTHOR,
+    category: 'Developer Tools',
+    capabilities: ['Interactive', 'Read', 'Write'],
+    defaultPrompt: PLUGIN_SUGGESTED_PROMPTS,
+    logo: './assets/logo.svg',
+  };
+}
+
+function buildCodexCompatManifest(version: string) {
+  return {
+    name: PLUGIN_NAME,
+    version,
+    description: PLUGIN_DESCRIPTION,
+    author: { name: PLUGIN_AUTHOR },
+    repository: PLUGIN_REPOSITORY,
+    license: 'MIT',
+    keywords: ['workflow', 'orchestration', 'knowledge-graph', 'memory', 'wiki', 'skills'],
+    skills: './skills/',
+    interface: buildCodexInterface(),
+  };
+}
+
+function buildPortablePluginManifest(version: string) {
+  return {
+    $schema: 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json',
+    name: PLUGIN_NAME,
+    version,
+    description: PLUGIN_DESCRIPTION,
+    author: { name: PLUGIN_AUTHOR },
+    repository: PLUGIN_REPOSITORY,
+    license: 'MIT',
+    keywords: ['workflow', 'orchestration', 'knowledge-graph', 'memory', 'wiki', 'skills'],
+    extensions: {
+      'com.openai': {
+        interface: buildCodexInterface(),
+      },
+    },
+  };
+}
+
+function buildAgyPluginManifest(version: string) {
+  return {
+    name: PLUGIN_NAME,
+    displayName: PLUGIN_DISPLAY_NAME,
+    description: PLUGIN_DESCRIPTION,
+    version,
+    author: PLUGIN_AUTHOR,
+    repository: PLUGIN_REPOSITORY,
+    logo: 'assets/logo.svg',
+    suggestedPrompts: PLUGIN_SUGGESTED_PROMPTS,
+  };
+}
+
+function buildCodexMarketplaceEntry(pluginRelPath: string) {
+  return {
+    name: PLUGIN_NAME,
+    source: { source: 'local', path: pluginRelPath },
+    policy: { installation: 'AVAILABLE', authentication: 'ON_INSTALL' },
+    category: 'Developer Tools',
+  };
+}
+
+function upsertCodexMarketplace(marketplacePath: string, pluginRelPath: string): void {
+  let existing: Record<string, unknown> = {};
+  if (existsSync(marketplacePath)) {
+    try {
+      const parsed = JSON.parse(readFileSync(marketplacePath, 'utf8')) as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        existing = parsed as Record<string, unknown>;
+      }
+    } catch {
+      throw new InputError(`Invalid JSON in ${marketplacePath}`);
+    }
+  }
+  const prevPlugins = Array.isArray(existing.plugins) ? existing.plugins : [];
+  const filtered = prevPlugins.filter(item =>
+    !(item && typeof item === 'object' && (item as { name?: unknown }).name === PLUGIN_NAME));
+  const next = {
+    name: typeof existing.name === 'string' && existing.name.trim() ? existing.name : PLUGIN_NAME,
+    interface: existing.interface && typeof existing.interface === 'object' && !Array.isArray(existing.interface)
+      ? existing.interface
+      : { displayName: PLUGIN_DISPLAY_NAME },
+    ...existing,
+    plugins: [...filtered, buildCodexMarketplaceEntry(pluginRelPath)],
+  };
+  writeJsonAtomic(marketplacePath, next);
+}
+
+function writeStageJson(stageDir: string, relPath: string, value: unknown): void {
+  const dest = join(stageDir, relPath);
+  mkdirSync(dirname(dest), { recursive: true });
+  writeFileSync(dest, JSON.stringify(value, null, 2) + '\n', 'utf8');
+}
+
+function stagePluginContents(stageDir: string, kind: PluginBundleKind, selectedSkills: string[], agents: string[]): void {
+  const version = bundlePackageVersion();
+  mkdirSync(join(stageDir, 'skills'), { recursive: true });
+  for (const name of selectedSkills) {
+    cpSync(join(source, name), join(stageDir, 'skills', name), { recursive: true, force: false, errorOnExist: true });
+  }
+  mkdirSync(join(stageDir, 'agents'), { recursive: true });
+  const agentHost: InstallHost = kind === 'codex' ? 'codex' : 'claude';
+  for (const name of agents) {
+    const rendered = renderAgentForHost(name, agentHost);
+    writeFileSync(join(stageDir, 'agents', rendered.fileName), rendered.content, 'utf8');
+  }
+  mkdirSync(join(stageDir, 'assets'), { recursive: true });
+  const logoSrc = join(assetsSource, 'logo.svg');
+  const logoDest = join(stageDir, 'assets', 'logo.svg');
+  if (existsSync(logoSrc)) cpSync(logoSrc, logoDest);
+  else writeFileSync(logoDest, FALLBACK_LOGO_SVG, 'utf8');
+
+  if (kind === 'claude') {
+    writeStageJson(stageDir, '.claude-plugin/plugin.json', buildClaudePluginManifest(selectedSkills, version));
+    return;
+  }
+  if (kind === 'codex') {
+    writeStageJson(stageDir, 'plugin.json', buildPortablePluginManifest(version));
+    writeStageJson(stageDir, '.codex-plugin/plugin.json', buildCodexCompatManifest(version));
+    return;
+  }
+  if (kind === 'agy') {
+    writeStageJson(stageDir, 'plugin.json', buildAgyPluginManifest(version));
+    mkdirSync(join(stageDir, 'rules'), { recursive: true });
+    writeFileSync(join(stageDir, 'rules', 'AGENTS.md'), buildPluginRulesMarkdown(), 'utf8');
+    return;
+  }
+  writeStageJson(stageDir, '.claude-plugin/plugin.json', buildClaudePluginManifest(selectedSkills, version));
+  writeStageJson(stageDir, '.claude-plugin/marketplace.json', buildClaudeMarketplaceManifest('./', version));
+  writeStageJson(stageDir, '.codex-plugin/plugin.json', buildCodexCompatManifest(version));
+  writeStageJson(stageDir, '.agents/plugins/marketplace.json', {
+    name: PLUGIN_NAME,
+    interface: { displayName: PLUGIN_DISPLAY_NAME },
+    plugins: [buildCodexMarketplaceEntry('./')],
+  });
+  writeStageJson(stageDir, '.antigravity-plugin/plugin.json', buildAgyPluginManifest(version));
+  mkdirSync(join(stageDir, 'rules'), { recursive: true });
+  writeFileSync(join(stageDir, 'rules', 'AGENTS.md'), buildPluginRulesMarkdown(), 'utf8');
+}
+
+function hasPluginManifest(dir: string): boolean {
+  return [
+    join(dir, 'plugin.json'),
+    join(dir, '.claude-plugin', 'plugin.json'),
+    join(dir, '.codex-plugin', 'plugin.json'),
+    join(dir, '.antigravity-plugin', 'plugin.json'),
+  ].some(path => existsSync(path));
+}
+
+function installPluginBundleDir(
+  pluginDir: string,
+  kind: PluginBundleKind,
+  selectedSkills: string[],
+  options: { upgrade?: boolean; force?: boolean; checkExistingDir?: boolean } = {},
+) {
+  const agents = shippedAgents();
+  const parent = dirname(pluginDir);
+  mkdirSync(parent, { recursive: true });
+  const destInfo = lstatSync(pluginDir, { throwIfNoEntry: false });
+  if (destInfo?.isSymbolicLink()) throw new InputError('Use a regular plugin directory: ' + pluginDir);
+  if (destInfo && !destInfo.isDirectory()) throw new InputError('Existing plugin path is not a directory: ' + pluginDir);
+  if (destInfo && options.checkExistingDir && !options.force && !hasPluginManifest(pluginDir)) {
+    const entries = readdirSync(pluginDir);
+    if (entries.length > 0) {
+      throw new InputError('Existing non-empty directory is not an Evolve plugin: ' + pluginDir);
+    }
+  }
+
+  const stage = mkdtempSync(join(parent, '.evolve-plugin-install-'));
+  try {
+    const staged = join(stage, PLUGIN_NAME);
+    stagePluginContents(staged, kind, selectedSkills, agents);
+    const bundleHash = directorySha256(staged);
+    const exists = Boolean(destInfo);
+    const diskHash = exists ? directorySha256(pluginDir) : undefined;
+    const shouldReplace = exists && (options.force || (options.upgrade && diskHash !== bundleHash));
+    let actionStatus: 'installed' | 'upgraded' | 'kept' = 'kept';
+
+    if (!exists || shouldReplace) {
+      if (exists) {
+        const backup = join(stage, `${PLUGIN_NAME}.backup`);
+        renameSync(pluginDir, backup);
+        try {
+          renameSync(staged, pluginDir);
+        } catch (error) {
+          if (!existsSync(pluginDir) && existsSync(backup)) renameSync(backup, pluginDir);
+          throw error;
+        }
+        actionStatus = 'upgraded';
+      } else {
+        renameSync(staged, pluginDir);
+        actionStatus = 'installed';
+      }
+    }
+    return {
+      action_status: actionStatus,
+      version: bundlePackageVersion(),
+      sha256: bundleHash,
+      disk_sha256: actionStatus === 'kept' ? (diskHash ?? bundleHash) : bundleHash,
+      skills: selectedSkills,
+      agents,
+    };
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
+  }
+}
+
+function resolvePluginTarget(root: string, scope: InstallScope, host: PluginHost): ResolvedPluginTarget {
+  if (host === 'agy') {
+    const pluginDir = scope === 'project'
+      ? join(root, '.agents', 'plugins', PLUGIN_NAME)
+      : join(homedir(), '.gemini', 'config', 'plugins', PLUGIN_NAME);
+    return {
+      host,
+      pluginDir,
+      nextCommands: [`agy plugin validate ${JSON.stringify(pluginDir)} --strict`],
+    };
+  }
+  if (host === 'claude') {
+    const claudeDir = claudeConfigRoot();
+    const marketplaceDir = scope === 'project'
+      ? join(root, '.claude', 'plugins')
+      : join(claudeDir, 'plugins', 'local');
+    const pluginDir = join(marketplaceDir, PLUGIN_NAME);
+    return {
+      host,
+      pluginDir,
+      marketplaceDir,
+      marketplacePath: join(marketplaceDir, '.claude-plugin', 'marketplace.json'),
+      marketplaceRelPath: `./${PLUGIN_NAME}`,
+      instructions: scope === 'project' ? join(root, 'CLAUDE.md') : join(claudeDir, 'CLAUDE.md'),
+      skillsLabel: scope === 'project' ? `.claude/plugins/${PLUGIN_NAME}/skills/` : 'skills/',
+      nextCommands: [
+        `claude plugin marketplace add ${JSON.stringify(marketplaceDir)}`,
+        `claude plugin install ${PLUGIN_NAME}@${PLUGIN_NAME} --scope ${scope}`,
+      ],
+    };
+  }
+  const codexDir = codexConfigRoot();
+  if (scope === 'project') {
+    const pluginDir = join(root, '.codex', 'plugins', PLUGIN_NAME);
+    return {
+      host: 'codex',
+      pluginDir,
+      marketplaceDir: root,
+      marketplacePath: join(root, '.agents', 'plugins', 'marketplace.json'),
+      marketplaceRelPath: `./.codex/plugins/${PLUGIN_NAME}`,
+      instructions: join(root, 'AGENTS.md'),
+      skillsLabel: `.codex/plugins/${PLUGIN_NAME}/skills/`,
+      nextCommands: [
+        `codex plugin marketplace add ${JSON.stringify(root)}`,
+        `codex plugin add ${PLUGIN_NAME}@${PLUGIN_NAME}`,
+      ],
+    };
+  }
+  const userBase = homedir();
+  const pluginDir = join(userBase, '.agents', 'plugins', PLUGIN_NAME);
+  return {
+    host: 'codex',
+    pluginDir,
+    marketplaceDir: userBase,
+    marketplacePath: join(userBase, '.agents', 'plugins', 'marketplace.json'),
+    marketplaceRelPath: `./.agents/plugins/${PLUGIN_NAME}`,
+    instructions: join(codexDir, 'AGENTS.md'),
+    skillsLabel: 'skills/',
+    nextCommands: [
+      `codex plugin add ${PLUGIN_NAME}@${PLUGIN_NAME}`,
+    ],
+  };
+}
+
+export function exportPlugins(root: string, outDir: string, options: PluginInstallOptions = {}) {
+  const selectedSkills = selectSkills(shippedSkills(), options.skill ?? []);
+  const destination = resolve(root, outDir);
+  if (!options.host) {
+    const result = installPluginBundleDir(destination, 'universal', selectedSkills, {
+      upgrade: options.upgrade ?? true,
+      force: options.force,
+      checkExistingDir: true,
+    });
+    return {
+      status: 'exported',
+      mode: 'plugin',
+      kind: 'universal',
+      plugin_dir: destination,
+      ...result,
+    };
+  }
+  const selectedHosts = parsePluginHosts(options.host);
+  if (selectedHosts.length === 1) {
+    const host = selectedHosts[0];
+    const result = installPluginBundleDir(destination, host, selectedSkills, {
+      upgrade: options.upgrade ?? true,
+      force: options.force,
+      checkExistingDir: true,
+    });
+    return {
+      status: 'exported',
+      mode: 'plugin',
+      host,
+      plugin_dir: destination,
+      ...result,
+    };
+  }
+  const targets = selectedHosts.map(host => {
+    const dir = join(destination, host);
+    const result = installPluginBundleDir(dir, host, selectedSkills, {
+      upgrade: options.upgrade ?? true,
+      force: options.force,
+      checkExistingDir: true,
+    });
+    return { host, plugin_dir: dir, ...result };
+  });
+  return {
+    status: 'exported',
+    mode: 'plugin',
+    hosts: selectedHosts,
+    out_dir: destination,
+    skills: selectedSkills,
+    targets,
+  };
+}
+
+export async function installPlugins(root: string, options: PluginInstallOptions = {}) {
+  if (options.path) {
+    return exportPlugins(root, options.path, options);
+  }
+  let scope: InstallScope = options.scope ?? 'project';
+  let selectedHosts = options.host === undefined ? undefined : parsePluginHosts(options.host);
+  let requested = options.skill ?? [];
+  const shipped = shippedSkills();
+
+  if (!options.yes) {
+    if (!process.stdin.isTTY || !process.stdout.isTTY) {
+      throw new InputError('Use an interactive terminal or pass --yes');
+    }
+    const ui = createInterface({ input: process.stdin, output: process.stdout });
+    try {
+      process.stdout.write(workflowTitle + ' plugin installer\n\n');
+      if (!options.scope && !selectedHosts) {
+        const answer = (await ui.question('Install plugin to [1] project or [2] user profile [1]? ')).trim();
+        if (answer && answer !== '1' && answer !== '2') throw new InputError('Choose project (1) or user (2)');
+        scope = answer === '2' ? 'user' : 'project';
+      }
+      if (!selectedHosts) {
+        const answer = (await ui.question('Host [1] Codex, [2] Claude, [3] Agy or [4] All [4]? ')).trim() || '4';
+        if (!['1', '2', '3', '4'].includes(answer)) throw new InputError('Choose Codex (1), Claude (2), Agy (3) or All (4)');
+        selectedHosts = answer === '1' ? ['codex'] : answer === '2' ? ['claude'] : answer === '3' ? ['agy'] : [...pluginHosts];
+      }
+      const selected = selectSkills(shipped, requested);
+      const targets = selectedHosts.map(host => resolvePluginTarget(root, scope, host));
+      const destination = targets.map(item => item.pluginDir).join(', ');
+      const verb = options.upgrade ? 'Install/upgrade' : 'Install';
+      const answer = (await ui.question(`${verb} plugin (${selected.length} skills) in ${destination}? [y/N] `)).trim();
+      if (!/^y(?:es)?$/i.test(answer)) return { status: 'cancelled' };
+    } finally {
+      ui.close();
+    }
+  }
+
+  const hostsToInstall = selectedHosts ?? [...pluginHosts];
+  const selectedSkills = selectSkills(shipped, requested);
+  const filePath = manifestPath(root, scope);
+  const manifest = readManifest(filePath);
+  const pluginsRecord: Record<string, PluginManifestRecord> = { ...(manifest.plugins ?? {}) };
+  const now = new Date().toISOString();
+  const instructionGroups = new Map<string, string[]>();
+
+  const targetResults = hostsToInstall.map(host => {
+    const resolved = resolvePluginTarget(root, scope, host);
+    const result = installPluginBundleDir(resolved.pluginDir, host, selectedSkills, {
+      upgrade: options.upgrade,
+      force: options.force,
+    });
+    if (host === 'claude' && resolved.marketplacePath && resolved.marketplaceRelPath) {
+      writeJsonAtomic(resolved.marketplacePath, buildClaudeMarketplaceManifest(resolved.marketplaceRelPath, result.version));
+    } else if (host === 'codex' && resolved.marketplacePath && resolved.marketplaceRelPath) {
+      upsertCodexMarketplace(resolved.marketplacePath, resolved.marketplaceRelPath);
+    }
+    if (resolved.instructions && resolved.skillsLabel) {
+      const labels = instructionGroups.get(resolved.instructions) ?? [];
+      labels.push(resolved.skillsLabel);
+      instructionGroups.set(resolved.instructions, labels);
+    }
+    const key = resolve(resolved.pluginDir);
+    const prev = pluginsRecord[key];
+    pluginsRecord[key] = {
+      scope,
+      host,
+      plugin_dir: resolved.pluginDir,
+      ...(resolved.marketplacePath ? { marketplace_path: resolved.marketplacePath } : {}),
+      ...(resolved.instructions ? { instructions: resolved.instructions } : {}),
+      version: result.version,
+      sha256: result.disk_sha256,
+      skills: result.skills,
+      agents: result.agents,
+      installed_at: prev?.installed_at ?? now,
+      updated_at: now,
+    };
+    return {
+      host,
+      plugin_dir: resolved.pluginDir,
+      ...(resolved.marketplacePath ? { marketplace_path: resolved.marketplacePath } : {}),
+      ...(resolved.instructions ? { instructions: resolved.instructions } : {}),
+      ...result,
+      next_commands: resolved.nextCommands,
+    };
+  });
+
+  for (const [instructionsPath, labels] of instructionGroups) {
+    provisionInstructions(instructionsPath, labels);
+  }
+  manifest.plugins = pluginsRecord;
+  writeManifest(filePath, manifest);
+
+  if (targetResults.length === 1) {
+    return {
+      status: 'installed',
+      mode: 'plugin',
+      scope,
+      manifest_path: filePath,
+      ...targetResults[0],
+    };
+  }
+  return {
+    status: 'installed',
+    mode: 'plugin',
+    scope,
+    hosts: hostsToInstall,
+    manifest_path: filePath,
+    targets: targetResults,
+    next_commands: targetResults.flatMap(item => item.next_commands),
+  };
+}
+
+export function pluginStatus(root: string, options: { scope?: InstallScope; host?: string } = {}) {
+  const scope: InstallScope = options.scope ?? 'project';
+  const filePath = manifestPath(root, scope);
+  const manifest = readManifest(filePath);
+  const selectedHosts = options.host ? parsePluginHosts(options.host) : [...pluginHosts];
+  const selectedSkills = shippedSkills();
+  const agents = shippedAgents();
+
+  const targets = selectedHosts.map(host => {
+    const resolved = resolvePluginTarget(root, scope, host);
+    const record = manifest.plugins?.[resolve(resolved.pluginDir)];
+    const onDisk = hasPluginManifest(resolved.pluginDir);
+    const stage = mkdtempSync(join(tmpdir(), 'evolve-plugin-status-'));
+    let bundleHash = '';
+    try {
+      const staged = join(stage, PLUGIN_NAME);
+      mkdirSync(staged, { recursive: true });
+      stagePluginContents(staged, host, selectedSkills, agents);
+      bundleHash = directorySha256(staged);
+    } finally {
+      rmSync(stage, { recursive: true, force: true });
+    }
+    const diskHash = onDisk ? directorySha256(resolved.pluginDir) : undefined;
+    const status = !onDisk ? 'not_installed' : diskHash === bundleHash ? 'up_to_date' : 'outdated';
+    return {
+      host,
+      plugin_dir: resolved.pluginDir,
+      ...(resolved.marketplacePath ? { marketplace_path: resolved.marketplacePath } : {}),
+      status,
+      on_disk: onDisk,
+      manifest_recorded: Boolean(record),
+      bundle_version: bundlePackageVersion(),
+      ...(record ? { installed_version: record.version } : {}),
+      ...(diskHash ? { installed_sha256: diskHash } : {}),
+      bundle_sha256: bundleHash,
+    };
+  });
+
+  return {
+    schema_version: 'evolve-plugin-status/1.0',
+    scope,
+    manifest_path: filePath,
+    manifest_exists: existsSync(filePath),
+    bundle_version: bundlePackageVersion(),
+    targets,
   };
 }

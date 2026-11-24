@@ -6,6 +6,9 @@ export const wikiCategories = ['coding', 'arch', 'debug', 'test', 'review', 'lea
 export type WikiCategory = typeof wikiCategories[number];
 const repositoryIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+export const wikiConfidenceLevels = ['high', 'medium', 'low', 'contested'] as const;
+export type WikiConfidence = typeof wikiConfidenceLevels[number];
+
 export interface WikiEntryMetadata {
   mode: 'constraint' | 'reference';
   status: 'active' | 'deprecated' | 'needs_review';
@@ -14,6 +17,8 @@ export interface WikiEntryMetadata {
   categories?: WikiCategory[];
   repositories?: string[];
   keywords?: string[];
+  confidence?: WikiConfidence;
+  conflictsWith?: string[];
 }
 
 export interface WikiContext {
@@ -72,8 +77,22 @@ export function readWikiEntryMetadata(path: string, frontmatter: PageFrontmatter
   const keywords = frontmatter.keywords === undefined
     ? structuredLegacy ? splitLegacyKeywords(legacy?.keywords) : undefined
     : stringList(frontmatter.keywords, 'keywords', path).map(keyword => keyword.toLowerCase());
+  const rawConfidence = frontmatter.confidence;
+  let confidence: WikiConfidence | undefined;
+  if (rawConfidence !== undefined) {
+    if (typeof rawConfidence !== 'string' || !wikiConfidenceLevels.includes(rawConfidence as WikiConfidence)) {
+      throw new InputError(`Invalid Wiki entry confidence: ${path}`);
+    }
+    confidence = rawConfidence as WikiConfidence;
+  }
+  const conflictsWith = frontmatter.conflicts_with === undefined
+    ? undefined
+    : stringList(frontmatter.conflicts_with, 'conflicts_with', path);
   return { mode, status, scope, aliases, ...(categories ? { categories } : {}), ...(repositories ? { repositories } : {}),
-    ...(keywords ? { keywords: [...new Set(keywords)] } : {}) };
+    ...(keywords ? { keywords: [...new Set(keywords)] } : {}),
+    ...(confidence ? { confidence } : {}),
+    ...(conflictsWith?.length ? { conflictsWith } : {}),
+  };
 }
 
 export function splitLegacyKeywords(value: unknown): string[] {

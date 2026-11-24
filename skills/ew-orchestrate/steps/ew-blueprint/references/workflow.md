@@ -29,4 +29,4 @@
 
 ## Wrap-up & Seal
 
-Write `{run_dir}/report.md` (`verdict: ready|ready_with_concerns|blocked|failed`, `next` proposing `ew-roadmap` or `ew-plan`) and seal or transition the Run per `evolve skill workflows show session-run` (`--gate phases-complete --gate readiness-passed`). Route reusable architectural decisions after sealing through `ew-knowledge` (`evolve skill workflows show ew-knowledge`).
+Write `{run_dir}/report.md` (`verdict: ready|ready_with_concerns|blocked|failed`, `next` proposing `ew-roadmap` or `ew-plan`) and seal or transition the Run per `evolve skill workflows show session-run` (`--gate phases-complete --gate readiness-passed`). Stage reusable architectural decisions in `report.md` frontmatter or `evolve kb add --kind episodic`; defer `ew-knowledge` closeout/`kb harvest` until after `evolve session complete`.

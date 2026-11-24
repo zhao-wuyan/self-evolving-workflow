@@ -226,8 +226,8 @@ export function findUnharvestedSessions(root: string): UnharvestedSession[] {
   });
 }
 
-export function buildSessionStartNotice(root: string, host: MemoryHost): string | undefined {
-  const reminders = readReminders(root);
+export function buildSessionStartNotice(root: string, host: MemoryHost, currentSession?: string): string | undefined {
+  const reminders = readReminders(root).filter(item => !currentSession || item.session_id !== currentSession);
   const unharvested = findUnharvestedSessions(root);
   const model = memoryModelSettings(root);
   const hasModel = model.provider === 'omp' || Boolean(model.baseUrl && model.model);
@@ -251,15 +251,15 @@ export function buildSessionStartNotice(root: string, host: MemoryHost): string 
     const summary = unharvested.slice(0, 3).map(item =>
       item.has_evolve_signals ? `${item.id} (${item.evolve_signals.join(', ')})` : item.id,
     ).join('; ');
-    lines.push(`- Pending Evolve session closeout (${unharvested.length}): ${summary}. Run \`evolve kb harvest session <id> --project <project-id>\`${unharvested.some(s => s.has_evolve_signals) ? ' and `evolve session review <id>` (`workflow-evolve`)' : ''}.`);
+    lines.push(`- Pending Evolve session closeout (${unharvested.length}): ${summary}. Defer \`evolve kb harvest session <id> --project <project-id>\`${unharvested.some(s => s.has_evolve_signals) ? ' and `evolve session review <id>` (`workflow-evolve`)' : ''} until explicit closeout or after task completion (never mid-task).`);
   }
   if (evolveReminders.length > 0) {
-    lines.push(`- Self-evolution signals (${evolveReminders.length}): ${evolveReminders.map(item => `[${item.session_id}] ${item.summary}`).join(' | ')}. Consider invoking \`workflow-evolve\` or reviewing the affected Skill.`);
+    lines.push(`- Self-evolution signals (${evolveReminders.length}): ${evolveReminders.map(item => `[${item.session_id}] ${item.summary}`).join(' | ')}. Consider invoking \`/workflow-evolve\` explicitly at closeout if a Skill defect is confirmed.`);
   }
   if (closeoutReminders.length > 0) {
     const candidates = closeoutReminders.map(item =>
-      `[${item.session_id}] ${item.summary}. Record via \`${item.recommended_command}\``).join(' | ');
-    lines.push(`- Knowledge closeout candidates (${closeoutReminders.length}): ${candidates}. Or record via \`evolve kb add --kind episodic\`, then run \`evolve kb reminders ack\`.`);
+      `[${item.session_id}] ${item.summary} (\`${item.recommended_command}\`)`).join(' | ');
+    lines.push(`- Knowledge closeout candidates (${closeoutReminders.length}): ${candidates}. Defer \`kb harvest\` until explicit closeout or confirmed final wrap-up (never during task execution); record active lessons via \`evolve kb add --kind episodic\` or dismiss with \`evolve kb reminders ack\`.`);
   }
   if (!hasModel && (reminders.length > 0 || existsSync(evolvePath(root)) || existsSync(join(root, 'wiki')))) {
     lines.push(`- Memory extraction LLM is unconfigured (\`baseUrl\` / \`model\`). Configure once via \`evolve kb config --yes --scope global --host ${host} --base-url <url> --model <model>\` or \`AGENT_MEMORY_LLM_*\`.`);

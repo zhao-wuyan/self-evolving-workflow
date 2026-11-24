@@ -125,4 +125,12 @@ for (const image of ['workflow-overview.png', 'workflow-skills.png', 'impeccable
 }
 
 for (const { path } of JSON.parse(markdown(join(project, 'workflows', 'index.json')))) markdown(join(project, path));
+const deferredCloseoutSteps = [
+  'ew-analyze', 'ew-plan', 'ew-execute', 'ew-verify', 'ew-review',
+  'ew-test', 'ew-auto-test', 'ew-debug', 'ew-grill', 'ew-roadmap', 'ew-blueprint', 'ew-retrospective',
+];
+for (const step of deferredCloseoutSteps) {
+  const wf = markdown(join(orchestrator, 'steps', step, 'references', 'workflow.md'));
+  assert.match(wf, /evolve session complete/, `Step ${step} must defer ew-knowledge/harvest until evolve session complete`);
+}
 console.log(`EW layout passed: goal mode, ${steps.join(', ')} and ew-companion are in the orchestrator package.`);

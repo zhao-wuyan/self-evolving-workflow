@@ -1,7 +1,7 @@
 ---
 name: ew-odyssey-arch
 description: "Odyssey arch mode — error-driven codebase architecture deepening: hotspot survey, shallow-module & seam audit, Design-It-Twice parallel interface exploration, seam deepening, replace-don't-layer tests, and deterministic boundary guardrails"
-argument-hint: "<target|symptom> [--skip-fix] [--skip-generalize] [-y] [-c]"
+argument-hint: "<target|symptom> [--visual] [--skip-fix] [--skip-generalize] [-y] [-c]"
 contract:
   contract_version: 2.1
   produces:

@@ -65,6 +65,8 @@ export function projectKnowledgeHit(hit: KnowledgeRecord, options: CompactHitOpt
     ...(hit.storageKind === 'wiki' ? { title: hit.title } : {}),
     scope: hit.scope,
     ...(hit.status !== 'active' ? { status: hit.status } : {}),
+    ...(hit.confidence === 'contested' || hit.confidence === 'low' ? { confidence: hit.confidence } : {}),
+    ...(hit.conflictsWith?.length ? { conflictsWith: hit.conflictsWith } : {}),
     ...(hit.scene ? { scene: hit.scene } : {}),
     ...(hit.categories?.length ? { categories: hit.categories } : {}),
     ...(nonTrivialScope ? { entryScope: nonTrivialScope } : {}),
@@ -199,6 +201,14 @@ function formatLineText(prefix: string, body: { content?: string; snippet?: stri
   return `${prefix}\n    ${suffix}${text}`;
 }
 
+function conflictBadge(item: Record<string, unknown>): string | undefined {
+  if (item.confidence === 'contested' || (Array.isArray(item.conflictsWith) && item.conflictsWith.length > 0)) {
+    return '[CONTESTED]';
+  }
+  if (item.status === 'needs_review') return '[NEEDS_REVIEW]';
+  return undefined;
+}
+
 export function renderUnifiedContextCompact(
   result: ReturnType<typeof formatUnifiedContextJson>,
 ): string {
@@ -215,7 +225,7 @@ export function renderUnifiedContextCompact(
     lines.push('', `[${label}] (${items.length})`);
     for (const item of items) {
       const marker = item.idx === undefined ? '-' : `[${item.idx}]`;
-      const meta = [item.id, item.scope, item.type, item.scene ? `scene: ${item.scene}` : undefined, item.title]
+      const meta = [conflictBadge(item), item.id, item.scope, item.type, item.scene ? `scene: ${item.scene}` : undefined, item.title]
         .filter(Boolean).join(' | ');
       lines.push(formatLineText(`${marker} ${meta}`, item as { content?: string; snippet?: string; truncated?: boolean }));
     }
@@ -254,7 +264,7 @@ export function renderUnifiedMergedCompact(
   for (const item of result.results as Array<Record<string, unknown>>) {
     const marker = item.idx === undefined ? '-' : `[${item.idx}]`;
     const loc = item.loc ?? (item.path && item.startLine ? `${item.path}:${item.startLine}-${item.endLine}` : undefined);
-    const meta = [item.id, item.kind, item.type, item.scope, loc, item.title].filter(Boolean).join(' | ');
+    const meta = [conflictBadge(item), item.id, item.kind, item.type, item.scope, loc, item.title].filter(Boolean).join(' | ');
     lines.push(formatLineText(`${marker} ${meta}`, item as { content?: string; snippet?: string; truncated?: boolean }));
   }
   return lines.join('\n') + '\n';
@@ -275,7 +285,7 @@ export function renderKbSearchCompact(payload: {
   if (!payload.results.length) return (lines.length ? lines.join('\n') + '\n' : '') + '(no results)\n';
   for (const item of payload.results) {
     const marker = item.idx === undefined ? '-' : `[${item.idx}]`;
-    const meta = [item.id, item.kind, item.type, item.scope, item.title].filter(Boolean).join(' | ');
+    const meta = [conflictBadge(item), item.id, item.kind, item.type, item.scope, item.title].filter(Boolean).join(' | ');
     lines.push(formatLineText(`${marker} ${meta}`, item as { content?: string; snippet?: string; truncated?: boolean }));
   }
   return lines.join('\n') + '\n';
@@ -304,7 +314,7 @@ export function renderKbGetCompact(value: unknown): string {
     ? (value as { results: Array<Record<string, unknown>> }).results
     : [value as Record<string, unknown>];
   return items.map(item => {
-    const header = [item.id, item.kind, item.type, item.scope, item.title].filter(Boolean).join(' | ');
+    const header = [conflictBadge(item), item.id, item.kind, item.type, item.scope, item.title].filter(Boolean).join(' | ');
     const loc = item.path && item.startLine ? `\nlocation: ${item.path}:${item.startLine}-${item.endLine}` : '';
     const sources = Array.isArray(item.sources) && item.sources.length ? `\nsources: ${item.sources.join(', ')}` : '';
     return `[${header}]${loc}${sources}\n${item.content ?? ''}`;

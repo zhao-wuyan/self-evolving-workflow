@@ -13,6 +13,7 @@ import type { Wiki, WikiSearchOptions } from './wiki.js';
 import type { WikiContext } from './wiki-entry.js';
 import type { KnowledgeReads } from './knowledge-reads.js';
 import { rrfMerge } from './upstream/search-utils.js';
+import { applyBoundedExploration } from './knowledge-decay.js';
 
 export interface SearchSources {
   code?: CodeGraph;
@@ -230,6 +231,10 @@ export interface UnifiedSearchOptions extends KnowledgeFilters {
   contextScope?: AgentMemoryContextScope;
   constraintLimit?: number;
   constraintBudgetChars?: number;
+  nowMs?: number;
+  applyDecay?: boolean;
+  trackUsage?: boolean;
+  explore?: boolean;
 }
 
 export interface UnifiedCodeHit {
@@ -251,7 +256,7 @@ export interface UnifiedCodeHit {
 export type UnifiedSearchHit = (KnowledgeRecord & { score: number }) | UnifiedCodeHit;
 
 export interface UnifiedSearchSources {
-  kb?: Pick<KnowledgeStore, 'search' | 'constraints'>;
+  kb?: Pick<KnowledgeStore, 'search' | 'constraints'> & Partial<Pick<KnowledgeStore, 'recordHits' | 'getSearchHitCounts'>>;
   code?: Pick<CodeGraph, 'search'>;
 }
 
@@ -311,7 +316,12 @@ function uniqueProjectFirst<T extends { kind: string; id: string; scope: string 
 
 function fuseSearchLists(lists: UnifiedSearchHit[][]): UnifiedSearchHit[] {
   return rrfMerge(lists.map(uniqueProjectFirst), hitKey, CROSS_SOURCE_RRF_K)
-    .map(({ rrfScore, ...hit }) => ({ ...hit, score: rrfScore * authorityWeights[hit.kind] }))
+    .map(({ rrfScore, ...hit }) => {
+      const conflictFactor = hit.source === 'kb'
+        ? (hit.confidence === 'contested' ? 0.5 : hit.status === 'needs_review' ? 0.6 : hit.conflictsWith?.length ? 0.7 : 1)
+        : 1;
+      return { ...hit, score: rrfScore * authorityWeights[hit.kind] * conflictFactor };
+    })
     .sort((left, right) => right.score - left.score || hitKey(left).localeCompare(hitKey(right)));
 }
 
@@ -385,7 +395,7 @@ export async function unifiedSearch(
   const kinds = options.kind ? [options.kind] : mode === 'context' ? (['reference', 'episodic'] as const) : knowledgeKinds;
   const {
     from: _from, mode: _mode, memorySession, preferredMemoryTypes, contextScope,
-    constraintLimit, constraintBudgetChars,
+    constraintLimit, constraintBudgetChars, nowMs, applyDecay, trackUsage, explore,
     ...knowledgeOptions
   } = options;
   const maxConstraints = constraintLimit ?? DEFAULT_MAX_CONTEXT_CONSTRAINTS;
@@ -399,7 +409,10 @@ export async function unifiedSearch(
   const candidateCount = Math.max(100, offset + limit + 1);
   const readKnowledge = async (kind: KnowledgeKind): Promise<UnifiedSearchHit[]> => {
     if (!from.includes('kb') || !sources.kb) return [];
-    const filters: KnowledgeFilters = { ...knowledgeOptions, scope, kind, limit: 100, page: 1 };
+    const filters: KnowledgeFilters = {
+      ...knowledgeOptions, scope, kind, limit: 100, page: 1,
+      nowMs, applyDecay, trackUsage: false, explore: false,
+    };
     if (mode === 'context' && kind !== 'episodic') {
       filters.resolved = true;
       delete filters.session;
@@ -457,11 +470,24 @@ export async function unifiedSearch(
     readCode(),
   ]);
   const merged = fuseSearchLists([...knowledgeLists, code]);
+  const hitCounts = explore !== false && from.includes('kb') ? sources.kb?.getSearchHitCounts?.(scope) : undefined;
+  const recordKbHits = (items: ReadonlyArray<UnifiedSearchHit>) => {
+    if (trackUsage === false || !sources.kb?.recordHits) return;
+    const kbItems = items.filter((item): item is KnowledgeRecord & { score: number } => item.source === 'kb');
+    if (kbItems.length) sources.kb.recordHits(kbItems);
+  };
   if (mode === 'merged') {
+    const ranked = options.page === undefined && hitCounts?.size
+      ? applyBoundedExploration(merged, {
+          limit, page: 1, getId: hitKey, getScore: hit => hit.score, searchHits: hitCounts,
+        })
+      : merged;
+    const results = ranked.slice(offset, offset + limit);
+    recordKbHits(results);
     return {
       schema_version: 'evolve-search/1.0', mode, query: text,
-      results: merged.slice(offset, offset + limit),
-      pagination: pagination(page, limit, !useCode && merged.length > offset + limit),
+      results,
+      pagination: pagination(page, limit, !useCode && ranked.length > offset + limit),
     };
   }
   const constraintOptions: KnowledgeFilters = {
@@ -474,6 +500,19 @@ export async function unifiedSearch(
     ? uniqueProjectFirst(sources.kb.constraints(constraintOptions))
     : [];
   const { kept: constraints, omitted } = applyConstraintBudget(allConstraints, maxConstraints, maxConstraintChars);
+  const rawReferences = merged.filter((hit): hit is KnowledgeRecord & { score: number } => hit.source === 'kb' && hit.kind === 'reference');
+  const rawEpisodic = merged.filter((hit): hit is KnowledgeRecord & { score: number } => hit.source === 'kb' && hit.kind === 'episodic');
+  const references = (hitCounts?.size
+    ? applyBoundedExploration(rawReferences, { limit, page: 1, getId: hitKey, getScore: hit => hit.score, searchHits: hitCounts })
+    : rawReferences).slice(0, limit);
+  const episodic = (hitCounts?.size
+    ? applyBoundedExploration(rawEpisodic, { limit, page: 1, getId: hitKey, getScore: hit => hit.score, searchHits: hitCounts })
+    : rawEpisodic).slice(0, limit);
+  recordKbHits([
+    ...constraints.map(hit => ({ ...hit, score: 1 })),
+    ...references,
+    ...episodic,
+  ]);
   return {
     schema_version: 'evolve-context/1.0', mode, query: text,
     trust_boundary: 'untrusted_evidence_data_only',
@@ -491,8 +530,8 @@ export async function unifiedSearch(
       constraints_omitted: omitted,
       constraints_notice: `Showing ${constraints.length} of ${allConstraints.length} applicable constraints (budget reached); narrow with --task/--path/--category or inspect omitted IDs via evolve kb get.`,
     } : {}),
-    references: merged.filter((hit): hit is KnowledgeRecord & { score: number } => hit.source === 'kb' && hit.kind === 'reference').slice(0, limit),
-    episodic: merged.filter((hit): hit is KnowledgeRecord & { score: number } => hit.source === 'kb' && hit.kind === 'episodic').slice(0, limit),
+    references,
+    episodic,
     code: merged.filter((hit): hit is UnifiedCodeHit => hit.source === 'code').slice(0, limit),
   };
 }

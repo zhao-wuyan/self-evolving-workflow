@@ -63,7 +63,63 @@ evolve --help
 
 ---
 
-## 3. 安装记录、状态检查与升级清理
+## 3. 作为原生插件安装（Claude Code · Codex · Antigravity）
+
+除直接拷贝松散的 `skills/` 目录外，本仓库也内置三平台插件与 Marketplace 清单，并可通过 `evolve skill install --plugin` 生成或安装隔离的宿主插件包（自动排除非发布测试包 `release-gate`）。
+
+> **同步安装 `evolve` CLI**：Claude Code、Codex 与 Antigravity 的原生 `plugin install` 出于安全边界不会自动执行 `npm install -g` 或 `postinstall`。若先安装宿主插件，请确保全局已安装 CLI：`npm install -g self-evolving-workflow`（引导规则也会提示检查 `evolve --version`）。
+
+### 方式 A：通过 `evolve` CLI 一键安装或导出插件包
+
+```sh
+# 1. 项目级：为全部宿主生成插件包并写入 Marketplace / 引导文件
+evolve skill install --plugin --scope project --host all --yes
+
+# 2. 用户级：安装到全局宿主插件目录（支持 codex / claude / agy / all）
+evolve skill install --plugin --scope user --host all --yes
+
+# 3. 检查与升级已安装插件包
+evolve skill status --plugin --scope project --host all
+evolve skill install --plugin --scope project --host all --upgrade --yes
+
+# 4. 仅导出干净的独立插件包（不修改项目 AGENTS.md / CLAUDE.md）
+evolve skill install --plugin --path ./dist-plugin --yes
+evolve skill install --plugin --host all --path ./dist-plugins --yes
+```
+
+各宿主插件安装位置与后续启用命令如下：
+
+| 宿主 | 范围 | 插件目录 | 清单 / 启用方式 |
+| --- | --- | --- | --- |
+| **Antigravity (AGY)** | 项目级 | `.agents/plugins/self-evolving-workflow/` | 内置 `plugin.json` + `rules/AGENTS.md`，工作区自动发现 |
+| **Antigravity (AGY)** | 用户级 | `~/.gemini/config/plugins/self-evolving-workflow/` | 全局插件目录自动发现，可用 `agy plugin validate` 校验 |
+| **Claude Code** | 项目级 | `.claude/plugins/self-evolving-workflow/` | `.claude/plugins/.claude-plugin/marketplace.json`；可执行 `claude plugin marketplace add ./.claude/plugins` 与 `claude plugin install self-evolving-workflow@self-evolving-workflow --scope project` |
+| **Claude Code** | 用户级 | `~/.claude/plugins/local/self-evolving-workflow/` | `~/.claude/plugins/local/.claude-plugin/marketplace.json`；可执行 `claude plugin marketplace add ~/.claude/plugins/local` 与 `claude plugin install self-evolving-workflow@self-evolving-workflow --scope user` |
+| **Codex** | 项目级 | `.codex/plugins/self-evolving-workflow/` | 自动合并写入 `.agents/plugins/marketplace.json`；可执行 `codex plugin marketplace add .` 与 `codex plugin add self-evolving-workflow@self-evolving-workflow` |
+| **Codex** | 用户级 | `~/.agents/plugins/self-evolving-workflow/` | 自动合并写入 `~/.agents/plugins/marketplace.json`（Codex 隐式发现）；可执行 `codex plugin add self-evolving-workflow@self-evolving-workflow` |
+
+### 方式 B：直接从本仓库或 GitHub 安装
+
+仓库根目录已包含三平台插件与 Marketplace 清单：
+
+- **Claude Code**：`.claude-plugin/marketplace.json` + `.claude-plugin/plugin.json`
+  ```sh
+  claude plugin marketplace add catlog22/self-evolving-workflow
+  claude plugin install self-evolving-workflow@self-evolving-workflow --scope user
+  ```
+- **Codex**：`.agents/plugins/marketplace.json` + `.codex-plugin/plugin.json`
+  ```sh
+  codex plugin marketplace add catlog22/self-evolving-workflow
+  codex plugin add self-evolving-workflow@self-evolving-workflow
+  ```
+- **Antigravity (AGY)**：`.antigravity-plugin/plugin.json` + `rules/AGENTS.md` + `assets/logo.svg`
+  ```sh
+  agy plugin install <path-to-exported-plugin-or-repo>
+  ```
+
+---
+
+## 4. 安装记录、状态检查与升级清理
 
 安装器会自动记录每个目标目录的已安装 Skill 版本与内容摘要（SHA-256）：
 
@@ -111,7 +167,7 @@ evolve skill install --scope project --host agy --force --yes
 
 ---
 
-## 4. 验证安装与首轮 Run
+## 5. 验证安装与首轮 Run
 
 写入一条工作记忆并执行上下文检索，确认 CLI 与 `.evolve/` 存储工作正常：
 

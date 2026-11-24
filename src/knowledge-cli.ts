@@ -49,6 +49,7 @@ import {
   type RawCodeGraphItem,
 } from './search-format.js';
 import { decideSkillRoute } from './skill-route.js';
+import { lintKnowledge, renderKbLintCompact } from './knowledge-lint.js';
 import { learningBloat, readSkillLearnings, skillLearningUsage } from './skill-learnings.js';
 import { evolveSessionReceipt, readEvolveSessions, workflowDbPath } from './workflow-runtime.js';
 import {
@@ -75,6 +76,7 @@ export function knowledgeHelp(invocation: 'evolve' = 'evolve') {
   kb update <id> [text]                     Update a record without replacing omitted fields
   kb delete <id>                           Delete episodic data or propose retiring formal knowledge
   kb init|build|ingest <file>               Initialize, index or ingest knowledge documents
+  kb lint                                  Audit knowledge freshness, conflicts and anchors
   kb import [source]                       Preview legacy knowledge migration (--project, --apply)
   kb propose <change.json>                  Stage a governed knowledge change (--evidence)
   kb changes [change-id]                    Inspect staged changes and application receipts
@@ -483,7 +485,7 @@ async function executeGetTargets(
       continue;
     }
 
-    const peek = kb.get(target.directId, { ...filters, knowledgeReads: undefined });
+    const peek = kb.get(target.directId, { ...filters, knowledgeReads: undefined, trackUsage: false });
     if (!peek) {
       if (filters.kind === undefined && filters.scope !== 'global' && CodeGraph.hasIndex(root)) {
         try {
@@ -910,6 +912,15 @@ export async function runKnowledgeCli(argv: string[], invocation: 'evolve' = 'ev
     if (command === 'kb') {
       if (action === 'init') return print(initWiki(values['wiki-root'] ?? writeRoot, { purpose: values.purpose, schema: values.schema, force: values.force }));
       if (action === 'build') return print(wiki.build());
+      if (action === 'lint') {
+        const kb = await openKnowledge(false);
+        const report = lintKnowledge({ root, scope, layers: kb.getLayers() });
+        if (format === 'compact') {
+          process.stdout.write(renderKbLintCompact(report));
+          return;
+        }
+        return print(report);
+      }
       if (action === 'import') {
         if (args.length > 1) throw new InputError('Usage: evolve kb import [source] [--scope project|global] [--apply]');
         const source = realpathSync(args[0] ?? (scope === 'global' ? join(homedir(), '.maestro') : root));

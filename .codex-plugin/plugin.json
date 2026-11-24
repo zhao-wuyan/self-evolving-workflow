@@ -1,0 +1,37 @@
+{
+  "name": "self-evolving-workflow",
+  "version": "0.5.0",
+  "description": "Self-Evolving Workflow: Session/Run orchestration, local code graph, Markdown wiki, episodic memory, and skill evolution.",
+  "author": {
+    "name": "catlog22"
+  },
+  "repository": "https://github.com/catlog22/self-evolving-workflow",
+  "license": "MIT",
+  "keywords": [
+    "workflow",
+    "orchestration",
+    "knowledge-graph",
+    "memory",
+    "wiki",
+    "skills"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Self-Evolving Workflow",
+    "shortDescription": "Self-evolving agent workflow",
+    "longDescription": "Orchestrate tasks with recoverable Session/Run chains, local code graph, Markdown wiki, episodic memory, and sandboxed skill evolution.",
+    "developerName": "catlog22",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Initialize Evolve workflow for this repository",
+      "Orchestrate a multi-step task with Evolve Session/Run",
+      "Search project wiki, code graph, and episodic memory"
+    ],
+    "logo": "./assets/logo.svg"
+  }
+}

@@ -4,10 +4,55 @@ All notable changes to `self-evolving-workflow` are documented in this file.
 
 ## [Unreleased]
 
+- 同步上游 v0.5.0（含多宿主插件与 Marketplace 文档），保留 OpenViking 集成、个人跨项目经验与 OMP Skills 说明。
+- `kb lint` 兼容异步 OpenViking 知识源；三宿主插件导出与含 OMP 的普通 Skills 安装分别选择宿主，避免误写 Codex 插件目录。
 - 同步上游 v0.3.1，保留 OpenViking 集成与 OMP 原生安装目录支持。
 - OpenViking 远端 Memory 支持 `kb get --pick`、`q-N:idx` 和批量读取，文本输出继续保存远端读取证据。
 - 共用模型客户端接纳上游响应校验，正确报告截断、仅推理输出和服务端错误。
 - OMP 会话中的知识提炼与审阅可复用 `@memory` 角色及认证，使用无工具 SDK 会话；未配置独立 HTTP 模型时自动选择，候选审批流程保持。
+
+## [0.5.0] - 2026-11-24
+
+### Highlights
+
+- **Asymptotic Knowledge Decay, Usage Tracking & Bounded Exploration (`src/knowledge-decay.ts`, `src/memory.ts`, `src/wiki.ts`, `src/kb.ts`, `src/search.ts`)**:
+  - Added bounded exponential time decay (`floor = 0.3`, type-specific half-lives `constraint: 180d`, `reference: 60d`, `episodic: 30d`, quantized to whole days) with logarithmic consumption rejuvenation (`read_count`) so frequently opened knowledge resists forgetting while search exposure (`search_hits`) alone never inflates rank.
+  - Added persistent `memory_usage` and `wiki_usage` tables that track `content_hash`, `content_changed_at`, `search_hits`, and `read_count` across `wiki.build()` rebuilds (cleaning deleted pages on full rebuilds) while keeping explicit `readOnly` queries side-effect-free.
+  - Added `applyBoundedExploration()` for non-paginated top-K search results (`limit >= 4`) to surface under-exposed relevant candidates without breaking multi-page pagination coverage.
+- **Zero-LLM Heuristic Conflict Detection & Governed Resolution (`src/knowledge-conflict.ts`, `src/closeout.ts`, `src/wiki-entry.ts`, `src/wiki-change.ts`, `src/search-format.ts`)**:
+  - Implemented bilingual (`en`/`zh`) normative stance detection (`detectStance()`) and non-ordinal value divergence checks (`classifyKnowledgeRelation()`, `findHeuristicConflicts()`, `findCorpusConflicts()`) with scope-overlap filtering.
+  - Wired heuristic conflict checks into `KnowledgeStore.add()`, `harvestCompletion()` (`compareReferences()`), and `proposeWikiChange()` / `Wiki` ranking (`confidence: 'contested'` and `needs_review` penalties plus `[CONTESTED]` / `[NEEDS_REVIEW]` badges in compact and JSON outputs).
+- **Read-Only Knowledge Audit Command & Closed-Loop Tests (`src/knowledge-lint.ts`, `src/knowledge-cli.ts`, `test/knowledge-lifecycle.test.mjs`, `test/knowledge-closed-loop.test.mjs`)**:
+  - Added `evolve kb lint [--scope project|global|local] [--format compact]` to report freshness distributions, potential conflicts, exact duplicates, `needs_review`/`contested` entries, broken `[[wikilink]]`s, orphan pages, missing repository path anchors, and exposure concentration (`P0`/`P1`/`P2`).
+  - Added unit and 6 end-to-end closed-loop tests covering storage, search, decay, conflict discovery, governed retirement/deletion, and post-cleanup verification.
+
+### Verification
+
+- `npm run build`: passed
+- `npm test` (`node --test test/*.test.mjs`): 138/138 passed
+- `npm run test:ew-layout`: passed
+- `npm run test:release-gate-flow`: passed (`candidate_passed: true`, `rollback: verified`)
+- `npm pack --dry-run`: 347 files, 8.5 MB unpacked
+
+## [0.4.0] - 2026-11-24
+
+### Highlights
+
+- **Multi-Host Plugin & Marketplace Support (`.claude-plugin/`, `.codex-plugin/`, `.antigravity-plugin/`, `.agents/plugins/marketplace.json`)**:
+  - Added repository-level plugin and marketplace manifests plus shared `rules/AGENTS.md` and `assets/logo.svg` for Claude Code, Codex, and Antigravity (`agy`), and included them in `package.json` `files`.
+  - Extended `evolve skill install|upgrade|status` in `src/workflow-install.ts` and `src/workflow-cli.ts` with `--plugin` and `--path <dir>` to install project/user plugins, upsert Codex `.agents/plugins/marketplace.json` while preserving existing entries, emit Claude local marketplace manifests, render host-specific agent definitions (`.toml` for Codex, `.md` for Claude/AGY), and export standalone universal or per-host plugin bundles excluding `release-gate`.
+  - Added project-scoped plugin `skills/` directories to `projectSkillRoots` in `src/workflow-skills.ts` so committed plugin installations bind cleanly to `evolve skill validate` and Runs.
+  - Updated `README.md` and `docs/install.md` with multi-host plugin installation, Marketplace commands, and global CLI (`npm install -g self-evolving-workflow`) guidance.
+- **Deferred Closeout & Session-Scoped Reminder Hygiene (`src/memory-history.ts`, `src/memory-reminders.ts`, `AGENTS.md`, `skills/`)**:
+  - Filtered active session IDs in `buildSessionStartNotice()` and updated hook notices, `AGENTS.md`, `ew-impeccable`, `ew-odyssey`, and `ew-orchestrate` step workflows to defer `kb harvest` until explicit closeout or `evolve session complete`.
+
+### Verification
+
+- `npm run build`: passed
+- `npm test` (`node --test test/*.test.mjs`): 125/125 passed
+- `npm run test:ew-layout`: passed
+- `npm run test:release-gate-flow`: passed (`candidate_passed: true`, `rollback: verified`)
+- `npm pack --dry-run`: 341 files, 8.4 MB unpacked
 
 ## [0.3.1] - 2026-11-23
 

@@ -1,7 +1,7 @@
 ---
 name: ew-verify
 description: Independently verify current-execution requirement coverage, behavioral correctness, and anti-pattern risk against current-plan
-argument-hint: '[scope] [--strict] [--skip-tests] [--skip-antipattern]'
+argument-hint: '[scope] [--strict] [--skip-tests] [--skip-antipattern] [--visual]'
 wiki_categories: [review, coding]
 search_profile:
   wiki: [constraints, references]

@@ -117,7 +117,7 @@ Score each dimension 1-5 (`Feasibility`, `Impact`, `Risk`, `Complexity`, `Depend
 ### Wrap-up
 
 Write `report.md` with frontmatter (`verdict: ready|ready_with_concerns|blocked|failed`, `summary`, `constraints`, `decisions`, `concerns`, `next: [{ command: ew-plan, reason: ..., needs: [current-analysis] }]` — or `next` pointing back to `ew-analyze`/user clarification when `scope_verdict == "unknown"`) and sections (`## Summary`, `## Conclusion/Verdict`, `## Discussion/Retrospective`, `## Artifacts`, `## Handoff/Next`). Use `{{aref:current-analysis#/...}}` instead of copying JSON values.
-Seal or transition the Run per `evolve skill workflows show session-run` with exit gates `--gate exploration-done --gate discussion-round --gate scoring-complete --gate intent-covered` (for `-q` / `--gaps`, seal with explicit quick/gap mode evidence summary in `report.md` when `outputs/findings.json` is valid; use `evolve run transition` for `blocked`/`failed` verdicts rather than `run complete`). Hand off closeout candidate staging afterward to `ew-knowledge` (`evolve skill workflows show ew-knowledge`).
+Seal or transition the Run per `evolve skill workflows show session-run` with exit gates `--gate exploration-done --gate discussion-round --gate scoring-complete --gate intent-covered` (for `-q` / `--gaps`, seal with explicit quick/gap mode evidence summary in `report.md` when `outputs/findings.json` is valid; use `evolve run transition` for `blocked`/`failed` verdicts rather than `run complete`). Stage reusable findings in `report.md` frontmatter (`constraints`/`decisions`) or `evolve kb add --kind episodic`; defer `ew-knowledge` closeout/`kb harvest` until after `evolve session complete` (never run `kb harvest` between chain steps).
 
 ---
 

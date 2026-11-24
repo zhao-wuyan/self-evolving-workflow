@@ -13,6 +13,12 @@ import { tokenizeWiki } from './wiki-tokens.js';
 import { appliesToContext, contextSpecificity, readWikiEntryMetadata, type WikiContext, type WikiEntryMetadata } from './wiki-entry.js';
 import type { WikiIngestOptions } from './wiki-ingest.js';
 import type { KnowledgeReads } from './knowledge-reads.js';
+import {
+  computeDecayFactor,
+  computeUsageContentHash,
+  type KnowledgeDecayKind,
+  type KnowledgeUsageRecord,
+} from './knowledge-decay.js';
 
 interface Page {
   id: string;
@@ -28,6 +34,8 @@ interface PageFile extends Page {
   body: string;
   tags: string[];
   links: string[];
+  updatedAt: string;
+  hasExplicitTimestamp: boolean;
 }
 
 export interface WikiSearchOptions {
@@ -36,11 +44,15 @@ export interface WikiSearchOptions {
   decay?: number;
   includeHistory?: boolean;
   entryMode?: 'constraint' | 'reference';
+  nowMs?: number;
+  applyDecay?: boolean;
+  trackUsage?: boolean;
 }
 
 export interface WikiReadOptions {
   knowledgeReads?: KnowledgeReads;
   fromSearchId?: string;
+  trackUsage?: boolean;
 }
 
 export interface WikiHit extends Page {
@@ -51,6 +63,18 @@ export interface WikiHit extends Page {
 }
 
 export const structuralPages = new Set(['wiki/index.md', 'wiki/schema.md', 'wiki/purpose.md', 'wiki/log.md', 'wiki/overview.md']);
+
+function resolvePageUpdatedAt(frontmatter: Record<string, unknown>, fullPath: string): { updatedAt: string; explicit: boolean } {
+  for (const field of [frontmatter.timestamp, frontmatter.date]) {
+    if (typeof field === 'string' && field.trim()) {
+      const parsed = Date.parse(field.trim());
+      if (Number.isFinite(parsed)) return { updatedAt: new Date(parsed).toISOString(), explicit: true };
+    } else if (field instanceof Date && Number.isFinite(field.getTime())) {
+      return { updatedAt: field.toISOString(), explicit: true };
+    }
+  }
+  return { updatedAt: statSync(fullPath).mtime.toISOString(), explicit: false };
+}
 
 export function readWikiPages(root: string, entriesOnly = false): PageFile[] {
   const pages: PageFile[] = [];
@@ -72,9 +96,11 @@ export function readWikiPages(root: string, entriesOnly = false): PageFile[] {
       const entryMeta = path.startsWith('wiki/entries/') ? readWikiEntryMetadata(path, frontmatter, body) : undefined;
       const rawTags = Array.isArray(frontmatter.tags) ? frontmatter.tags.filter((item): item is string => typeof item === 'string') : [];
       const tags = [...new Set([...rawTags, ...(entryMeta?.keywords ?? []), ...(entryMeta?.categories ?? [])])];
+      const resolvedTime = resolvePageUpdatedAt(frontmatter, full);
       pages.push({
         id: path.slice(5, -3), title, type: frontmatter.type.toLowerCase(), path, snippet,
         sources: readSources(content), body, tags,
+        updatedAt: resolvedTime.updatedAt, hasExplicitTimestamp: resolvedTime.explicit,
         ...(entryMeta ? { entry: entryMeta } : {}),
         links: [...body.matchAll(/\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]/g)].map(link => link[1].trim()),
       });
@@ -264,6 +290,9 @@ export class Wiki {
         content: entry.body,
       });
     }
+    if (entry && options.trackUsage) {
+      this.recordRead(entry.id, entry.body, entry.updatedAt);
+    }
     return entry;
   }
 
@@ -282,7 +311,90 @@ export class Wiki {
         content: entry.body,
       });
     }
+    if (entry && options.trackUsage) {
+      this.recordRead(entry.id, entry.body, entry.updatedAt);
+    }
     return entry;
+  }
+
+  private withUsageWriter(run: (db: DatabaseSync) => void): void {
+    const indexPath = this.readableIndexPath();
+    if (!indexPath) return;
+    let db: DatabaseSync | undefined;
+    try {
+      db = openDb(indexPath);
+      db.exec(`CREATE TABLE IF NOT EXISTS wiki_usage (
+        page_id TEXT PRIMARY KEY,
+        content_hash TEXT NOT NULL,
+        content_changed_at TEXT NOT NULL,
+        search_hits INTEGER NOT NULL DEFAULT 0,
+        read_count INTEGER NOT NULL DEFAULT 0,
+        last_hit_at TEXT,
+        last_read_at TEXT
+      )`);
+      transaction(db, () => run(db!));
+    } catch {
+      // 只读索引或锁冲突时静默降级，不阻塞检索。
+    } finally {
+      db?.close();
+    }
+  }
+
+  recordHits(pageIds: readonly string[], now = new Date().toISOString()): void {
+    const unique = [...new Set(pageIds.filter(Boolean))];
+    if (!unique.length) return;
+    this.withUsageWriter(db => {
+      const insert = db.prepare(`INSERT OR IGNORE INTO wiki_usage (page_id, content_hash, content_changed_at) VALUES (?, '', ?)`);
+      const update = db.prepare('UPDATE wiki_usage SET search_hits = search_hits + 1, last_hit_at = ? WHERE page_id = ?');
+      for (const pageId of unique) {
+        insert.run(pageId, now);
+        update.run(now, pageId);
+      }
+    });
+  }
+
+  recordRead(pageId: string, body = '', updatedAt = new Date().toISOString(), now = new Date().toISOString()): void {
+    if (!pageId) return;
+    this.withUsageWriter(db => {
+      db.prepare(`INSERT OR IGNORE INTO wiki_usage (page_id, content_hash, content_changed_at) VALUES (?, ?, ?)`)
+        .run(pageId, computeUsageContentHash(body), updatedAt);
+      db.prepare('UPDATE wiki_usage SET read_count = read_count + 1, last_read_at = ? WHERE page_id = ?')
+        .run(now, pageId);
+    });
+  }
+
+  getUsage(pageId: string): KnowledgeUsageRecord | undefined {
+    return this.getUsageMap([pageId]).get(pageId);
+  }
+
+  getUsageMap(pageIds?: readonly string[]): Map<string, KnowledgeUsageRecord> {
+    const map = new Map<string, KnowledgeUsageRecord>();
+    const indexPath = this.readableIndexPath();
+    if (!indexPath) return map;
+    const db = openDb(indexPath, true);
+    try {
+      const hasUsage = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'wiki_usage'").get();
+      if (!hasUsage) return map;
+      const where = pageIds?.length ? `WHERE page_id IN (${pageIds.map(() => '?').join(',')})` : '';
+      const rows = db.prepare(`SELECT page_id, content_hash, content_changed_at, search_hits, read_count, last_hit_at, last_read_at
+        FROM wiki_usage ${where}`).all(...(pageIds?.length ? pageIds : [])) as Array<{
+          page_id: string; content_hash: string; content_changed_at: string;
+          search_hits: number; read_count: number; last_hit_at: string | null; last_read_at: string | null;
+        }>;
+      for (const row of rows) {
+        map.set(row.page_id, {
+          contentHash: row.content_hash,
+          contentChangedAt: row.content_changed_at,
+          searchHits: row.search_hits,
+          readCount: row.read_count,
+          ...(row.last_hit_at ? { lastHitAt: row.last_hit_at } : {}),
+          ...(row.last_read_at ? { lastReadAt: row.last_read_at } : {}),
+        });
+      }
+      return map;
+    } finally {
+      db.close();
+    }
   }
 
   references(query: string, context: WikiContext = {}, options: WikiSearchOptions = {}) {
@@ -290,6 +402,7 @@ export class Wiki {
     if (indexPath) {
       const pages = new Map(readWikiPages(this.root, false).map(page => [page.id, page]));
       const db = openDb(indexPath, true);
+      let out: { results: WikiHit[]; links: Array<{ source: string; target: string }> };
       try {
         db.exec('BEGIN');
         const result = searchIndex(db, query, {
@@ -321,7 +434,7 @@ export class Wiki {
           })
           .slice(0, limit);
         const included = new Set(results.map(result => result.id));
-        return {
+        out = {
           results,
           links: result.links.filter(link => {
             const source = link.source.replace(/^wiki\//, '').replace(/\.md$/i, '');
@@ -332,6 +445,10 @@ export class Wiki {
       } finally {
         db.close();
       }
+      if (options.trackUsage && out.results.length > 0) {
+        this.recordHits(out.results.map(item => item.id));
+      }
+      return out;
     }
     const db = openDb(':memory:');
     try {
@@ -375,7 +492,11 @@ export class Wiki {
   }
 
   search(query: string, options: WikiSearchOptions = {}) {
-    return this.searchWithLimit(query, options, false);
+    const result = this.searchWithLimit(query, options, false);
+    if (options.trackUsage && result.results.length > 0) {
+      this.recordHits(result.results.map(item => item.id));
+    }
+    return result;
   }
 
   searchAll(query: string, options: Omit<WikiSearchOptions, 'limit'> = {}) {
@@ -415,6 +536,15 @@ function indexPages(db: DatabaseSync, pages: PageFile[], fingerprint?: string) {
     CREATE TABLE IF NOT EXISTS wiki_state (
       key TEXT PRIMARY KEY, value TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS wiki_usage (
+      page_id TEXT PRIMARY KEY,
+      content_hash TEXT NOT NULL,
+      content_changed_at TEXT NOT NULL,
+      search_hits INTEGER NOT NULL DEFAULT 0,
+      read_count INTEGER NOT NULL DEFAULT 0,
+      last_hit_at TEXT,
+      last_read_at TEXT
+    );
     DELETE FROM page_meta;
     DELETE FROM page_sources;
     DELETE FROM wiki_entries;
@@ -428,6 +558,13 @@ function indexPages(db: DatabaseSync, pages: PageFile[], fingerprint?: string) {
   const source = db.prepare('INSERT INTO page_sources(page_id, sources) VALUES (?, ?)');
   const edge = db.prepare('INSERT INTO graph_edge(source_id, target_id) VALUES (?, ?)');
   const entry = db.prepare('INSERT INTO wiki_entries(page_id, status, metadata) VALUES (?, ?, ?)');
+  const usage = db.prepare(`INSERT INTO wiki_usage (page_id, content_hash, content_changed_at) VALUES (?, ?, ?)
+    ON CONFLICT(page_id) DO UPDATE SET
+      content_hash = excluded.content_hash,
+      content_changed_at = CASE
+        WHEN ? = 1 OR wiki_usage.content_hash != excluded.content_hash THEN excluded.content_changed_at
+        ELSE wiki_usage.content_changed_at
+      END`);
   for (const page of pages) {
     fts.run(
       page.id,
@@ -438,8 +575,17 @@ function indexPages(db: DatabaseSync, pages: PageFile[], fingerprint?: string) {
     meta.run(page.id, page.title, page.type, page.path, page.snippet);
     source.run(page.id, JSON.stringify(page.sources));
     if (page.entry) entry.run(page.id, page.entry.status, JSON.stringify(page.entry));
+    usage.run(page.id, computeUsageContentHash(page.body), page.updatedAt, page.hasExplicitTimestamp ? 1 : 0);
   }
   for (const { source, target } of edges) edge.run(source, target);
+  if (fingerprint !== undefined) {
+    const activeIds = new Set(pages.map(page => page.id));
+    const tracked = db.prepare('SELECT page_id FROM wiki_usage').all() as Array<{ page_id: string }>;
+    const remove = db.prepare('DELETE FROM wiki_usage WHERE page_id = ?');
+    for (const row of tracked) {
+      if (!activeIds.has(row.page_id)) remove.run(row.page_id);
+    }
+  }
   return { pages: pages.length, edges: edges.length };
 }
 
@@ -450,6 +596,8 @@ function searchIndex(db: DatabaseSync, query: string, options: WikiSearchOptions
   const tokens = [...new Set(tokenizeWiki(requireText(query, 'query')))];
   const limit = searchLimit(options.limit);
   const { hop = 0, decay = 0.5 } = options;
+  const shouldDecay = options.applyDecay !== false;
+  const nowMs = options.nowMs ?? Date.now();
   if (!Number.isInteger(hop) || hop < 0 || hop > 5) {
     throw new InputError('hop must be an integer between 0 and 5');
   }
@@ -470,14 +618,14 @@ function searchIndex(db: DatabaseSync, query: string, options: WikiSearchOptions
   const hasTagsColumn = (db.prepare('PRAGMA table_info(wiki_fts)').all() as Array<{ name: string }>)
     .some(column => column.name === 'tags_tok');
   const scoreExpr = hasTagsColumn ? '-bm25(wiki_fts, 0.0, 5.0, 3.0, 1.0)' : '-bm25(wiki_fts, 0.0, 5.0, 1.0)';
-  const candidateLimit = all ? -1 : hop ? limit * 2 : limit;
+  const candidateLimit = all ? -1 : shouldDecay ? Math.max(limit * 3, hop ? limit * 2 : limit) : (hop ? limit * 2 : limit);
   const seedArgs = entries && options.entryMode ? [expression, options.entryMode, candidateLimit] : [expression, candidateLimit];
   const seeds = db.prepare(`
     SELECT page_id AS id, ${scoreExpr} AS score
     FROM wiki_fts WHERE wiki_fts MATCH ? ${visibility} ${modeVisibility} ORDER BY score DESC, page_id LIMIT ?
   `).all(...seedArgs) as Array<{ id: string; score: number }>;
   if (!seeds.length) return { results: [], links: [] };
-  return readHits(db, seeds, all ? Number.MAX_SAFE_INTEGER : limit, hop, decay, Boolean(entries), Boolean(options.includeHistory), options.entryMode, all);
+  return readHits(db, seeds, all ? Number.MAX_SAFE_INTEGER : limit, hop, decay, Boolean(entries), Boolean(options.includeHistory), options.entryMode, all, shouldDecay, nowMs);
 }
 
 function readHits(
@@ -490,8 +638,11 @@ function readHits(
   includeHistory: boolean,
   entryMode?: 'constraint' | 'reference',
   all = false,
+  shouldDecay = true,
+  nowMs = Date.now(),
 ) {
   const hasSources = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='page_sources'").get();
+  const hasUsage = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='wiki_usage'").get();
   const modeVisibility = hasEntries && entryMode
     ? (entryMode === 'reference'
       ? "AND (e.page_id IS NULL OR json_extract(e.metadata, '$.mode') = ?)"
@@ -509,6 +660,12 @@ function readHits(
     ...row, path: row.path.replaceAll('\\', '/'), sources: JSON.parse(row.sources) as string[],
     ...(metadata ? { entry: JSON.parse(metadata) as WikiEntryMetadata } : {}),
   }]));
+  const usageRows = hasUsage
+    ? db.prepare('SELECT page_id, content_changed_at, read_count FROM wiki_usage').all() as Array<{
+        page_id: string; content_changed_at: string; read_count: number;
+      }>
+    : [];
+  const usageById = new Map(usageRows.map(row => [row.page_id, row]));
   const graph = new UndirectedGraph();
   const outgoing = new Map<string, Set<string>>();
   for (const page of pages.values()) {
@@ -524,7 +681,25 @@ function readHits(
   }
   const expanded = graphMultiHopSearch(graph, seeds, { hop, decay, minScore: 0,
     ...(all ? { maxNodes: pages.size } : {}),
-  }).slice(0, limit);
+  })
+    .map(hit => {
+      const page = pages.get(hit.id)!;
+      const decayKind: KnowledgeDecayKind = page.entry?.mode ?? 'reference';
+      const usage = usageById.get(hit.id);
+      const timeFactor = shouldDecay && usage?.content_changed_at
+        ? computeDecayFactor({ kind: decayKind, contentChangedAt: usage.content_changed_at, readCount: usage.read_count, nowMs })
+        : 1;
+      const conflictFactor = page.entry?.confidence === 'contested'
+        ? 0.5
+        : page.entry?.status === 'needs_review'
+          ? 0.6
+          : page.entry?.conflictsWith?.length
+            ? 0.7
+            : 1;
+      return { ...hit, score: hit.score * timeFactor * conflictFactor };
+    })
+    .sort((left, right) => right.score - left.score || left.id.localeCompare(right.id))
+    .slice(0, limit);
   const results: WikiHit[] = expanded.map(({ id, score, hop, via }) => ({
     ...pages.get(id)!, score, hop, via,
     related: graph.neighbors(id).sort((a, b) => graph.degree(b) - graph.degree(a) || a.localeCompare(b)).slice(0, 10)

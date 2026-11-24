@@ -293,7 +293,9 @@ export function handleSessionStartHook(host: MemoryHost, input: unknown, options
   if (candidateCwd !== undefined && !projectContains(root, workspacePath(String(candidateCwd)) ?? candidateCwd)) {
     return {};
   }
-  const notice = buildSessionStartNotice(root, host);
+  const currentSession = readableText(event?.conversationId) ? event.conversationId
+    : readableText(event?.session_id) ? event.session_id : undefined;
+  const notice = buildSessionStartNotice(root, host, currentSession);
   if (!notice) return {};
   if (host === 'agy') {
     return { injectSteps: [{ systemMessage: { systemMessage: notice } }] };

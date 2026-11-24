@@ -1,0 +1,20 @@
+{
+  "name": "self-evolving-workflow",
+  "interface": {
+    "displayName": "Self-Evolving Workflow"
+  },
+  "plugins": [
+    {
+      "name": "self-evolving-workflow",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}
