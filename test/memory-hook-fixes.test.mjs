@@ -398,6 +398,13 @@ console.log(JSON.stringify(['codex', 'agy'].map(host => buildSessionStartNotice(
     assert.ok(notice.includes('evolve kb harvest conversation agy-current --host agy --project <project-id>'), notice);
     assert.ok(notice.includes('evolve kb harvest conversation codex-current --host codex --project <project-id>'), notice);
     assert.ok(notice.includes('evolve kb harvest conversation legacy-agy --host agy --project fixture-project'), notice);
+    assert.match(notice, /Defer `kb harvest` until explicit closeout/i);
     assert.doesNotMatch(notice, /evolve closeout conversation|<session-id>/);
   }
+  const sameConvNotice = await f.joined(f.source(`
+const { buildSessionStartNotice } = await import(modules['memory-reminders']);
+console.log(JSON.stringify(buildSessionStartNotice(root, 'agy', 'agy-current')));
+`));
+  assert.ok(!sameConvNotice.includes('agy-current'), sameConvNotice);
+  assert.ok(sameConvNotice.includes('codex-current'), sameConvNotice);
 });

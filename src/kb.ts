@@ -8,8 +8,10 @@ import type { MemoryReader } from './memory-reader.js';
 import { rrfMerge } from './upstream/search-utils.js';
 import { slugify } from './upstream/slug.js';
 import { applyWikiChange, proposeWikiChange } from './wiki-change.js';
-import { appliesToContext, contextSpecificity, isRepositoryId, isWikiCategory, type WikiContext } from './wiki-entry.js';
+import { appliesToContext, contextSpecificity, isRepositoryId, isWikiCategory, type WikiConfidence, type WikiContext } from './wiki-entry.js';
 import { readWikiPages, Wiki, type WikiHit } from './wiki.js';
+import { applyBoundedExploration } from './knowledge-decay.js';
+import { findHeuristicConflicts } from './knowledge-conflict.js';
 
 export type KnowledgeKind = 'episodic' | 'reference' | 'constraint';
 export type KnowledgeScope = 'project' | 'global' | 'local';
@@ -74,6 +76,10 @@ export interface KnowledgeFilters {
   preferredMemoryTypes?: readonly string[];
   knowledgeReads?: KnowledgeReads;
   fromSearchId?: string;
+  nowMs?: number;
+  applyDecay?: boolean;
+  trackUsage?: boolean;
+  explore?: boolean;
 }
 
 export interface KnowledgeRecord {
@@ -93,6 +99,8 @@ export interface KnowledgeRecord {
   repositories?: string[];
   keywords?: string[];
   entryScope?: string[];
+  confidence?: WikiConfidence;
+  conflictsWith?: string[];
   path?: string;
   type?: string;
   scene?: string;
@@ -186,6 +194,8 @@ function wikiEntryToRecord(
     ...(page.entry?.repositories ? { repositories: page.entry.repositories } : {}),
     ...(page.entry?.keywords ? { keywords: page.entry.keywords } : {}),
     ...(page.entry?.scope ? { entryScope: page.entry.scope } : {}),
+    ...(page.entry?.confidence ? { confidence: page.entry.confidence } : {}),
+    ...(page.entry?.conflictsWith?.length ? { conflictsWith: page.entry.conflictsWith } : {}),
     path: page.path,
     ...(extras?.score !== undefined ? { score: extras.score } : {}),
     ...(extras?.hop !== undefined ? { hop: extras.hop } : {}),
@@ -259,6 +269,10 @@ export class KnowledgeStore {
     this.layers = [...layers];
   }
 
+  getLayers(): readonly KnowledgeLayer[] {
+    return this.layers;
+  }
+
   private layersForScope(scope: KnowledgeScope = 'local'): KnowledgeLayer[] {
     if (scope === 'project') return this.layers.filter(layer => layer.scope === 'project');
     if (scope === 'global') return this.layers.filter(layer => layer.scope === 'global');
@@ -280,19 +294,27 @@ export class KnowledgeStore {
     if (kind === 'episodic') {
       assertNoEpisodicWikiMetadata(input);
       if (!layer.memory) throw new NotFoundError(`Episodic store not configured for scope: ${layer.scope}`);
-      if (input.id && layer.memory.get(input.id)) {
+      if (input.id && layer.memory.get(input.id, { trackUsage: false })) {
         throw new InputError(`Knowledge record already exists: ${input.id}`);
       }
+      const content = requireText(input.content, 'content');
+      const existing = layer.memory.list({ limit: 100, page: 1 }).results;
       const saved = await layer.memory.create({
         id: input.id,
-        content: requireText(input.content, 'content'),
+        content,
         type: input.type,
         scene: input.scene,
         session: input.session,
         priority: input.priority,
         sourceMessageIds: input.sourceMessageIds ?? input.sources,
       });
-      return memoryToRecord(saved, layer.scope);
+      const conflicts = findHeuristicConflicts(
+        { id: saved.id, content },
+        existing.map(item => ({ id: item.id, content: item.content, sources: item.sourceMessageIds })),
+        { maxResults: 5 },
+      ).filter(item => item.relation !== 'overlap');
+      const record = memoryToRecord(saved, layer.scope);
+      return conflicts.length ? { ...record, conflicts } : record;
     }
 
     if (!layer.wiki) throw new NotFoundError(`Wiki store not configured for scope: ${layer.scope}`);
@@ -300,6 +322,16 @@ export class KnowledgeStore {
     const entry = normalizeFormalEntryId(input.id, input.title, content);
     const title = input.title ?? entry.replace(/^entries\//, '').replace(/[-_]+/g, ' ');
     const evidence = options.evidence ?? input.sources ?? [];
+    const activeWiki = layer.wiki.hasWiki()
+      ? readWikiPages(layer.wiki.root).filter(page => page.entry?.status === 'active')
+      : [];
+    const conflicts = findHeuristicConflicts(
+      { id: entry, title, content, scope: input.scope ?? ['project'] },
+      activeWiki.map(page => ({
+        id: page.id, title: page.title, content: page.body, scope: page.entry?.scope, sources: page.sources,
+      })),
+      { maxResults: 5 },
+    ).filter(item => item.relation === 'conflict');
     const draft = {
       operation: 'create' as const,
       entry,
@@ -312,13 +344,15 @@ export class KnowledgeStore {
       body: content,
     };
     const proposed = proposeWikiChange(layer.wiki, draft, evidence);
-    return options.apply ? applyWikiChange(layer.wiki, proposed.id) : proposed;
+    const result = options.apply ? applyWikiChange(layer.wiki, proposed.id) : proposed;
+    return conflicts.length ? { ...result, conflicts } : result;
   }
 
   get(id: string, filters: KnowledgeFilters = {}): KnowledgeRecord | undefined {
     const key = requireText(id, 'record ID');
     const { wikiContext } = validateFilters(filters);
-    const readOpts = { knowledgeReads: filters.knowledgeReads, fromSearchId: filters.fromSearchId };
+    const trackUsage = filters.trackUsage ?? true;
+    const readOpts = { knowledgeReads: filters.knowledgeReads, fromSearchId: filters.fromSearchId, trackUsage };
     const wantWiki = filters.kind !== 'episodic' && filters.storageKind !== 'memory';
     const wantMemory = (filters.kind === undefined || filters.kind === 'episodic') && filters.storageKind !== 'wiki';
 
@@ -326,15 +360,10 @@ export class KnowledgeStore {
       let wikiRecord: KnowledgeRecord | undefined;
       if (wantWiki && layer.wiki?.hasWiki()) {
         if (filters.resolved) {
-          const ref = layer.wiki.getReference(key, wikiContext);
+          const ref = layer.wiki.getReference(key, wikiContext, readOpts);
           if (ref) {
             const mode = ref.entry?.mode ?? 'reference';
             if (!filters.kind || filters.kind === mode) {
-              if (filters.knowledgeReads) {
-                filters.knowledgeReads.recordRead({
-                  kind: 'wiki', id: ref.id, fromSearchId: filters.fromSearchId, content: ref.body,
-                });
-              }
               wikiRecord = wikiEntryToRecord(ref, layer.scope);
             }
           } else {
@@ -346,6 +375,9 @@ export class KnowledgeStore {
                 filters.knowledgeReads.recordRead({
                   kind: 'wiki', id: raw.id, fromSearchId: filters.fromSearchId, content: raw.body,
                 });
+              }
+              if (trackUsage) {
+                layer.wiki.recordRead(raw.id, raw.body, raw.updatedAt);
               }
               wikiRecord = wikiEntryToRecord(raw, layer.scope);
             }
@@ -404,7 +436,7 @@ export class KnowledgeStore {
         ? layer.wiki.getEntry(key)
         : null;
       const existingMemory = (explicitKind === undefined || explicitKind === 'episodic') && layer.memory
-        ? layer.memory.get(key)
+        ? layer.memory.get(key, { trackUsage: false })
         : undefined;
 
       const exactWiki = existingWiki?.id.toLowerCase() === key.toLowerCase();
@@ -461,7 +493,7 @@ export class KnowledgeStore {
         ? layer.wiki.getEntry(key)
         : null;
       const existingMemory = (options.kind === undefined || options.kind === 'episodic') && layer.memory
-        ? layer.memory.get(key)
+        ? layer.memory.get(key, { trackUsage: false })
         : undefined;
 
       const exactWiki = existingWiki?.id.toLowerCase() === key.toLowerCase();
@@ -596,6 +628,40 @@ export class KnowledgeStore {
     };
   }
 
+  recordHits(records: ReadonlyArray<{ scope: KnowledgeLayerScope; storageKind: KnowledgeStorageKind; rawId: string }>): void {
+    for (const layer of this.layers) {
+      const wikiIds = records
+        .filter(item => item.scope === layer.scope && item.storageKind === 'wiki')
+        .map(item => item.rawId);
+      if (wikiIds.length && layer.wiki) layer.wiki.recordHits(wikiIds);
+      const memoryIds = records
+        .filter(item => item.scope === layer.scope && item.storageKind === 'memory')
+        .map(item => item.rawId);
+      if (memoryIds.length && layer.memory) layer.memory.recordHits(memoryIds);
+    }
+  }
+
+  getSearchHitCounts(scope: KnowledgeScope = 'local'): Map<string, number> {
+    const counts = new Map<string, number>();
+    for (const layer of this.layersForScope(scope)) {
+      if (layer.wiki) {
+        const wikiPages = layer.wiki.hasWiki() ? new Map(readWikiPages(layer.wiki.root).map(item => [item.id, item])) : new Map();
+        for (const [id, usage] of layer.wiki.getUsageMap()) {
+          const kind = wikiPages.get(id)?.entry?.mode ?? 'reference';
+          const key = `${kind}:${id}`;
+          if (!counts.has(key)) counts.set(key, usage.searchHits);
+        }
+      }
+      if (layer.memory) {
+        for (const [id, usage] of layer.memory.getUsageMap()) {
+          const key = `episodic:${id}`;
+          if (!counts.has(key)) counts.set(key, usage.searchHits);
+        }
+      }
+    }
+    return counts;
+  }
+
   async search(query: string, filters: KnowledgeFilters = {}) {
     const text = requireText(query, 'query');
     const { limit, page, hop, episodicScene, wikiContext } = validateFilters(filters);
@@ -625,6 +691,9 @@ export class KnowledgeStore {
           hop,
           includeHistory,
           entryMode: filters.kind === 'constraint' ? 'constraint' : filters.kind === 'reference' ? 'reference' : undefined,
+          nowMs: filters.nowMs,
+          applyDecay: filters.applyDecay,
+          trackUsage: false,
         }).results;
         const layerWikiHits: KnowledgeRecord[] = [];
         const hasContextFilters = Boolean(
@@ -693,6 +762,9 @@ export class KnowledgeStore {
             type: filters.type,
             scene: episodicScene,
             session: filters.session,
+            nowMs: filters.nowMs,
+            applyDecay: filters.applyDecay,
+            trackUsage: false,
           });
           for (const hit of batch.results) {
             layerMemHits.push(memoryToRecord(hit, layer.scope, hit.score));
@@ -734,15 +806,39 @@ export class KnowledgeStore {
     const fused = rrfMerge(
       [wikiBuckets, memoryBuckets].filter(bucket => bucket.length > 0),
       item => `${item.kind}:${item.id}`,
-    ).map(({ rrfScore, ...item }) => ({
-      ...item,
-      score: rrfScore * authorityWeights[item.kind],
-    })).sort((left, right) =>
+    ).map(({ rrfScore, ...item }) => {
+      const conflictFactor = item.confidence === 'contested'
+        ? 0.5
+        : item.status === 'needs_review'
+          ? 0.6
+          : item.conflictsWith?.length
+            ? 0.7
+            : 1;
+      return {
+        ...item,
+        score: rrfScore * authorityWeights[item.kind] * conflictFactor,
+      };
+    }).sort((left, right) =>
       right.score - left.score || `${left.kind}:${left.id}`.localeCompare(`${right.kind}:${right.id}`));
 
+    const ranked = filters.explore !== false && filters.page === undefined
+      ? applyBoundedExploration(fused, {
+          limit,
+          page: 1,
+          getId: item => `${item.kind}:${item.id}`,
+          getScore: item => item.score,
+          searchHits: this.getSearchHitCounts(filters.scope ?? 'local'),
+        })
+      : fused;
+
+    const results = ranked.slice(offset, offset + limit);
+    if (filters.trackUsage !== false && results.length > 0) {
+      this.recordHits(results);
+    }
+
     return {
-      results: fused.slice(offset, offset + limit),
-      pagination: pagination(page, limit, fused.length > offset + limit),
+      results,
+      pagination: pagination(page, limit, ranked.length > offset + limit),
     };
   }
 }

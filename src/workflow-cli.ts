@@ -16,7 +16,10 @@ import {
 import { WorkflowStore, workflowId, type Mutation, type WorkflowStep } from './workflow-runtime.js';
 import { bindWorkflowSkill, commandNames, isProjectSkillEntry, workflowBlob, workflowHeader, workflowPath, workflowStrings } from './workflow-skills.js';
 import { wikiLookupScope } from './workflow-knowledge.js';
-import { installSkills, installStatus, installWorkflow, workflowDocument, workflowDocuments } from './workflow-install.js';
+import {
+  exportPlugins, installPlugins, installSkills, installStatus, installWorkflow,
+  pluginStatus, workflowDocument, workflowDocuments,
+} from './workflow-install.js';
 import { runOpenVikingCli, openVikingHelp } from './openviking/cli.js';
 import { readProject } from './openviking/config.js';
 import { isUnavailable, OpenVikingClient } from './openviking/client.js';
@@ -41,7 +44,7 @@ const options = {
   worktree: string, isolate: bool, 'keep-worktree': bool, 'remove-worktree': bool, 'agent-session': string,
   stream: bool, timeout: string, force: bool, 'delete-branch': bool, branch: string, 'base-ref': string,
   project: string, global: bool, apply: bool, 'knowhow-only': bool,
-  scope: string, host: string, skill: strings, yes: bool, upgrade: bool, prune: bool,
+  scope: string, host: string, skill: strings, yes: bool, upgrade: bool, prune: bool, plugin: bool,
   commit: string, relation: string, related: string, approval: string, limit: string,
 } as const;
 
@@ -56,8 +59,9 @@ const usage = [
   'evolve run artifact-read <run> <alias> --session <id> [--scope <Wiki scope JSON>]',
   'evolve run decide <decision-id> --verdict proceed|fix|escalate --summary <text> [--confidence <0-100>] [--target-step <step-id>] [--evidence <ref>] --session <id> [--actor <id>]',
   'evolve run task controller|add|update|delete|list --session <id> --run <id>',
-  'evolve skill install|upgrade [<package>...] [--scope project|user] [--host codex|claude|agy|omp|all] [--yes]',
-  'evolve skill status|validate|workflows [show <id>]',
+  'evolve skill install|upgrade [<package>...] [--plugin] [--scope project|user] [--host codex|claude|agy|omp|all] [--path <dir>] [--yes]',
+  'evolve skill status [--plugin] [--scope project|user] [--host codex|claude|agy|omp|all]',
+  'evolve skill validate|workflows [show <id>]',
   'evolve agent exec <prompt> --to codex|agy|claude|omp --mode analysis|write [--timeout <ms>]',
   'evolve agent providers|list|get|create|send|delete|worktree [options]',
   'evolve experience enable|disable|status|pending|review|publish|search|get',
@@ -409,15 +413,32 @@ async function runWorkflowCli(argv: string[]) {
   };
   if (group === 'skill') {
     if (action === 'install' || action === 'upgrade') {
+      const upgrade = action === 'upgrade' || Boolean(values.upgrade);
+      if (values.plugin) {
+        const skill = [...(values.skill ?? []), ...args];
+        if (values.path) {
+          return print(exportPlugins(root, values.path, {
+            host: values.host, skill, upgrade, force: Boolean(values.force),
+          }));
+        }
+        return print(await installPlugins(root, {
+          scope: installScope(), host: values.host, skill, yes: values.yes,
+          upgrade, force: Boolean(values.force),
+        }));
+      }
       if (args.length) return print(installSkills(root, args, values.host, {
-        upgrade: action === 'upgrade' || Boolean(values.upgrade), prune: Boolean(values.prune), force: Boolean(values.force),
+        upgrade, prune: Boolean(values.prune), force: Boolean(values.force),
       }));
       return print(await installWorkflow(root, {
         scope: installScope(), host: values.host, skill: values.skill, yes: values.yes,
-        upgrade: action === 'upgrade' || Boolean(values.upgrade), prune: Boolean(values.prune), force: Boolean(values.force),
+        upgrade, prune: Boolean(values.prune), force: Boolean(values.force),
       }));
     }
-    if (action === 'status' && !args.length) return print(installStatus(root, { scope: installScope(), host: values.host }));
+    if (action === 'status' && !args.length) {
+      return print(values.plugin
+        ? pluginStatus(root, { scope: installScope(), host: values.host })
+        : installStatus(root, { scope: installScope(), host: values.host }));
+    }
     if (action === 'validate') return print(bindWorkflowSkill(root, requireText(args[0], 'Skill command')));
     if (action === 'inspect') {
       const entry = workflowPath(requireText(args[0], 'Skill entry'));

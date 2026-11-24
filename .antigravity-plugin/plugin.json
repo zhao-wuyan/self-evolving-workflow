@@ -1,0 +1,14 @@
+{
+  "name": "self-evolving-workflow",
+  "displayName": "Self-Evolving Workflow",
+  "description": "Session/Run orchestration with local code graph, Markdown wiki, episodic memory, and sandboxed skill evolution.",
+  "version": "0.5.0",
+  "author": "catlog22",
+  "repository": "https://github.com/catlog22/self-evolving-workflow",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Initialize Evolve workflow for this repository",
+    "Orchestrate a multi-step task with Evolve Session/Run",
+    "Search project wiki, code graph, and episodic memory"
+  ]
+}

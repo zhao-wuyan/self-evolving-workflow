@@ -5,7 +5,8 @@ import { buildCloseoutHarvestPrompt, buildWikiRelationPrompt } from './agent-mem
 import { InputError, NotFoundError, openDb, requireText, transaction } from './common.js';
 import { extractMemoryInputs, validateConversationMessages, type ConversationMessage } from './memory.js';
 import { chatWithFormatRetry, extractJsonArray, type LlmClient } from './upstream/llm.js';
-import type { Wiki } from './wiki.js';
+import { readWikiPages, type Wiki } from './wiki.js';
+import { findHeuristicConflicts } from './knowledge-conflict.js';
 import { parseFrontmatter, readSources } from './upstream/frontmatter.js';
 import { unionSources } from './upstream/merge.js';
 import { readCompletionTranscriptRefs, readTranscriptSnapshots } from './transcript-evidence.js';
@@ -35,35 +36,62 @@ interface Candidate {
 
 async function compareReferences(wiki: Wiki, content: string, model: () => LlmClient): Promise<Candidate['related_entries']> {
   if (!wiki.readableIndexPath() && !wiki.hasWiki()) return undefined;
-  const matches = wiki.search(content, { limit: 5 }).results
+  const activePages = wiki.hasWiki()
+    ? readWikiPages(wiki.root).filter(page => page.entry?.status === 'active')
+    : [];
+  const heuristic = findHeuristicConflicts(
+    { content },
+    activePages.map(page => ({
+      id: page.id,
+      title: page.title,
+      content: page.body,
+      scope: page.entry?.scope,
+      sources: page.sources,
+    })),
+    { maxResults: 5 },
+  ).filter(item => item.relation !== 'same_content');
+
+  const matches = wiki.search(content, { limit: 5, trackUsage: false }).results
     .map(hit => wiki.getEntry(hit.id))
     .filter((entry): entry is NonNullable<typeof entry> => entry?.entry?.status === 'active');
-  if (!matches.length) return undefined;
-  const promptSpec = buildWikiRelationPrompt();
-  const parsed = await chatWithFormatRetry(
-    model(),
-    {
-      system: promptSpec.system,
-      prompt: JSON.stringify({ content, entries: matches.map(entry => ({
-        id: entry.id, body: entry.body, scope: entry.entry?.scope,
-      })) }),
-      label: promptSpec.label,
-    },
-    raw => {
-      const array = extractJsonArray(raw, ['relations', 'items', 'results', 'data']);
-      if (!array) throw new InputError('Wiki comparison did not return a JSON array');
-      return array;
-    },
-    'Return ONLY a JSON array of {"id":"supplied entry ID","relation":"conflict|overlap"} or [].',
-  );
-  const known = new Map(matches.map(entry => [entry.id, entry]));
+
   const related: NonNullable<Candidate['related_entries']> = [];
-  for (const value of parsed) {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
-    const { id, relation } = value as Record<string, unknown>;
-    if (typeof id !== 'string' || (relation !== 'conflict' && relation !== 'overlap')) continue;
-    const entry = known.get(id);
-    if (entry && !related.some(item => item.id === id)) related.push({ id, relation, sources: entry.sources });
+  if (matches.length) {
+    const promptSpec = buildWikiRelationPrompt();
+    const parsed = await chatWithFormatRetry(
+      model(),
+      {
+        system: promptSpec.system,
+        prompt: JSON.stringify({ content, entries: matches.map(entry => ({
+          id: entry.id, body: entry.body, scope: entry.entry?.scope,
+        })) }),
+        label: promptSpec.label,
+      },
+      raw => {
+        const array = extractJsonArray(raw, ['relations', 'items', 'results', 'data']);
+        if (!array) throw new InputError('Wiki comparison did not return a JSON array');
+        return array;
+      },
+      'Return ONLY a JSON array of {"id":"supplied entry ID","relation":"conflict|overlap"} or [].',
+    );
+    const known = new Map(matches.map(entry => [entry.id, entry]));
+    for (const value of parsed) {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+      const { id, relation } = value as Record<string, unknown>;
+      if (typeof id !== 'string' || (relation !== 'conflict' && relation !== 'overlap')) continue;
+      const entry = known.get(id);
+      if (entry && !related.some(item => item.id === id)) related.push({ id, relation, sources: entry.sources });
+    }
+  }
+
+  for (const item of heuristic) {
+    if (!related.some(existing => existing.id === item.id)) {
+      related.push({
+        id: item.id,
+        relation: item.relation === 'conflict' ? 'conflict' : 'overlap',
+        sources: item.sources ?? [],
+      });
+    }
   }
   return related.length ? related : undefined;
 }

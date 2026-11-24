@@ -69,5 +69,37 @@ export {
   type KnowledgeSearchRecord,
   type KnowledgeSearchSource,
 } from './knowledge-reads.js';
+export {
+  DEFAULT_DECAY_CONFIG,
+  applyBoundedExploration,
+  computeDecayFactor,
+  computeUsageConcentration,
+  computeUsageContentHash,
+  isStaleDecayFactor,
+  type KnowledgeDecayConfig,
+  type KnowledgeDecayKind,
+  type KnowledgeUsageRecord,
+  type UsageConcentration,
+} from './knowledge-decay.js';
+export {
+  classifyKnowledgeRelation,
+  detectStance,
+  findCorpusConflicts,
+  findHeuristicConflicts,
+  scopesOverlap,
+  textSimilarity,
+  type ConflictMatch,
+  type ConflictReason,
+  type ConflictRelation,
+  type ConflictTarget,
+  type KnowledgeStance,
+} from './knowledge-conflict.js';
+export {
+  lintKnowledge,
+  renderKbLintCompact,
+  type KnowledgeLintFinding,
+  type KnowledgeLintReport,
+  type LintSeverity,
+} from './knowledge-lint.js';
 export { InputError, NotFoundError } from './common.js';
 export type { LlmClient, ChatParams } from './upstream/llm.js';

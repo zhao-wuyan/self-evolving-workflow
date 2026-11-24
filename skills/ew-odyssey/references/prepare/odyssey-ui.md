@@ -1,7 +1,7 @@
 ---
 name: ew-odyssey-ui
 description: "6-dimension visual experience audit with divergent exploration — survey design context, audit visual/interaction/a11y/responsive/motion/edge dimensions, diverge for polish+delight, fix, verify,"
-argument-hint: "<target> [--dimensions <list>] [--fix-threshold <severity>] [--skip-fix] [--skip-generalize] [-y] [-c]"
+argument-hint: "<target> [--dimensions <list>] [--fix-threshold <severity>] [--visual] [--skip-fix] [--skip-generalize] [-y] [-c]"
 contract:
   contract_version: 2.1
   produces:

@@ -690,3 +690,110 @@ test('Streamlined CLI omits actor/revisions/skill-read, cleans empty cancelled r
     f.cleanup();
   }
 });
+
+test('Plugin install and export create host-valid bundles for claude, codex, and agy', () => {
+  const mkRepo = prefix => {
+    const f = fixture(prefix);
+    f.git('rm', '-rfq', 'skills');
+    f.git('commit', '-qm', 'Remove root skills directory');
+    return f;
+  };
+
+  const f = mkRepo('evolve-plugin-install-');
+  try {
+    // Preserve pre-existing entries in .agents/plugins/marketplace.json for Codex.
+    f.write('.agents/plugins/marketplace.json', JSON.stringify({
+      name: 'team-marketplace',
+      interface: { displayName: 'Team Marketplace' },
+      plugins: [{ name: 'existing-plugin', source: { source: 'local', path: './plugins/existing' } }],
+    }, null, 2));
+    assert.throws(() => f.evolve('skill', 'install', '--plugin', '--host', 'omp', '--yes'), /omp plugin install/);
+    assert.throws(() => f.evolve('skill', 'status', '--plugin', '--host', 'omp'), /omp plugin install/);
+
+    const installed = f.evolve('skill', 'install', '--plugin', '--scope', 'project', '--host', 'all', '--yes');
+    assert.equal(installed.mode, 'plugin');
+    assert.deepEqual(installed.hosts, ['codex', 'claude', 'agy']);
+    assert.equal(installed.targets.length, 3);
+
+    // AGY plugin layout
+    const agyDir = join(f.root, '.agents', 'plugins', 'self-evolving-workflow');
+    const agyManifest = JSON.parse(readFileSync(join(agyDir, 'plugin.json'), 'utf8'));
+    assert.equal(agyManifest.name, 'self-evolving-workflow');
+    assert.equal(agyManifest.logo, 'assets/logo.svg');
+    assert.ok(existsSync(join(agyDir, 'assets', 'logo.svg')));
+    assert.ok(existsSync(join(agyDir, 'rules', 'AGENTS.md')));
+    assert.ok(existsSync(join(agyDir, 'skills', 'ew-orchestrate', 'SKILL.md')));
+    assert.equal(existsSync(join(agyDir, 'skills', 'release-gate')), false);
+    assert.ok(existsSync(join(agyDir, 'agents', 'workflow-planner.md')));
+
+    // Claude plugin & marketplace layout
+    const claudeDir = join(f.root, '.claude', 'plugins', 'self-evolving-workflow');
+    const claudeManifest = JSON.parse(readFileSync(join(claudeDir, '.claude-plugin', 'plugin.json'), 'utf8'));
+    assert.equal(claudeManifest.name, 'self-evolving-workflow');
+    assert.ok(claudeManifest.skills.includes('./skills/ew-orchestrate'));
+    assert.equal(claudeManifest.skills.includes('./skills/release-gate'), false);
+    const claudeMarket = JSON.parse(readFileSync(join(f.root, '.claude', 'plugins', '.claude-plugin', 'marketplace.json'), 'utf8'));
+    assert.equal(claudeMarket.plugins[0].source, './self-evolving-workflow');
+    assert.match(readFileSync(join(f.root, 'CLAUDE.md'), 'utf8'), /npm install -g self-evolving-workflow/);
+
+    // Codex plugin & marketplace layout
+    const codexDir = join(f.root, '.codex', 'plugins', 'self-evolving-workflow');
+    const codexPortable = JSON.parse(readFileSync(join(codexDir, 'plugin.json'), 'utf8'));
+    assert.equal(codexPortable.$schema, 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json');
+    assert.ok(codexPortable.extensions['com.openai'].interface.shortDescription.length <= 30);
+    assert.ok(existsSync(join(codexDir, '.codex-plugin', 'plugin.json')));
+    assert.ok(existsSync(join(codexDir, 'agents', 'workflow-planner.toml')));
+    const codexMarket = JSON.parse(readFileSync(join(f.root, '.agents', 'plugins', 'marketplace.json'), 'utf8'));
+    assert.equal(codexMarket.name, 'team-marketplace');
+    assert.deepEqual(codexMarket.plugins.map(item => item.name), ['existing-plugin', 'self-evolving-workflow']);
+    assert.equal(codexMarket.plugins[1].source.path, './.codex/plugins/self-evolving-workflow');
+    assert.match(readFileSync(join(f.root, 'AGENTS.md'), 'utf8'), /\.codex\/plugins\/self-evolving-workflow\/skills\//);
+
+    // Status & upgrade lifecycle
+    const freshStatus = f.evolve('skill', 'status', '--plugin', '--scope', 'project', '--host', 'all');
+    assert.equal(freshStatus.schema_version, 'evolve-plugin-status/1.0');
+    assert.ok(freshStatus.targets.every(item => item.status === 'up_to_date'));
+    writeFileSync(join(agyDir, 'rules', 'AGENTS.md'), 'stale\n', 'utf8');
+    const staleStatus = f.evolve('skill', 'status', '--plugin', '--scope', 'project', '--host', 'agy');
+    assert.equal(staleStatus.targets[0].status, 'outdated');
+    const upgraded = f.evolve('skill', 'install', '--plugin', '--scope', 'project', '--host', 'agy', '--upgrade', '--yes');
+    assert.equal(upgraded.action_status, 'upgraded');
+    assert.equal(f.evolve('skill', 'status', '--plugin', '--scope', 'project', '--host', 'agy').targets[0].status, 'up_to_date');
+
+    // Committed project plugin binds runs cleanly
+    f.git('add', '.agents', '.claude', '.codex', 'AGENTS.md', 'CLAUDE.md');
+    f.git('commit', '-qm', 'Commit plugin installations');
+    assert.equal(f.evolve('skill', 'validate', 'ew-analyze').package_path, '.agents/plugins/self-evolving-workflow/skills/ew-orchestrate/steps/ew-analyze');
+
+    // Export standalone universal & host-specific bundles without touching project files
+    const exportedUniversal = f.evolve('skill', 'install', '--plugin', '--path', 'out-universal', '--yes');
+    assert.equal(exportedUniversal.kind, 'universal');
+    assert.ok(existsSync(join(f.root, 'out-universal', '.claude-plugin', 'plugin.json')));
+    assert.ok(existsSync(join(f.root, 'out-universal', '.claude-plugin', 'marketplace.json')));
+    assert.ok(existsSync(join(f.root, 'out-universal', '.codex-plugin', 'plugin.json')));
+    assert.ok(existsSync(join(f.root, 'out-universal', '.agents', 'plugins', 'marketplace.json')));
+    assert.ok(existsSync(join(f.root, 'out-universal', '.antigravity-plugin', 'plugin.json')));
+    assert.ok(existsSync(join(f.root, 'out-universal', 'rules', 'AGENTS.md')));
+    f.write('non-plugin/file.txt', 'keep');
+    assert.throws(() => f.evolve('skill', 'install', '--plugin', '--path', 'non-plugin', '--yes'), /not an Evolve plugin/);
+
+    // User-scope plugin installation in isolated HOME
+    const home2 = join(f.root, 'user-home');
+    mkdirSync(home2, { recursive: true });
+    const userInstalled = JSON.parse(execFileSync(process.execPath, [
+      cli, 'skill', 'install', '--plugin', '--scope', 'user', '--host', 'all', '--yes',
+    ], {
+      cwd: f.root,
+      env: { ...f.env, HOME: home2, USERPROFILE: home2, CODEX_HOME: join(home2, '.codex'), CLAUDE_CONFIG_DIR: join(home2, '.claude') },
+      encoding: 'utf8',
+      windowsHide: true,
+    }));
+    assert.equal(userInstalled.scope, 'user');
+    assert.ok(existsSync(join(home2, '.gemini', 'config', 'plugins', 'self-evolving-workflow', 'plugin.json')));
+    assert.ok(existsSync(join(home2, '.claude', 'plugins', 'local', 'self-evolving-workflow', '.claude-plugin', 'plugin.json')));
+    assert.ok(existsSync(join(home2, '.agents', 'plugins', 'self-evolving-workflow', '.codex-plugin', 'plugin.json')));
+    assert.ok(existsSync(join(home2, '.agents', 'plugins', 'marketplace.json')));
+  } finally {
+    f.cleanup();
+  }
+});

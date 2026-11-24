@@ -13,6 +13,11 @@ import { chatWithFormatRetry, extractJsonArray, type LlmClient } from './upstrea
 import { rrfMerge } from './upstream/search-utils.js';
 import { bm25RankToScore, buildFtsQuery, tokenizeForFts } from './upstream/tokenize.js';
 import type { KnowledgeReads } from './knowledge-reads.js';
+import {
+  computeDecayFactor,
+  computeUsageContentHash,
+  type KnowledgeUsageRecord,
+} from './knowledge-decay.js';
 
 export type { MemorySource } from './memory-evidence.js';
 
@@ -72,6 +77,9 @@ export interface MemorySearchOptions {
   scene?: string;
   session?: string;
   embedding?: ArrayLike<number>;
+  nowMs?: number;
+  applyDecay?: boolean;
+  trackUsage?: boolean;
 }
 
 export type MemoryListOptions = Pick<MemorySearchOptions, 'limit' | 'page' | 'type' | 'scene' | 'session'>;
@@ -133,16 +141,19 @@ export function defaultMemoryDbPath(root: string): string {
 
 export class MemoryStore {
   private readonly db?: DatabaseSync;
+  private readonly filePath: string;
   private readonly namespace: string;
   private readonly embed?: MemoryStoreOptions['embed'];
   private readonly readOnly: boolean;
   private tableNames?: Set<string>;
+  private closed = false;
 
   constructor(path: string, options: MemoryStoreOptions = {}) {
     this.namespace = requireText(options.namespace ?? 'default', 'namespace');
     this.embed = options.embed;
     this.readOnly = Boolean(options.readOnly);
     const file = path === ':memory:' ? path : resolve(path);
+    this.filePath = file;
     if (this.readOnly && file !== ':memory:') {
       if (!existsSync(file)) return;
       this.db = openDb(file, true);
@@ -205,6 +216,15 @@ export class MemoryStore {
           reason TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS memory_history_record ON memory_history (namespace, id, key);
+        CREATE TABLE IF NOT EXISTS memory_usage (
+          memory_key INTEGER PRIMARY KEY REFERENCES memory_records(key) ON DELETE CASCADE,
+          content_hash TEXT NOT NULL,
+          content_changed_at TEXT NOT NULL,
+          search_hits INTEGER NOT NULL DEFAULT 0,
+          read_count INTEGER NOT NULL DEFAULT 0,
+          last_hit_at TEXT,
+          last_read_at TEXT
+        );
       `);
     } catch (error) {
       this.db.close();
@@ -228,6 +248,8 @@ export class MemoryStore {
   }
 
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     this.db?.close();
   }
 
@@ -325,8 +347,8 @@ export class MemoryStore {
       `).get(this.namespace, input.id, input.content, input.type, input.scene, input.session,
         input.priority, input.sourceIds, now, now,
         input.vector && JSON.stringify(input.vector), input.vector?.length ?? null);
-      const key = row?.key ?? (input.evidence && db.prepare('SELECT key FROM memory_records WHERE namespace = ? AND id = ?')
-        .get(this.namespace, input.id)?.key);
+      const key = row?.key ?? db.prepare('SELECT key FROM memory_records WHERE namespace = ? AND id = ?')
+        .get(this.namespace, input.id)?.key;
       if (typeof key === 'number' && input.evidence) {
         const snapshots = input.evidence.messages.map(({ id, role, timestamp, content, location }) => ({
           id, role, timestamp, content, ...(location && { location }),
@@ -343,12 +365,129 @@ export class MemoryStore {
         for (const value of input.exactValues) insert.run(key, value);
         db.prepare('DELETE FROM memory_fts WHERE rowid = ?').run(key);
         db.prepare('INSERT INTO memory_fts(rowid, tokens) VALUES (?, ?)').run(key, tokenizeForFts(input.content));
+        db.prepare(`INSERT INTO memory_usage (memory_key, content_hash, content_changed_at) VALUES (?, ?, ?)
+          ON CONFLICT (memory_key) DO UPDATE SET
+            content_hash = excluded.content_hash,
+            content_changed_at = CASE
+              WHEN memory_usage.content_hash != excluded.content_hash THEN excluded.content_changed_at
+              ELSE memory_usage.content_changed_at
+            END`).run(key, computeUsageContentHash(input.content), now);
       }
-      return this.get(input.id)!;
+      return this.get(input.id, { trackUsage: false })!;
     }));
   }
 
-  get(id: string, options: { knowledgeReads?: KnowledgeReads; fromSearchId?: string } = {}): MemoryRecord | undefined {
+  private withUsageWriter(run: (db: DatabaseSync) => void): void {
+    if (this.filePath === ':memory:') {
+      if (this.readOnly || !this.db) return;
+      try { run(this.db); } catch { /* 忽略只读或并发写失败 */ }
+      return;
+    }
+    if (!this.readOnly && this.db) {
+      try { run(this.db); } catch { /* 忽略并发写失败 */ }
+      return;
+    }
+    if (!existsSync(this.filePath)) return;
+    let writer: DatabaseSync | undefined;
+    try {
+      writer = openDb(this.filePath);
+      writer.exec(`CREATE TABLE IF NOT EXISTS memory_usage (
+        memory_key INTEGER PRIMARY KEY REFERENCES memory_records(key) ON DELETE CASCADE,
+        content_hash TEXT NOT NULL,
+        content_changed_at TEXT NOT NULL,
+        search_hits INTEGER NOT NULL DEFAULT 0,
+        read_count INTEGER NOT NULL DEFAULT 0,
+        last_hit_at TEXT,
+        last_read_at TEXT
+      )`);
+      transaction(writer, () => run(writer!));
+    } catch {
+      // 只读目录或锁冲突时静默降级，不阻塞检索主流程。
+    } finally {
+      writer?.close();
+    }
+  }
+
+  private ensureUsageRow(db: DatabaseSync, id: string, now: string): number | undefined {
+    const row = db.prepare('SELECT key, content, updated_at FROM memory_records WHERE namespace = ? AND id = ?')
+      .get(this.namespace, id) as { key: number; content: string; updated_at: string } | undefined;
+    if (!row) return undefined;
+    db.prepare(`INSERT OR IGNORE INTO memory_usage (memory_key, content_hash, content_changed_at) VALUES (?, ?, ?)`)
+      .run(row.key, computeUsageContentHash(row.content), row.updated_at || now);
+    return row.key;
+  }
+
+  recordHits(ids: readonly string[], now = new Date().toISOString()): void {
+    const unique = [...new Set(ids.filter(Boolean))];
+    if (!unique.length) return;
+    this.withUsageWriter(db => {
+      const update = db.prepare('UPDATE memory_usage SET search_hits = search_hits + 1, last_hit_at = ? WHERE memory_key = ?');
+      for (const id of unique) {
+        const key = this.ensureUsageRow(db, id, now);
+        if (key !== undefined) update.run(now, key);
+      }
+    });
+  }
+
+  recordRead(id: string, now = new Date().toISOString()): void {
+    if (!id) return;
+    this.withUsageWriter(db => {
+      const key = this.ensureUsageRow(db, id, now);
+      if (key !== undefined) {
+        db.prepare('UPDATE memory_usage SET read_count = read_count + 1, last_read_at = ? WHERE memory_key = ?').run(now, key);
+      }
+    });
+  }
+
+  getUsage(id: string): KnowledgeUsageRecord | undefined {
+    return this.getUsageMap([id]).get(id);
+  }
+
+  getUsageMap(ids?: readonly string[]): Map<string, KnowledgeUsageRecord> {
+    const map = new Map<string, KnowledgeUsageRecord>();
+    if (!this.hasTables('memory_records')) return map;
+    const hasUsage = this.hasTables('memory_usage');
+    const filter = ids?.length
+      ? ` AND m.id IN (${ids.map(() => '?').join(',')})`
+      : '';
+    const params: SQLInputValue[] = ids?.length ? [this.namespace, ...ids] : [this.namespace];
+    const rows = hasUsage
+      ? this.db!.prepare(`
+          SELECT m.id, m.content, m.updated_at AS updatedAt,
+            u.content_hash AS contentHash, u.content_changed_at AS contentChangedAt,
+            u.search_hits AS searchHits, u.read_count AS readCount,
+            u.last_hit_at AS lastHitAt, u.last_read_at AS lastReadAt
+          FROM memory_records m
+          LEFT JOIN memory_usage u ON u.memory_key = m.key
+          WHERE m.namespace = ?${filter}
+        `).all(...params) as Array<{
+          id: string; content: string; updatedAt: string;
+          contentHash: string | null; contentChangedAt: string | null;
+          searchHits: number | null; readCount: number | null;
+          lastHitAt: string | null; lastReadAt: string | null;
+        }>
+      : this.db!.prepare(`SELECT m.id, m.content, m.updated_at AS updatedAt FROM memory_records m WHERE m.namespace = ?${filter}`)
+          .all(...params) as Array<{ id: string; content: string; updatedAt: string }>;
+    for (const row of rows) {
+      const r = row as {
+        id: string; content: string; updatedAt: string;
+        contentHash?: string | null; contentChangedAt?: string | null;
+        searchHits?: number | null; readCount?: number | null;
+        lastHitAt?: string | null; lastReadAt?: string | null;
+      };
+      map.set(r.id, {
+        contentHash: r.contentHash ?? computeUsageContentHash(r.content),
+        contentChangedAt: r.contentChangedAt ?? r.updatedAt,
+        searchHits: r.searchHits ?? 0,
+        readCount: r.readCount ?? 0,
+        ...(r.lastHitAt ? { lastHitAt: r.lastHitAt } : {}),
+        ...(r.lastReadAt ? { lastReadAt: r.lastReadAt } : {}),
+      });
+    }
+    return map;
+  }
+
+  get(id: string, options: { knowledgeReads?: KnowledgeReads; fromSearchId?: string; trackUsage?: boolean } = {}): MemoryRecord | undefined {
     if (!this.hasTables('memory_records', 'memory_literals', 'memory_sources')) return undefined;
     let row = this.db!.prepare(`SELECT ${recordFields} FROM memory_records m WHERE namespace = ? AND id = ?`)
       .get(this.namespace, id) as Row | undefined;
@@ -365,6 +504,10 @@ export class MemoryStore {
         kind: 'memory', id: result.id, fromSearchId: options.fromSearchId,
         content: result.content, version: result.version,
       });
+    }
+    const shouldTrack = options.trackUsage ?? !this.readOnly;
+    if (result && shouldTrack) {
+      this.recordRead(result.id);
     }
     return result;
   }
@@ -456,10 +599,19 @@ export class MemoryStore {
     const page = options.page ?? 1;
     const offset = pageOffset(page, limit);
     const take = options.page === undefined ? limit : limit + 1;
-    const result = (strategy: 'exact' | 'fts' | 'embedding' | 'hybrid', hits: Hit[]) => ({
-      strategy, results: hits.slice(0, limit),
-      ...(options.page !== undefined && { pagination: pagination(page, limit, hits.length > limit) }),
-    });
+    const shouldTrack = options.trackUsage ?? !this.readOnly;
+    const shouldDecay = options.applyDecay !== false;
+    const nowMs = options.nowMs ?? Date.now();
+    const result = (strategy: 'exact' | 'fts' | 'embedding' | 'hybrid', hits: Hit[]) => {
+      const pageHits = hits.slice(0, limit);
+      if (shouldTrack && pageHits.length > 0) {
+        this.recordHits(pageHits.map(item => item.id));
+      }
+      return {
+        strategy, results: pageHits,
+        ...(options.page !== undefined && { pagination: pagination(page, limit, hits.length > limit) }),
+      };
+    };
     const isExact = exactMemoryValues(text).includes(text);
     if (!this.hasTables('memory_records', 'memory_literals', 'memory_sources', 'memory_fts')) {
       return result(isExact ? 'exact' : 'fts', []);
@@ -492,16 +644,17 @@ export class MemoryStore {
     const embedding = options.embedding ?? await this.embed?.(text);
     const vector = embedding === undefined ? undefined : normalized(embedding);
     const expression = buildFtsQuery(text);
-    // 分页时用完整候选集融合排名，页码改变时保持相同顺序。
-    const candidates = vector ? options.page === undefined ? limit * 3 : -1 : take;
-    const keyword: Hit[] = expression ? (db.prepare(`
+    const rerankInJs = Boolean(vector) || shouldDecay;
+    // 分页或启用时间衰减重排时先读取足够候选，再按衰减后得分统一排序切片。
+    const candidates = rerankInJs ? (options.page === undefined ? limit * 3 : -1) : take;
+    const rawKeyword: Hit[] = expression ? (db.prepare(`
       SELECT ${recordFields}, bm25(memory_fts) AS rank FROM memory_fts
       JOIN memory_records m ON m.key = memory_fts.rowid
       WHERE memory_fts MATCH ? AND ${where} ORDER BY rank, m.id LIMIT ? OFFSET ?
-    `).all(expression, ...args, candidates, vector ? 0 : offset) as (Row & { rank: number })[]).map(({ rank, ...row }) => ({
+    `).all(expression, ...args, candidates, rerankInJs ? 0 : offset) as (Row & { rank: number })[]).map(({ rank, ...row }) => ({
       ...record(row), score: bm25RankToScore(rank),
     })) : [];
-    const semantic: Hit[] = [];
+    const rawSemantic: Hit[] = [];
     if (vector) {
       const statement = db.prepare(`
         SELECT ${recordFields}, m.vector FROM memory_records m WHERE ${where} AND m.dimensions = ? ORDER BY m.id
@@ -509,17 +662,37 @@ export class MemoryStore {
       for (const row of statement.iterate(...args, vector.length) as Iterable<Row>) {
         const other: number[] = JSON.parse(row.vector!);
         const score = vector.reduce((sum, value, i) => sum + value * other[i], 0);
-        if (score > 0) semantic.push({ ...record(row), score });
+        if (score > 0) rawSemantic.push({ ...record(row), score });
       }
-      semantic.sort((a, b) => b.score - a.score);
-      if (candidates >= 0) semantic.length = Math.min(candidates, semantic.length);
+      rawSemantic.sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+      if (candidates >= 0) rawSemantic.length = Math.min(candidates, rawSemantic.length);
     }
+    const usageIds = [...new Set([...rawKeyword, ...rawSemantic].map(item => item.id))];
+    const usageMap = shouldDecay && usageIds.length ? this.getUsageMap(usageIds) : new Map<string, KnowledgeUsageRecord>();
+    const factorOf = (item: Hit) => {
+      if (!shouldDecay) return 1;
+      const usage = usageMap.get(item.id);
+      return computeDecayFactor({
+        kind: 'episodic',
+        contentChangedAt: usage?.contentChangedAt ?? item.updatedAt,
+        readCount: usage?.readCount ?? 0,
+        nowMs,
+      });
+    };
+    const applyDecay = (hits: Hit[]) => shouldDecay
+      ? hits.map(item => ({ ...item, score: item.score * factorOf(item) }))
+          .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id))
+      : hits;
+    const keyword = applyDecay(rawKeyword);
+    const semantic = applyDecay(rawSemantic);
     if (keyword.length && semantic.length) {
-      return result('hybrid', rrfMerge([keyword, semantic], item => item.id)
-        .slice(offset, offset + take).map(({ rrfScore, ...item }) => ({ ...item, score: rrfScore })));
+      const merged = rrfMerge([keyword, semantic], item => item.id)
+        .map(({ rrfScore, ...item }) => ({ ...item, score: rrfScore * factorOf(item) }))
+        .sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+      return result('hybrid', merged.slice(offset, offset + take));
     }
     if (semantic.length) return result('embedding', semantic.slice(offset, offset + take));
-    return result('fts', vector ? keyword.slice(offset, offset + take) : keyword);
+    return result('fts', rerankInJs ? keyword.slice(offset, offset + take) : keyword);
   }
 
   async extract(messages: ConversationMessage[], options: ExtractionOptions): Promise<MemoryRecord[]> {

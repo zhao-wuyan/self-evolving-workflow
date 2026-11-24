@@ -28,12 +28,39 @@ npm install -g self-evolving-workflow
 # 2. 在项目根目录安装 Skill（支持 codex / claude / agy / all）
 evolve skill install --scope project --host agy --yes
 
+# 或导出/安装为各宿主原生插件包（Claude Code / Codex / Antigravity）
+evolve skill install --plugin --scope project --host all --yes
+
 # 3. 写入并验证一条工作记忆
 evolve kb add --kind episodic "发布前运行回归测试。" --id quickstart-regression --type work_method --session quickstart
 evolve search "回归测试" --mode context --session quickstart
 ```
 
 升级已有安装并清理已退役旧包可执行 `evolve skill install --upgrade --prune --yes`，查看安装状态可执行 `evolve skill status`。常用会话恢复命令：`evolve session list`、`evolve session get --session <id>`、`evolve run get <run-id> --session <id>`、`evolve run read artifact <run-id> <alias> --session <id>`。
+
+### 插件与 Marketplace 安装（Claude Code · Codex · Antigravity）
+
+仓库已内置三平台插件与 Marketplace 清单（`.claude-plugin/`、`.codex-plugin/`、`.agents/plugins/marketplace.json`、`.antigravity-plugin/`），支持从仓库直接安装或通过 `evolve` CLI 导出隔离插件包（自动排除测试包 `release-gate`）：
+
+```sh
+# 1. 通过 evolve CLI 生成/安装原生插件包（支持 --scope project|user 与 --host codex|claude|agy|all）
+evolve skill install --plugin --scope project --host all --yes
+evolve skill status --plugin --scope project --host all
+
+# 2. 仅导出独立插件包（不修改项目 AGENTS.md / CLAUDE.md）
+evolve skill install --plugin --path ./dist-plugin --yes
+
+# 3. 直接从 GitHub / 本地仓库添加到宿主 Marketplace
+claude plugin marketplace add catlog22/self-evolving-workflow
+claude plugin install self-evolving-workflow@self-evolving-workflow --scope user
+
+codex plugin marketplace add catlog22/self-evolving-workflow
+codex plugin add self-evolving-workflow@self-evolving-workflow
+
+agy plugin install <path-to-exported-plugin-or-repo>
+```
+
+> 若先通过宿主安装插件，请同时确保全局已安装 CLI：`npm install -g self-evolving-workflow`（各宿主原生 `plugin install` 出于安全边界不会自动执行 `npm install -g`）。详细路径对照与升级用法见 [安装与升级指南](docs/install.md#3-作为原生插件安装claude-code--codex--antigravity)。
 
 ## OMP 安装与受限委派
 
