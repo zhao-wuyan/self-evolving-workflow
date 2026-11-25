@@ -2,12 +2,13 @@ import { Worker } from 'node:worker_threads';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { fixture } from './evolve-workflow-support.mjs';
+import { cachedTemplate, cloneTemplateFixture } from './evolve-workflow-support.mjs';
 import { OpenVikingClient } from '../dist/openviking/client.js';
 import { privateProjectUri } from '../dist/openviking/config.js';
 import { skillAssets } from '../dist/openviking/git.js';
 import { exportWiki, exportMemory, fileRecord } from '../dist/openviking/knowledge.js';
 import { publishRelease, sha256, stableJson } from '../dist/openviking/assets.js';
+import { installStatus } from '../dist/workflow-install.js';
 
 export async function protocol(t) {
   const worker = new Worker(new URL('./openviking-protocol.mjs', import.meta.url));
@@ -28,22 +29,26 @@ export function projectFixture(t, server, options = {}) {
     environments.set(t, old);
     t.after(() => { if (old === undefined) delete process.env.EVOLVE_OPENVIKING_CONFIG; else process.env.EVOLVE_OPENVIKING_CONFIG = old; });
   }
-  const f = fixture('evolve-openviking-');
-  const disposers = [];
-  t.after(async () => { for (const dispose of disposers.reverse()) await dispose(); f.cleanup(); });
-  f.git('rm', '-r', 'skills');
-  if (options.minimalSkills) {
-    for (const { name, status } of f.evolve('skill', 'status', '--scope', 'project').targets[0].skills) {
-      if (status !== 'retired') f.write(`skills/${name}/SKILL.md`, `---\nname: ${name}\n---\n# ${name}\n`);
+  const minimalSkills = Boolean(options.minimalSkills);
+  const driver = Boolean(options.driver);
+  const template = cachedTemplate(`openviking:${minimalSkills ? 1 : 0}:${driver ? 1 : 0}`, base => {
+    base.git('init', '-q');
+    base.git('config', 'core.autocrlf', 'false');
+    base.git('config', 'user.name', 'Evolve fixture');
+    base.git('config', 'user.email', 'evolve@example.invalid');
+    base.write('.gitignore', '.evolve/\nbin/\n');
+    if (minimalSkills) {
+      for (const { name, status } of installStatus(base.root, { scope: 'project' }).targets[0].skills) {
+        if (status !== 'retired') base.write(`skills/${name}/SKILL.md`, `---\nname: ${name}\n---\n# ${name}\n`);
+      }
     }
-  }
-  if (options.driver) f.evolve('skill', 'install', 'workflow-evolve');
-  f.write(entry, '---\nname: sample\ncontract:\n  consumes: []\n  produces: []\n  gates: {entry: [], exit: []}\n---\n# Sample deployment\nPrepare a release from the supplied build.\n');
-  f.write('skills/sample/scripts/release.mjs', `export function release(input, requireMigration) {
+    if (driver) base.evolve('skill', 'install', 'workflow-evolve');
+    base.write(entry, '---\nname: sample\ncontract:\n  consumes: []\n  produces: []\n  gates: {entry: [], exit: []}\n---\n# Sample deployment\nPrepare a release from the supplied build.\n');
+    base.write('skills/sample/scripts/release.mjs', `export function release(input, requireMigration) {
   if (requireMigration && !input.migrationApproved) return { decision: 'blocked', artifact: null };
   return { decision: 'released', artifact: { build: input.build } };
 }\n`);
-  f.write('tools/replay.mjs', `import {readFileSync} from 'node:fs';
+    base.write('tools/replay.mjs', `import {readFileSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
@@ -56,12 +61,17 @@ const result = release(request.input, body.includes('migration_approval'));
 const passed = request.input.migrationApproved ? result.decision === 'released' && result.artifact.build === request.input.build
   : result.decision === 'blocked' && result.artifact === null;
 console.log(JSON.stringify({passed, loaded: [request.entry, script].map(path => ({path, sha256:createHash('sha256').update(readFileSync(path)).digest('hex')}))}));\n`);
-  f.write('tools/scenarios.json', JSON.stringify([
-    { id: 'approved-release', input: { build: '00123', migrationApproved: true }, baseline: true },
-    { id: 'unapproved-migration', input: { build: '00123', migrationApproved: false }, baseline: false },
-  ]));
-  f.write('evolution.json', JSON.stringify({ schema_version: 'evolve-openviking-policy/1.0', targets: [{ entry, runner: 'tools/replay.mjs', scenarios: 'tools/scenarios.json' }] }));
-  f.git('add', 'skills', 'tools', 'evolution.json'); f.git('commit', '-qm', '测试: 建立业务回放项目');
+    base.write('tools/scenarios.json', JSON.stringify([
+      { id: 'approved-release', input: { build: '00123', migrationApproved: true }, baseline: true },
+      { id: 'unapproved-migration', input: { build: '00123', migrationApproved: false }, baseline: false },
+    ]));
+    base.write('evolution.json', JSON.stringify({ schema_version: 'evolve-openviking-policy/1.0', targets: [{ entry, runner: 'tools/replay.mjs', scenarios: 'tools/scenarios.json' }] }));
+    base.git('add', '.');
+    base.git('commit', '-qm', '测试: 建立业务回放项目');
+  });
+  const f = cloneTemplateFixture('evolve-openviking-', template);
+  const disposers = [];
+  t.after(async () => { for (const dispose of disposers.reverse()) await dispose(); f.cleanup(); });
   const config = join(f.root, '.agent-memory', 'ovcli.conf');
   mkdirSync(join(f.root, '.agent-memory'), { recursive: true });
   writeFileSync(config, JSON.stringify({ url: server.url, api_key: 'fixture-key' }));

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,13 +8,27 @@ import { fileURLToPath } from 'node:url';
 export const cli = fileURLToPath(new URL('../dist/workflow-cli.js', import.meta.url));
 export const memory = fileURLToPath(new URL('../dist/workflow-cli.js', import.meta.url));
 
-export function fixture(prefix, extraSkills = []) {
-  const root = mkdtempSync(join(tmpdir(), prefix));
+const canonicalTmp = realpathSync.native(tmpdir());
+const templateCache = new Map();
+let exitHookRegistered = false;
+
+function registerTemplateCleanup() {
+  if (exitHookRegistered) return;
+  exitHookRegistered = true;
+  process.once('exit', () => {
+    for (const dir of templateCache.values()) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    templateCache.clear();
+  });
+}
+
+function makeFixtureApi(root) {
   const sentinel = join(root, 'maestro-invoked');
   const bin = join(root, 'bin');
   const home = join(root, '.fixture-home');
-  mkdirSync(bin);
-  mkdirSync(home);
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(home, { recursive: true });
   const trap = join(bin, process.platform === 'win32' ? 'maestro.cmd' : 'maestro');
   writeFileSync(trap, process.platform === 'win32'
     ? '@echo called>"' + sentinel + '"\r\n@exit /b 91\r\n'
@@ -51,21 +65,51 @@ export function fixture(prefix, extraSkills = []) {
     mkdirSync(dirname(filename), { recursive: true });
     writeFileSync(filename, JSON.stringify({ ...body, _meta: { kind, schema, role, alias } }) + '\n');
   };
+  return { root, env, sentinel, run, git, evolve, agent, write, open, status, fence, next, finish, sealSession, saveArtifact,
+    cleanup: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+export function cachedTemplate(key, build) {
+  let template = templateCache.get(key);
+  if (!template) {
+    registerTemplateCleanup();
+    template = mkdtempSync(join(canonicalTmp, 'evolve-template-'));
+    try {
+      build(makeFixtureApi(template));
+      rmSync(join(template, 'bin'), { recursive: true, force: true });
+      rmSync(join(template, '.fixture-home'), { recursive: true, force: true });
+    } catch (error) {
+      rmSync(template, { recursive: true, force: true });
+      throw error;
+    }
+    templateCache.set(key, template);
+  }
+  return template;
+}
+
+export function cloneTemplateFixture(prefix, template) {
+  const root = mkdtempSync(join(canonicalTmp, prefix));
   try {
-    const names = ['ew-orchestrate', 'ew-odyssey', 'ew-swarm', ...extraSkills];
-    assert.deepEqual(evolve('skill', 'install', ...names).installed, names);
-    assert.deepEqual(evolve('skill', 'install', ...names).installed, []);
-    git('init', '-q');
-    git('config', 'core.autocrlf', 'false');
-    git('config', 'user.name', 'Evolve fixture');
-    git('config', 'user.email', 'evolve@example.invalid');
-    write('.gitignore', '.evolve/\nbin/\n');
-    git('add', '.');
-    git('commit', '-qm', 'Commit shipped Evolve Skills');
+    cpSync(template, root, { recursive: true });
+    return makeFixtureApi(root);
   } catch (error) {
     rmSync(root, { recursive: true, force: true });
     throw error;
   }
-  return { root, env, sentinel, run, git, evolve, agent, write, open, status, fence, next, finish, sealSession, saveArtifact,
-    cleanup: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+export function fixture(prefix, extraSkills = []) {
+  const names = ['ew-orchestrate', 'ew-odyssey', 'ew-swarm', ...extraSkills];
+  const template = cachedTemplate('fixture:' + JSON.stringify(names), f => {
+    assert.deepEqual(f.evolve('skill', 'install', ...names).installed, names);
+    assert.deepEqual(f.evolve('skill', 'install', ...names).installed, []);
+    f.git('init', '-q');
+    f.git('config', 'core.autocrlf', 'false');
+    f.git('config', 'user.name', 'Evolve fixture');
+    f.git('config', 'user.email', 'evolve@example.invalid');
+    f.write('.gitignore', '.evolve/\nbin/\n');
+    f.git('add', '.');
+    f.git('commit', '-qm', 'Commit shipped Evolve Skills');
+  });
+  return cloneTemplateFixture(prefix, template);
 }
