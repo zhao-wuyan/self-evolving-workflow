@@ -129,16 +129,16 @@ Diagnosed root causes + applied fixes across all dimensions. **Discover routing:
 
 ## Knowledge Persistence (§9)
 
-Include verified reusable findings in the Run summary and harvest the completed Session through `evolve skill workflows show ew-knowledge` (`evolve kb harvest session` → `evolve kb propose`).
+Include verified reusable findings in the Run summary and evidence; follow the shared A_RECORD and post-Session candidate governance in `odyssey-base.md`. Do not initiate harvest at Run seal.
 
 A_RECORD extra: §8 improvement metrics — re-capture and build before/after comparison table from `baseline_metrics` vs current.
 
 | Category | Content | Follow-up |
 |----------|---------|-----------|
-| Performance pattern | Bottleneck type + fix approach + measurement | `evolve kb harvest session` → `evolve kb propose` (`category: coding`) |
-| Security rule | Vulnerability class + fix + prevention | `evolve kb harvest session` → `evolve kb propose` (`category: debug`) |
-| Architecture constraint | Violation + correct boundary + check | `evolve kb harvest session` → `evolve kb propose` (`category: arch`) |
-| Reliability pattern | Failure mode + handling strategy + verification | `evolve kb harvest session` → `evolve kb propose` (`category: coding`) |
+| Performance pattern | Bottleneck type + fix approach + measurement | Post-Session candidate review (`category: coding`) |
+| Security rule | Vulnerability class + fix + prevention | Post-Session candidate review (`category: debug`) |
+| Architecture constraint | Violation + correct boundary + check | Post-Session candidate review (`category: arch`) |
+| Reliability pattern | Failure mode + handling strategy + verification | Post-Session candidate review (`category: coding`) |
 
 ---
 

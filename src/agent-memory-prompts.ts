@@ -59,12 +59,12 @@ export function buildSessionSignalPrompt(): AgentMemoryPrompt {
 
 export function buildCloseoutHarvestPrompt(): AgentMemoryPrompt {
   return createAgentMemoryPrompt('closeout-harvest', [
-    'Extract reusable work methods from a completed task.',
-    'A method requires an applicability condition, an action and evidence that the action was verified. Skip routine task facts, undecided constraints, transient failures and suggestions whose results were not verified.',
-    'Return exactly a JSON array with this shape: [{"memories":[{"type":"work_method","content":"...","source_message_ids":["exact supplied ID"]}]}].',
-    'Cite the messages supporting the method and its verification. Return [] when no method qualifies.',
-  ].join('\n'));
-}
+    'Classify reusable knowledge from a completed task, using its frozen Run reports, sealed artifacts, decisions and exact-session episodic records.',
+    'For work_method include an applicability condition, action and verification. For constraint cite an explicit durable human decision or verified engineering invariant. For workflow_issue cite a concrete Skill/process gap, not an ordinary code failure. For deterministic_check cite a reproducible rule that belongs in code, lint, tests or a hook.',
+    'Episodic records are unverified evidence: corroborate claims with the original referenced evidence or sealed outcome. A user request, a generic test count, an unresolved hypothesis and a transient error alone do not establish a verified result.',
+    'Return exactly a JSON array: [{"memories":[{"type":"work_method","content":"...","source_message_ids":["exact supplied ID"]}]}]. Allowed types: work_method, constraint, workflow_issue, deterministic_check.',
+    'Cite exact supplied message IDs and preserve applicability and verification. Return [] when no candidate qualifies.',
+  ].join('\n'));}
 
 export function buildWikiRelationPrompt(): AgentMemoryPrompt {
   return createAgentMemoryPrompt('wiki-relation', [

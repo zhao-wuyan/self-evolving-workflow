@@ -141,14 +141,14 @@ Audit findings + diverge ideas (severity >= medium OR impact = high).
 
 ## Knowledge Persistence (§8)
 
-Include verified reusable findings in the Run summary and harvest the completed Session through `evolve skill workflows show ew-knowledge` (`evolve kb harvest session` → `evolve kb propose`).
+Include verified reusable findings in the Run summary and evidence; follow the shared A_RECORD and post-Session candidate governance in `odyssey-base.md`. Do not initiate harvest at Run seal.
 
 | Category | Content | Follow-up |
 |----------|---------|-----------|
-| Design pattern | Component pattern + applicable scenarios + token references | `evolve kb harvest session` → `evolve kb propose` (`category: ui`) |
-| Interaction spec | State definitions + transition rules + feedback patterns | `evolve kb harvest session` → `evolve kb propose` (`category: ui`) |
-| Accessibility rule | WCAG requirement + implementation approach | `evolve kb harvest session` → `evolve kb propose` (`category: ui`) |
-| Reusable generalization pattern | Pattern signature + application scope | `evolve kb harvest session` → `evolve kb propose` (`category: coding`) |
+| Design pattern | Component pattern + applicable scenarios + token references | Post-Session candidate review (`category: ui`) |
+| Interaction spec | State definitions + transition rules + feedback patterns | Post-Session candidate review (`category: ui`) |
+| Accessibility rule | WCAG requirement + implementation approach | Post-Session candidate review (`category: ui`) |
+| Reusable generalization pattern | Pattern signature + application scope | Post-Session candidate review (`category: coding`) |
 
 ---
 

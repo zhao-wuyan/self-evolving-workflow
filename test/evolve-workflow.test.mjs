@@ -734,7 +734,10 @@ test('Plugin install and export create host-valid bundles for claude, codex, and
     assert.equal(claudeManifest.skills.includes('./skills/release-gate'), false);
     const claudeMarket = JSON.parse(readFileSync(join(f.root, '.claude', 'plugins', '.claude-plugin', 'marketplace.json'), 'utf8'));
     assert.equal(claudeMarket.plugins[0].source, './self-evolving-workflow');
-    assert.match(readFileSync(join(f.root, 'CLAUDE.md'), 'utf8'), /npm install -g self-evolving-workflow/);
+    const claudeInstructions = readFileSync(join(f.root, 'CLAUDE.md'), 'utf8');
+    assert.match(claudeInstructions, /evolve --version/);
+    assert.match(claudeInstructions, /task scope changes mid-conversation/);
+    assert.match(claudeInstructions, /\.claude\/plugins\/self-evolving-workflow\/skills\//);
 
     // Codex plugin & marketplace layout
     const codexDir = join(f.root, '.codex', 'plugins', 'self-evolving-workflow');

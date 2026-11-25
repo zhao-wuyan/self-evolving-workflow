@@ -1,9 +1,9 @@
 ---
 name: ew-knowledge
-description: Unified project knowledge governance — Knowledge Gate retrieval, working memory sync, Session/Skill closeout harvesting, candidate review, Wiki publication, and legacy migration.
+description: Unified project knowledge governance — Knowledge Gate retrieval, working memory sync, Session closeout status and recovery, candidate governance, feedback, diagnostics, and migration.
 argument-hint: "[intent — e.g. 'read <query>' | 'closeout <session-id>' | 'review' | 'publish' | 'migrate' | 'sync']"
 session-mode: none
-version: 0.2.0
+version: 0.3.0
 ---
 
 # Evolve 知识治理
@@ -19,15 +19,16 @@ version: 0.2.0
 | 用户意图 | 路由 | 默认权限 | 主要入口 |
 | --- | --- | --- | --- |
 | OpenViking 存放分工、全局领域经验、原生 Memory / Resource 与项目同步 | `openviking` | 先识别作用域与现有能力 | 加载 `ew-openviking`（`evolve skill workflows show ew-openviking`）；本 Skill 保留 Wiki 治理职责 |
-| 查约束、查参考、查术语、查 Wiki / 记忆 | `read` | 只读 | `evolve search --mode context` / `kb list --kind constraint` / `kb search --kind reference` / `kb get` / `kb search` |
-| 记录或同步多宿主工作记忆 | `memory` | 显式写入记忆库 | `evolve kb add --kind episodic` / `evolve kb extract\|config\|sync\|reminders` |
-| Session 或独立 Skill/对话完成后的收尾沉淀 | `closeout` | 生成候选（同内容活跃 project `reference` 自动补证并留变更记录） | `evolve kb harvest session\|conversation\|skill\|receipt\|scan`（Skill 收尾可带 `--knowledge-receipt <file>`） |
-| 审查重复、重叠、冲突与证据 | `review` | 只读 / 暂存预览（仅写 `closeout.db`，不改 `wiki/entries/`） | `evolve kb candidates show`、`evolve kb get\|search`、`evolve kb propose` → `evolve kb changes` |
-| 批准并发布 / 更新 Wiki 候选 | `publish` | 需明确人类授权（正式写入 `wiki/entries/`） | `evolve kb apply <change-id>` 或 `evolve kb candidates publish`（可先于审查阶段用 `kb propose` 生成预览） |
+| 查询约束、参考、记忆 | `read` | 只读 | `evolve search "<query>" --mode context` / `evolve kb get <id>` |
+| 记录、更新或同步工作记忆 | `memory` | 证据绑定的工作记忆写入 | `evolve kb add --kind episodic` / `kb update` / `kb sync` |
+| Session 完成后的状态检查 | `closeout` | 只读 | `evolve kb closeouts <session-id>` → 已完成则 `kb candidates show` |
+| 收尾失败恢复 / 独立任务最终收尾 | `recover` | 按已完成任务及授权范围提取候选 | 见收尾协议；指定 Session 优先，`kb harvest pending` 仅用于项目批量维护 |
+| 候选审查与归因 | `review` | 只读 / 暂存 | `evolve kb candidates show` / `kb candidates route` / `kb propose` → `kb changes` |
+| 正式 Wiki 发布 | `publish` | 固定 ID、目标与动作的人工授权 | `evolve kb apply <change-id>` / 适用时 `kb candidates publish` |
 | 个人跨项目经验 | `experience` | 查询和候选审阅只读，发布需固定人类授权 | `evolve experience status\|pending\|review\|search\|get\|publish` |
-| 迁移 Maestro Flow 旧知识目录 | `migrate` | 先预览再 `--apply` | `evolve kb import` |
-| 归因于具体 Skill 的问题或新流程需求 | `evolve` / `skill-design` | 只读回溯 / 路由 | `evolve session review` / `evolve skill review` / `evolve kb candidates route` → 交由 `workflow-evolve` 或 `ew-skill-design` |
-
+| 记录知识实际使用效果 | `feedback` | 当前 Run 封存前写入既有回执 | `evolve kb feedback`（见 session-run） |
+| 健康诊断、历史迁移 | `doctor` / `migrate` | 先只读，变更须授权 | `evolve kb doctor` / `kb storage` / `kb import` |
+| 已归因的 Skill 缺陷或新流程 | `evolve` / `skill-design` | 候选交接；修改需授权 | `kb candidates route` → `workflow-evolve` / `ew-skill-design` |
 ## 核心不变式
 
 1. **只读优先**：先识别操作与目标；检索结果、Closeout 候选、审计与回溯信号均只是证据，除收尾对内容完全相同的唯一活跃 project `reference` 经 `wiki_changes` 自动追加 `sources` 外，新建与变更均仅在明确授权发布时写入 `wiki/`。

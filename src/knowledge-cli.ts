@@ -7,7 +7,7 @@ import { parseArgs } from 'node:util';
 import { CodeGraph } from './code.js';
 
 import {
-  configureMemory, installCodexMemoryHook,
+  configureMemory, inspectMemoryHooks, installCodexMemoryHook, memoryModelSettings,
   parseMemoryHosts,
 } from './memory-config.js';
 import {
@@ -18,7 +18,7 @@ import {
 import {
   collectHistorySignals, queryCollectedSignals, readHistoryCursorMap, type SignalSourceKind,
 } from './history-signals.js';
-import { acknowledgeReminders, readReminders } from './memory-reminders.js';
+import { acknowledgeReminders, findUnharvestedSessions, readReminders } from './memory-reminders.js';
 import {
   drainMemoryHookJobs, enqueueMemoryHook, hasPendingMemoryHookJobs, readMemoryHookInput,
   readMemoryHookJobs, retryMemoryHookJobs, startMemoryHookWorker,
@@ -59,6 +59,9 @@ import { decideSkillRoute } from './skill-route.js';
 import { lintKnowledge, renderKbLintCompact } from './knowledge-lint.js';
 import { learningBloat, readSkillLearnings, skillLearningUsage } from './skill-learnings.js';
 import { evolveSessionReceipt, readEvolveSessions, workflowDbPath } from './workflow-runtime.js';
+import { readNativeCloseoutJobs } from './workflow-runtime.js';
+import { drainNativeCloseouts, hasPendingNativeCloseouts, nativeCloseoutStatus, processNativeCloseout } from './native-closeout.js';
+import { migrateKnowledgeStorage } from './storage-migration.js';
 import {
   applySkillDesign, createSkillDesignTask, readSkillDesignTask, replaySkillDesign,
   resolveSkillEntry, reviewSkillDesign, runSkillDesign,
@@ -94,6 +97,11 @@ export function knowledgeHelp(invocation: 'evolve' = 'evolve') {
   kb reminders [ack [id]]                   List or acknowledge knowledge/evolution reminders
   kb hook-jobs [retry [id]]                 Inspect background extraction jobs or retry failures
   kb hook-worker                          Drain queued hook events without host stdin
+  kb closeouts                            Inspect durable Session closeout jobs
+  kb doctor                               Inspect hooks, model configuration and knowledge backlog (--llm probes the model)
+  kb storage                              Preview legacy database migration (--apply to migrate)
+  kb feedback <id>                        Record actual use of a read entry (--reads, --outcome, --evidence)
+  kb harvest pending                       Process pending and retry failed Session closeouts
   kb sources <id>                          Read original messages and transcript locations
   kb history <id>                          Read archived versions of an episodic record
   kb conversation <id>                     Read a conversation page (--host, --page, --limit)
@@ -254,6 +262,8 @@ export const knowledgeOptions = {
   context: { type: 'string' },
   'include-tools': { type: 'boolean' },
   'no-llm': { type: 'boolean' },
+  outcome: { type: 'string' },
+  'content-hash': { type: 'string' },
 } as const;
 
 
@@ -264,6 +274,7 @@ interface CliWikiContext {
   paths?: string[];
   categories?: string[];
   repository?: string;
+  repositoryExplicit?: boolean;
   keyword?: string;
   includePathScoped?: boolean;
 }
@@ -311,11 +322,13 @@ function cliWikiContext(values: Record<string, unknown>, root: string): CliWikiC
   const file = typeof values['context-file'] === 'string' ? readContextFile(values['context-file']) : {};
   const paths = Array.isArray(values.path) ? values.path as string[] : file.paths;
   const categories = Array.isArray(values.category) ? values.category as string[] : file.categories;
-  const repository = typeof values.repository === 'string' ? values.repository : file.repository ?? detectRepositoryId(root);
+  const explicitRepository = typeof values.repository === 'string' ? values.repository : file.repository;
+  const repository = explicitRepository ?? detectRepositoryId(root);
   return {
     task: typeof values.task === 'string' ? values.task : file.task,
     paths, categories,
     repository,
+    repositoryExplicit: explicitRepository !== undefined,
     keyword: typeof values.keyword === 'string' ? values.keyword : file.keyword,
     includePathScoped: typeof values['include-path-scoped'] === 'boolean'
       ? values['include-path-scoped'] : file.includePathScoped,
@@ -693,6 +706,7 @@ export async function runKnowledgeCli(argv: string[], invocation: 'evolve' = 'ev
       if (!selected.length || selected.some(item => !['kb', 'code', 'all'].includes(item))) throw new InputError('from must select kb, code or all');
       const mode = values.mode ?? 'merged';
       if (mode !== 'merged' && mode !== 'context') throw new InputError('mode must be merged or context');
+      const useKb = selected.some(item => item === 'kb' || item === 'all');
       const hasCode = scope !== 'global' && selected.some(item => item === 'code' || item === 'all');
       let preferredMemoryTypes: string[] | undefined;
       if (mode === 'context' && values.session && existsSync(workflowDbPath(root))) {
@@ -701,10 +715,12 @@ export async function runKnowledgeCli(argv: string[], invocation: 'evolve' = 'ev
       }
       const queryText = requireText([action, ...args].join(' '), 'query');
       const result = await unifiedSearch({
-        kb: selected.some(item => item === 'kb' || item === 'all') ? await openKnowledge() : undefined,
+        kb: useKb ? await openKnowledge() : undefined,
         code: hasCode ? new CodeGraph(root, { autoRefresh: true }) : undefined,
       }, queryText, {
-        ...filters, from, mode, preferredMemoryTypes,
+        ...filters,
+        repository: useKb || contextValues.repositoryExplicit ? filters.repository : undefined,
+        from, mode, preferredMemoryTypes,
         session: mode === 'context' ? undefined : filters.session,
         memorySession: values['memory-session'],
         contextScope: {
@@ -837,10 +853,69 @@ export async function runKnowledgeCli(argv: string[], invocation: 'evolve' = 'ev
         timeoutMs: numberOption(values['timeout-ms'], 'timeout-ms'), yes: values.yes,
       }));
     }
+    if (command === 'kb' && action === 'closeouts') {
+      if (args[0] && values.verbose) return print(readNativeCloseoutJobs(root, args[0]));
+      return print({ jobs: nativeCloseoutStatus(root).filter(job => !args[0] || job.session_id === args[0]),
+        unharvested: findUnharvestedSessions(root).filter(job => !args[0] || job.id === args[0]) });
+    }
+    if (command === 'kb' && action === 'feedback') {
+      if (!traceFile || !initialTrace || !knowledgeReads) throw new InputError('Feedback requires an existing --reads receipt');
+      const result = knowledgeReads.recordFeedback(requireText(args[0], 'full knowledge ID'),
+        requireText(values.outcome, 'outcome'), values.evidence ?? [], values['content-hash']);
+      persistTrace();
+      return print(withTrace(result));
+    }
+    if (command === 'kb' && action === 'storage') {
+      if (scope === 'global' || values.db || values['wiki-root']) throw new InputError('Storage migration targets the project root');
+      return print(migrateKnowledgeStorage(root, Boolean(values.apply)));
+    }
+    if (command === 'kb' && action === 'doctor') {
+      const settings = memoryModelSettings(root);
+      const configured = Boolean(settings.baseUrl && settings.model);
+      let probe: { ok: boolean; error?: string } | undefined;
+      if (values.llm) {
+        try {
+          await modelClient().chat({ system: 'Reply with a JSON empty array only.', prompt: '[]', label: 'doctor' });
+          probe = { ok: true };
+        } catch (error) { probe = { ok: false, error: error instanceof Error ? error.message : String(error) }; }
+      }
+      const hookJobs = readMemoryHookJobs(root);
+      const sessions = readEvolveSessions(root);
+      const memory = openMemory(root, true, true);
+      const traces = sessions.flatMap(session => session.runs.filter(run => run.status === 'sealed' && run.knowledge_reads).map(run => run.knowledge_reads!));
+      const feedback = traces.flatMap(trace => trace.feedback ?? []);
+      const latest = memory.list({ limit: 1 }).results[0];
+      return print({
+        model: { configured, ...(probe ? { probe } : {}) },
+        hosts: inspectMemoryHooks(root).map(host => ({
+          ...host, last_job: hookJobs.filter(job => job.host === host.host)
+            .sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(job => ({
+              state: job.state, updated_at: job.updated_at, attempts: job.attempts,
+            }))[0] ?? null,
+        })),
+        memory: { top_ranked_record_updated: latest?.updatedAt ?? null, pending_hook_jobs: hookJobs.filter(job => job.state === 'pending' || job.state === 'running').length,
+          failed_hook_jobs: hookJobs.filter(job => job.state === 'failed').length },
+        closeouts: nativeCloseoutStatus(root), unharvested: findUnharvestedSessions(root),
+        sessions: { total: sessions.length, completed: sessions.filter(session => session.status === 'completed').length },
+        knowledge_use: {
+          sealed_run_receipts: traces.length,
+          searches: traces.reduce((n, trace) => n + trace.searches.length, 0),
+          read_records: traces.reduce((n, trace) => n + trace.reads.length, 0),
+          feedback_records: feedback.length,
+          adopted: feedback.filter(item => ['adopted', 'helpful', 'ineffective'].includes(item.outcome)).length,
+          helpful: feedback.filter(item => item.outcome === 'helpful').length,
+          ineffective: feedback.filter(item => item.outcome === 'ineffective').length,
+          conflict: feedback.filter(item => item.outcome === 'conflict').length,
+        },
+        history_index_present: existsSync(evolvePath(root, 'history-signals.db')),
+        storage: migrateKnowledgeStorage(root),
+        reminders: readReminders(root).length,
+      });
+    }
     if (command === 'kb' && action === 'reminders') {
       if (args[0] === 'ack') return print(acknowledgeReminders(writeRoot, args[1]));
       const hookJobs = readMemoryHookJobs(root).map(({ event, ...job }) => job);
-      return print({ reminders: readReminders(writeRoot, values.history), hook_jobs: hookJobs });
+      return print({ reminders: readReminders(writeRoot, values.history), hook_jobs: hookJobs, closeouts: nativeCloseoutStatus(root) });
     }
     if (command === 'kb' && action === 'hook-jobs') {
       if (args.length > 2 || (args.length && args[0] !== 'retry')) throw new InputError('Usage: evolve kb hook-jobs [retry [id]]');
@@ -852,19 +927,27 @@ export async function runKnowledgeCli(argv: string[], invocation: 'evolve' = 'ev
       const result = await drainMemoryHookJobs(root, async job => {
         const memory = new MemoryStore(job.db ?? defaultMemoryDbPath(root), { namespace: job.namespace });
         try {
+          // Index deterministic evidence independently of the model extraction cursor.
+          const signals = await collectHistorySignals({ root, hosts: [job.host], session: job.session, sources: ['transcript'] });
+          if (signals.failures.length) throw new InputError(JSON.stringify(signals.failures));
           return await handleMemoryHook(job.host, job.event, { root, memory, model: modelClient });
         } finally {
           memory.close();
         }
       });
-      if (result.failed) process.exitCode = 1;
-      return print(result);
+      const closeouts = hasPendingNativeCloseouts(root) ? await drainNativeCloseouts(root, modelClient) : undefined;
+      if (result.failed || closeouts?.errors.length) process.exitCode = 1;
+      return print(closeouts ? { ...result, closeouts } : result);
     }
     if (command === 'kb' && action === 'session-start-hook') {
       const hosts = parseMemoryHosts(requireText(values.host, 'host'));
       if (hosts.length !== 1) throw new InputError('Choose one host for the hook');
       const result = handleSessionStartHook(hosts[0], hookInput, { root });
-      if (Object.keys(result).length && hasPendingMemoryHookJobs(root)) await startMemoryHookWorker(root);
+      if (Object.keys(result).length) {
+        const settings = memoryModelSettings(root);
+        const closeouts = Boolean(settings.baseUrl && settings.model && hasPendingNativeCloseouts(root));
+        if (hasPendingMemoryHookJobs(root) || closeouts) await startMemoryHookWorker(root, closeouts);
+      }
       return print(result);
     }
     if (command === 'kb' && action === 'codex-install') return print(installCodexMemoryHook(root));
@@ -1052,7 +1135,7 @@ export async function runKnowledgeCli(argv: string[], invocation: 'evolve' = 'ev
     }
     if (command === 'kb' && (action === 'harvest' || action === 'candidates')) {
       const [operation, ...targets] = args;
-      const allowed = action === 'harvest' ? ['receipt', 'session', 'conversation', 'skill', 'scan'] : ['show', 'route', 'publish'];
+      const allowed = action === 'harvest' ? ['receipt', 'session', 'conversation', 'skill', 'scan', 'pending'] : ['show', 'route', 'publish'];
       if (!operation || !allowed.includes(operation)) throw new InputError('Unknown kb ' + action + ' operation');
       if (operation === 'publish') return print(publishReference(
         wiki, requireText(targets[0], 'closeout ID'), requireText(targets[1], 'candidate ID'), targets.slice(2).join(' '), values.entry,
@@ -1061,6 +1144,17 @@ export async function runKnowledgeCli(argv: string[], invocation: 'evolve' = 'ev
         const candidate = readCloseoutCandidate(wiki, requireText(targets[0], 'closeout ID'), requireText(targets[1], 'candidate ID'));
         const closeoutId = requireText(targets[0], 'closeout ID');
         const candidateId = requireText(targets[1], 'candidate ID');
+        if (candidate.candidate_kind === 'deterministic_check') {
+          recordCandidateRoute(wiki, { closeoutId, candidateId, route: 'deterministic-check', status: 'routed' });
+          return print({ route: 'deterministic-check', confidence: 'medium', reasons: ['Review reproducible rule for code, lint, test or hook; do not add Skill prose'], invoke_meta_skill: false });
+        }
+        if (candidate.candidate_kind === 'constraint') {
+          recordCandidateRoute(wiki, { closeoutId, candidateId, route: 'wiki', status: 'routed' });
+          return print({ route: 'wiki', confidence: 'medium', reasons: ['Durable constraint requires governed proposal and explicit approval'], invoke_meta_skill: false });
+        }
+        if (candidate.candidate_kind === 'workflow_issue' && !values.skill && !values['skill-intent']) {
+          return print({ route: 'review-required', confidence: 'low', reasons: ['Select the responsible Skill/version or confirm deterministic code remediation before routing'], invoke_meta_skill: false });
+        }
         const skillEntry = values.skill ? resolve(root, resolveSkillEntry(root, values.skill)) : undefined;
         const decision = decideSkillRoute({
           content: candidate.content,
@@ -1069,7 +1163,7 @@ export async function runKnowledgeCli(argv: string[], invocation: 'evolve' = 'ev
           relatedEntries: candidate.related_entries?.map(entry => entry.id),
           skillId: values.skill,
           skillVersion: values['skill-version'],
-          signalKinds: values['signal-kind'],
+          signalKinds: [...(values['signal-kind'] ?? []), ...(candidate.candidate_kind === 'workflow_issue' ? ['workflow_issue'] : [])],
           repeatCount: values['repeat-count'] === undefined ? undefined : Number(values['repeat-count']),
           stepCount: values['step-count'] === undefined ? undefined : Number(values['step-count']),
           crossSkill: values['cross-skill'],
@@ -1103,6 +1197,23 @@ export async function runKnowledgeCli(argv: string[], invocation: 'evolve' = 'ev
         });
         return print({ ...decision, design_task: task });
       }
+      if (operation === 'pending') {
+        if (writeScope !== 'project' || values['wiki-root'] !== undefined) throw new InputError('Pending closeouts belong to the source project Wiki');
+        const result = await drainNativeCloseouts(root, modelClient, true);
+        if (result.errors.length) process.exitCode = 1;
+        return print(result);
+      }
+      if (operation === 'session' && writeScope === 'project' && values['wiki-root'] === undefined) {
+        const session = requireText(targets[0], 'Session ID');
+        const [job] = readNativeCloseoutJobs(root, session);
+        if (job) {
+          if (values.receipt && values.receipt !== job.receipt_id) throw new InputError('Evolve Session receipt ID mismatch');
+          if (values.project && values.project !== job.project) {
+            throw new InputError('Frozen closeout uses project ID ' + job.project + '; use that ID or omit --project');
+          }
+          return print(await processNativeCloseout(root, session, modelClient));
+        }
+      }
       const project = requireText(values.project, 'source project ID');
       if (operation === 'receipt') {
         const source = requireText(targets[0], 'receipt path or ID');
@@ -1120,7 +1231,7 @@ export async function runKnowledgeCli(argv: string[], invocation: 'evolve' = 'ev
         const session = requireText(targets[0], 'Session ID');
         const [native] = readEvolveSessions(root, session);
         if (native) {
-          const receipt = evolveSessionReceipt(native);
+          const receipt = readNativeCloseoutJobs(root, session)[0]?.receipt ?? evolveSessionReceipt(native);
           if (values.receipt && values.receipt !== receipt.id) throw new InputError('Evolve Session receipt ID mismatch');
           return print(await harvestCompletion(wiki, project, receipt, modelClient));
         }
@@ -1173,8 +1284,12 @@ export async function runKnowledgeCli(argv: string[], invocation: 'evolve' = 'ev
           await consume(requireText(receipt.transition_id, 'transition ID'), receipt, directory);
         }
         for (const session of readEvolveSessions(sessionSource).filter(item => item.status === 'completed')) {
-          const receipt = evolveSessionReceipt(session);
-          await consume(receipt.id, receipt);
+          const [job] = readNativeCloseoutJobs(sessionSource, session.id);
+          const receipt = job?.receipt ?? evolveSessionReceipt(session);
+          if (job && resolve(sessionSource) === root && writeScope === 'project' && values['wiki-root'] === undefined) {
+            try { results.push(await processNativeCloseout(root, session.id, modelClient)); }
+            catch (error) { errors.push({ receipt: receipt.id, error: error instanceof Error ? error.message : String(error) }); }
+          } else await consume(receipt.id, receipt);
         }
         for (const { id, receipt } of readSkillCompletions(wiki, project)) {
           await consume(id, receipt);

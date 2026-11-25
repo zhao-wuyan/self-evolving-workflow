@@ -191,8 +191,8 @@ export async function retryMemoryHookJobs(root: string, id?: string): Promise<nu
   return retried;
 }
 
-export async function startMemoryHookWorker(root: string): Promise<{ started: boolean; pid?: number }> {
-  if (!hasPendingMemoryHookJobs(root)) return { started: false };
+export async function startMemoryHookWorker(root: string, hasCloseouts = false): Promise<{ started: boolean; pid?: number }> {
+  if (!hasPendingMemoryHookJobs(root) && !hasCloseouts) return { started: false };
   const child = spawn(process.execPath, [fileURLToPath(new URL('./workflow-cli.js', import.meta.url)),
     'kb', 'hook-worker', '--root', realpathSync(root)], {
     cwd: root, detached: true, windowsHide: true, stdio: 'ignore',

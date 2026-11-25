@@ -143,4 +143,4 @@ Write `{run_dir}/report.md` with frontmatter (`verdict`, `summary`, `constraints
 
 ## Step 5: Seal Run & Knowledge Hooks
 
-Seal or transition the Run per `evolve skill workflows show session-run` (all required reads satisfied; no extra exit gates on `ew-review`). When high-signal recurring defect patterns surface, record them via `evolve kb add --kind episodic "<pattern>" --type error --scene review --session <session_id>` and stage reusable constraints in `report.md` frontmatter; defer `ew-knowledge` closeout/`kb harvest` until after `evolve session complete` (never run `kb harvest` mid-chain).
+Seal or transition the Run per `evolve skill workflows show session-run` (all required reads satisfied; no extra exit gates on `ew-review`). When high-signal recurring defect patterns surface, record them via `evolve kb add "<pattern>" --kind episodic --type error --scene review --session <session_id> --evidence <source-ref>` and stage reusable constraints in `report.md` frontmatter; defer `ew-knowledge` closeout/`kb harvest` until after `evolve session complete` (never run `kb harvest` mid-chain).

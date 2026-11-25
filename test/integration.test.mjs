@@ -1644,6 +1644,21 @@ test('MemoryStore readOnly mode avoids writes, auto-detects repository UUID, and
   const repoCtx = await cliEnv(project, 'search', 'repository', '--mode', 'context', '--from', 'kb');
   assert.deepEqual(repoCtx.constraints.map(item => item.id), ['entries/repo-constraint']);
 
+  // 2b. Repository auto-detection must not suppress episodic memory in merged/kb search or break --from code.
+  await cliEnv(project, 'kb', 'add', 'Repository episodic calibration note.', '--id', 'repo-mem-1');
+  const repoMerged = await cliEnv(project, 'search', 'repository', '--mode', 'merged', '--from', 'kb');
+  assert.ok(repoMerged.results.some(item => item.kind === 'episodic' && item.id === 'repo-mem-1'));
+  const repoKbEpisodic = await cliEnv(project, 'kb', 'search', 'repository', '--kind', 'episodic');
+  assert.deepEqual(repoKbEpisodic.results.map(item => item.id), ['repo-mem-1']);
+
+  await writeFile(join(project, 'repo-fn.ts'), 'export function repoSignal() { return 42; }\n');
+  const codeOnlyWithRepoFile = await cliEnv(project, 'search', 'repoSignal', '--from', 'code');
+  assert.equal(codeOnlyWithRepoFile.results[0].kind, 'code');
+  await assert.rejects(
+    cliEnv(project, 'search', 'repoSignal', '--from', 'code', '--repository', repoId),
+    /Knowledge filters require --from kb or all/,
+  );
+
   // 3. Global ~/.evolve Wiki references & Working Memory merge cleanly into project context & follow-up reads.
   await mkdir(join(globalEvolve, 'wiki', 'entries'), { recursive: true });
   await writeFile(join(globalEvolve, 'wiki', 'entries', 'global-tip.md'), [
@@ -1913,4 +1928,33 @@ test('CodeGraph recovers interrupted builds, degrades read locks cleanly, and sy
   await git('checkout', '--', 'svc.ts');
   assert.equal((await gitCode.search('cleanAlpha'))[0].node.name, 'cleanAlpha');
   assert.deepEqual(await gitCode.search('cleanOmega'), []);
+
+  // 5. build() 自动幂等维护 .git/info/exclude 忽略内部目录，超大/超脏阈值触发 autoRefresh 只读快照降级且不误跳过不完整构建。
+  await mkdir(join(gitRoot, '.evolve'), { recursive: true });
+  await writeFile(join(gitRoot, '.evolve', 'ignored.ts'), 'export function hiddenEvolveSymbol() { return 99; }\n');
+  await gitCode.build();
+  const gitExclude = await readFile(join(gitRoot, '.git', 'info', 'exclude'), 'utf8');
+  assert.match(gitExclude, /\.evolve\//);
+  assert.match(gitExclude, /\.agent-memory\//);
+  assert.match(gitExclude, /\.workflow\//);
+  await gitCode.sync();
+  const gitExcludeAfterSync = await readFile(join(gitRoot, '.git', 'info', 'exclude'), 'utf8');
+  assert.equal((gitExcludeAfterSync.match(/evolve:codegraph-ignore:start/g) ?? []).length, 1);
+  assert.deepEqual(await gitCode.search('hiddenEvolveSymbol'), []);
+
+  await writeFile(join(gitRoot, 'svc.ts'), 'export function deferredBeta() { return 3; }\n');
+  const deferredByFiles = new CodeGraph(gitRoot, { autoRefresh: true, autoRefreshMaxFiles: 1 });
+  assert.equal((await deferredByFiles.search('cleanAlpha'))[0].node.name, 'cleanAlpha');
+  assert.deepEqual(await deferredByFiles.search('deferredBeta'), []);
+  const deferredByDirty = new CodeGraph(gitRoot, { autoRefresh: true, autoRefreshMaxDirtyPaths: 1 });
+  assert.deepEqual(await deferredByDirty.search('deferredBeta'), []);
+  const deferredByBytes = new CodeGraph(gitRoot, { autoRefresh: true, autoRefreshMaxDbBytes: 1 });
+  assert.deepEqual(await deferredByBytes.search('deferredBeta'), []);
+  await deferredByFiles.sync();
+  assert.equal((await deferredByFiles.search('deferredBeta'))[0].node.name, 'deferredBeta');
+
+  // 不完整构建（evolve-build.json: building）即使触发阈值也不应被降级跳过，必须触发恢复。
+  await writeFile(join(gitRoot, 'svc.ts'), 'export function recoveredGamma() { return 4; }\n');
+  await writeFile(join(gitRoot, '.codegraph', 'evolve-build.json'), JSON.stringify({ state: 'building', pid: 999999 }));
+  assert.equal((await deferredByFiles.search('recoveredGamma'))[0].node.name, 'recoveredGamma');
 });

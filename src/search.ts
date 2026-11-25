@@ -14,6 +14,7 @@ import type { WikiContext } from './wiki-entry.js';
 import type { KnowledgeReads } from './knowledge-reads.js';
 import { rrfMerge } from './upstream/search-utils.js';
 import { applyBoundedExploration } from './knowledge-decay.js';
+import { STOP_WORDS, WIKI_TOKEN_SPLIT_REGEX, tokenizeWiki } from './wiki-tokens.js';
 
 export interface SearchSources {
   code?: CodeGraph;
@@ -297,8 +298,52 @@ const authorityWeights = { constraint: 1.4, reference: 1.2, code: 1, episodic: 0
 const knowledgeKinds: readonly KnowledgeKind[] = ['constraint', 'reference', 'episodic'];
 // 跨异构源融合采用更陡峭的位次衰减，避免代码符号数量多时将记忆与参考完全挤出前列。
 const CROSS_SOURCE_RRF_K = 10;
+const EXPLORE_MIN_RELEVANCE_RATIO = 0.65;
 export const DEFAULT_MAX_CONTEXT_CONSTRAINTS = 20;
 export const DEFAULT_MAX_CONTEXT_CONSTRAINT_CHARS = 4000;
+
+function extractQueryConcepts(query: string): string[] {
+  const rawSegments = query
+    .toLowerCase()
+    .split(WIKI_TOKEN_SPLIT_REGEX)
+    .map(segment => segment.trim())
+    .filter(segment => segment.length > 0 && !STOP_WORDS.has(segment));
+  const segments = [...new Set(rawSegments)];
+  if (segments.length === 1) {
+    const only = segments[0];
+    if (/^[\u4e00-\u9fff\u3400-\u4dbf]+$/.test(only) && [...only].length > 6) {
+      return [...new Set(tokenizeWiki(query))];
+    }
+  }
+  return segments;
+}
+
+function computeQueryCoverageFactor(hit: UnifiedSearchHit, concepts: readonly string[]): number {
+  if (concepts.length <= 1) return 1;
+  if (hit.source === 'kb' && (hit.hop ?? 0) > 0) return 1;
+  const haystack = [hit.title, hit.content, hit.snippet, hit.path]
+    .filter((value): value is string => typeof value === 'string' && value.length > 0)
+    .join(' ')
+    .toLowerCase();
+  let matched = 0;
+  for (const concept of concepts) {
+    if (haystack.includes(concept)) {
+      matched += 1;
+      continue;
+    }
+    const chars = [...concept];
+    if (/^[\u4e00-\u9fff\u3400-\u4dbf]+$/.test(concept) && chars.length >= 4) {
+      const bigrams = [...new Set(tokenizeWiki(concept).filter(token => [...token].length === 2))];
+      if (bigrams.length > 0) {
+        const hits = bigrams.filter(bigram => haystack.includes(bigram)).length;
+        const ratio = hits / bigrams.length;
+        if (ratio >= 0.5) matched += ratio;
+      }
+    }
+  }
+  const coverage = Math.min(1, matched / concepts.length);
+  return 0.45 + 0.55 * coverage;
+}
 
 function hitKey(hit: UnifiedSearchHit): string {
   return `${hit.kind}:${hit.id}`;
@@ -314,13 +359,15 @@ function uniqueProjectFirst<T extends { kind: string; id: string; scope: string 
   return [...unique.values()];
 }
 
-function fuseSearchLists(lists: UnifiedSearchHit[][]): UnifiedSearchHit[] {
+function fuseSearchLists(lists: UnifiedSearchHit[][], query: string): UnifiedSearchHit[] {
+  const concepts = extractQueryConcepts(query);
   return rrfMerge(lists.map(uniqueProjectFirst), hitKey, CROSS_SOURCE_RRF_K)
     .map(({ rrfScore, ...hit }) => {
       const conflictFactor = hit.source === 'kb'
         ? (hit.confidence === 'contested' ? 0.5 : hit.status === 'needs_review' ? 0.6 : hit.conflictsWith?.length ? 0.7 : 1)
         : 1;
-      return { ...hit, score: rrfScore * authorityWeights[hit.kind] * conflictFactor };
+      const coverageFactor = computeQueryCoverageFactor(hit, concepts);
+      return { ...hit, score: rrfScore * authorityWeights[hit.kind] * conflictFactor * coverageFactor };
     })
     .sort((left, right) => right.score - left.score || hitKey(left).localeCompare(hitKey(right)));
 }
@@ -422,9 +469,11 @@ export async function unifiedSearch(
     if (kind === 'episodic') {
       if (mode === 'context') {
         filters.session = memorySession;
-        // 仓储标识约束正式 Wiki 的适用范围，工作记忆由项目存储和独立会话条件选择。
-        delete filters.repository;
-      } else if (memorySession !== undefined) filters.session = memorySession;
+      } else if (memorySession !== undefined) {
+        filters.session = memorySession;
+      }
+      // 仓储标识约束正式 Wiki 的适用范围，工作记忆由项目存储和独立会话条件选择。
+      delete filters.repository;
       filters.preferredMemoryTypes = preferredMemoryTypes;
     }
     const results: KnowledgeRecord[] = [];
@@ -469,7 +518,7 @@ export async function unifiedSearch(
     Promise.all(kinds.map(readKnowledge)),
     readCode(),
   ]);
-  const merged = fuseSearchLists([...knowledgeLists, code]);
+  const merged = fuseSearchLists([...knowledgeLists, code], text);
   const hitCounts = explore !== false && from.includes('kb') ? sources.kb?.getSearchHitCounts?.(scope) : undefined;
   const recordKbHits = (items: ReadonlyArray<UnifiedSearchHit>) => {
     if (trackUsage === false || !sources.kb?.recordHits) return;
@@ -480,6 +529,7 @@ export async function unifiedSearch(
     const ranked = options.page === undefined && hitCounts?.size
       ? applyBoundedExploration(merged, {
           limit, page: 1, getId: hitKey, getScore: hit => hit.score, searchHits: hitCounts,
+          minRelevanceRatio: EXPLORE_MIN_RELEVANCE_RATIO,
         })
       : merged;
     const results = ranked.slice(offset, offset + limit);
@@ -503,10 +553,16 @@ export async function unifiedSearch(
   const rawReferences = merged.filter((hit): hit is KnowledgeRecord & { score: number } => hit.source === 'kb' && hit.kind === 'reference');
   const rawEpisodic = merged.filter((hit): hit is KnowledgeRecord & { score: number } => hit.source === 'kb' && hit.kind === 'episodic');
   const references = (hitCounts?.size
-    ? applyBoundedExploration(rawReferences, { limit, page: 1, getId: hitKey, getScore: hit => hit.score, searchHits: hitCounts })
+    ? applyBoundedExploration(rawReferences, {
+        limit, page: 1, getId: hitKey, getScore: hit => hit.score, searchHits: hitCounts,
+        minRelevanceRatio: EXPLORE_MIN_RELEVANCE_RATIO,
+      })
     : rawReferences).slice(0, limit);
   const episodic = (hitCounts?.size
-    ? applyBoundedExploration(rawEpisodic, { limit, page: 1, getId: hitKey, getScore: hit => hit.score, searchHits: hitCounts })
+    ? applyBoundedExploration(rawEpisodic, {
+        limit, page: 1, getId: hitKey, getScore: hit => hit.score, searchHits: hitCounts,
+        minRelevanceRatio: EXPLORE_MIN_RELEVANCE_RATIO,
+      })
     : rawEpisodic).slice(0, limit);
   recordKbHits([
     ...constraints.map(hit => ({ ...hit, score: 1 })),

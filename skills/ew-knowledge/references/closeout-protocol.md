@@ -12,18 +12,22 @@
 
 ### 1. Read internally（只读收集与查重）
 
-先消费已提交回执并查看现有候选与对照关系，不把人类用户直接打发去运行 CLI：
+Session 完成时 Runtime 原子冻结证据并自动排队。只读查询当前 Session，按返回的真实状态选择唯一动作，不重复发起抽取：
 
 ```text
-evolve kb harvest session --root <project> <session-id> --project <source-project-id> --receipt <receipt-id>
-evolve kb harvest skill --root <project> <execution-id> --skill <skill-id> --skill-version <version> --status <status> --transcript <messages.json> [--knowledge-receipt <knowledge-reads.json>] [--session <session-id>] [--record-only] --project <source-project-id>
-evolve kb harvest receipt --root <project> <receipt-id> --project <source-project-id>   # 模型抽取失败或 --record-only 后沿用同一回执重试
-evolve kb harvest scan --root <project> <source-project-root> --project <source-project-id>
-evolve kb candidates show --root <project> <receipt-id> --project <source-project-id>
+evolve kb closeouts <session-id> --root <project>
 ```
 
-- 重复投递按回执身份幂等处理；模型抽取失败时沿用同一回执运行 `kb harvest receipt <receipt-id> --project <source-project-id>`（Session 回执则用相同 `--receipt` 重跑 `kb harvest session`），不重构或扩大证据范围。若候选与唯一活跃、未锁定的 project `reference` 正文完全一致，收尾会经 `propose`/`apply` 自动合并 `sources` 并在 `wiki_changes` 留存审计记录，其余候选保留待审。
-- 先用 `evolve kb search` / `evolve kb get <id|q-N:idx>...`（支持短前缀与批量读取）核对每条候选与现有活跃 Wiki 的重复、重叠或冲突，保留双方证据；`propose` / `apply` 必须使用 `kb get` 返回的规范完整条目 ID。可在授权前用 `evolve kb propose` 生成待审变更预览（`kb propose` 仅写入 `<root>/.evolve/closeout.db` 暂存区，不修改 `wiki/entries/`；真正修改 `wiki/` 需在授权后执行 `kb apply` 或 `kb candidates publish`）：
+| 状态 | 下一步 |
+| --- | --- |
+| `pending` / `running` | 已入队；正常等待，不并发重跑。若长时间不推进，先 `evolve kb doctor`；确认没有正常工作的 Worker 后再恢复指定 Session。 |
+| `failed` | 查明失败原因，修复后使用冻结回执定向重试：`evolve kb harvest session <session-id> --project <source-project-id> --receipt <receipt-id>`。 |
+| `done` | 使用 job 的 `receipt_id` 与 `project`：`evolve kb candidates show <receipt-id> --project <source-project-id>`；零候选正常，不重跑。 |
+| 无 job，但在 `unharvested` 中 | 历史已完成 Session；按实际 Session / project 使用 `kb harvest session`，不要为活跃 Session 构造回执。 |
+
+`evolve kb harvest pending` 是项目范围的批量恢复，仅用于明确授权的知识维护；普通 Session 收尾不调用它。独立任务的 Stop 事件不等于最终收尾。只有显式收尾或用户确认最终完成后，独立对话执行 `evolve kb harvest conversation <conversation-id> --host <host> --project <source-project-id>`；独立 Skill 使用 `evolve kb harvest skill <execution-id> --skill <skill-id> --skill-version <version> --status <status> --transcript <messages.json> --project <source-project-id> [--knowledge-receipt <file>]`。独立 Skill 回执失败或仅登记时，使用 `kb harvest receipt <receipt-id> --project <source-project-id>`。历史批量扫描 `kb harvest scan` 仅用于指定维护范围。
+
+重复投递按回执身份幂等处理，不重构或扩大证据范围。若候选与唯一活跃、未锁定的 project `reference` 正文完全一致，收尾会经治理自动合并 `sources` 并留存变更记录，其余候选保留待审。- 先用 `evolve kb search` / `evolve kb get <id|q-N:idx>...`（支持短前缀与批量读取）核对每条候选与现有活跃 Wiki 的重复、重叠或冲突，保留双方证据；`propose` / `apply` 必须使用 `kb get` 返回的规范完整条目 ID。可在授权前用 `evolve kb propose` 生成待审变更预览（`kb propose` 仅写入 `<root>/.evolve/closeout.db` 暂存区，不修改 `wiki/entries/`；真正修改 `wiki/` 需在授权后执行 `kb apply` 或 `kb candidates publish`）：
 
 ```text
 evolve kb --root <project> propose <change.json> --closeout <closeout-id> --candidate <candidate-id>
@@ -60,7 +64,7 @@ evolve kb --root <project> apply <change-id>
 evolve kb candidates publish --root <project> <closeout-id> <candidate-id> "<title>" [--entry entries/<slug>]
 
 # 路径 B：问题可归因于具体 Skill 或需要新流程包时按序分流
-# 1) 先用 kb candidates route 判定路线（wiki | skill-addition | skill-design）
+# 1) 先用 kb candidates route 判定路线（wiki | skill-addition | skill-design | deterministic-check；review-required 需补充归因）
 evolve kb candidates route --root <project> <closeout-id> <candidate-id> [--skill <skill-id>] [--skill-version <version>]
 # 2) 按需补充检索历史运行信号与会话摘要（纯本地增量，不依赖 LLM）
 evolve --root <project> history collect
@@ -69,6 +73,8 @@ evolve --root <project> session review <session-id> --no-llm
 ```
 
 根据 `kb candidates route` 返回的 `route` 执行交接：
+- **`deterministic-check`**：不写 Wiki 或修改 Skill；由实际工程任务落实为代码、测试、Lint 或 Hook，并保留复现和验证证据。
+- 后续 Run 的知识使用反馈遵循 `evolve skill workflows show session-run`，在 Run 封存前写入既有知识回执；不将检索命中视为采纳。
 - **`skill-design` / `skill-addition`**：统一交由 Agent 执行的 **`workflow-evolve`**（新建或结构重构遵循 `ew-skill-design` 封装规范），先基于候选证据、`evolve history` 与 `memory.db` 给出《自进化策略》（Skill 修改或创建），经用户确认后实施并用 `evolve skill validate` 校验；若需使用离线自动化回放状态机，可继续按 `evolve skill design task/run/review/replay/apply` 或 `skills/workflow-evolve/scripts/evolve-loop.mjs` 执行。
 
 ### 5. Verify（回读确认）

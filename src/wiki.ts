@@ -153,7 +153,7 @@ function wikiFingerprint(root: string): string {
     }
   };
   walk(wikiRoot, 'wiki');
-  return createHash('sha256').update(entries.join('\n')).digest('hex');
+  return createHash('sha256').update(`tok:v2\n${entries.join('\n')}`).digest('hex');
 }
 
 export function initWiki(root: string, options: { purpose?: string; schema?: string; force?: boolean } = {}) {

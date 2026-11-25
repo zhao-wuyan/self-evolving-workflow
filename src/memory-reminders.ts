@@ -7,7 +7,7 @@ import { withMemoryFileTransaction } from './memory-file-lock.js';
 import { readMemoryHookJobs } from './memory-hook-jobs.js';
 import type { ConversationMessage } from './memory.js';
 import { closeoutDbPath } from './wiki-change.js';
-import { evolveSessionReceipt, readEvolveSessions, sessionEvolveSignals } from './workflow-runtime.js';
+import { evolveSessionReceipt, nativeCloseoutProject, readEvolveSessions, readNativeCloseoutJobs, sessionEvolveSignals } from './workflow-runtime.js';
 
 export type ReminderKind = 'evolve_signal' | 'closeout_candidate';
 
@@ -104,7 +104,7 @@ export function recordConversationSignals(
   const { host, session, messages, errorCount = 0 } = params;
   if (!messages.length && errorCount < 2) return [];
   const corrections = messages.filter(item => item.role === 'user' && CORRECTION_PATTERN.test(item.content));
-  const errors = messages.filter(item => item.role !== 'user' && ERROR_PATTERN.test(item.content));
+  const errors = messages.filter(item => item.role === 'tool' && ERROR_PATTERN.test(item.content));
   const closeouts = messages.filter(item => item.content.trim().length >= 25 && CLOSEOUT_PATTERN.test(item.content));
 
   const created: MemoryReminder[] = [];
@@ -231,7 +231,7 @@ export function findUnharvestedSessions(root: string): UnharvestedSession[] {
       completed_at: session.completed_at ?? session.created_at,
       has_evolve_signals: evolveSignals.length > 0,
       evolve_signals: evolveSignals,
-      closeout_command: `evolve kb harvest session ${session.id} --project <project-id>`,
+      closeout_command: `evolve kb harvest session ${session.id} --project ${JSON.stringify(readNativeCloseoutJobs(root, session.id)[0]?.project ?? nativeCloseoutProject(root))}`,
       review_command: `evolve session review ${session.id}`,
     }];
   });
@@ -246,6 +246,10 @@ export function buildSessionStartNotice(root: string, host: MemoryHost, currentS
   const jobs = readMemoryHookJobs(root);
   const failedJobs = jobs.filter(job => job.state === 'failed');
   const activeJobs = jobs.filter(job => job.state === 'pending' || job.state === 'running');
+  const closeouts = readNativeCloseoutJobs(root);
+  const failedCloseouts = closeouts.filter(job => job.state === 'failed');
+  if (failedCloseouts.length) lines.push(`- Knowledge closeout failed (${failedCloseouts.length}): ${failedCloseouts.slice(-3).map(job => job.session_id).join(', ')}. Inspect \`evolve kb closeouts\` and retry with \`evolve kb harvest pending\` after resolving the cause.`);
+
 
   if (failedJobs.length > 0) {
     const summary = failedJobs.slice(-3).map(job => `[${job.session}] ${summarize(job.last_error ?? 'Extraction failed')}`).join(' | ');

@@ -80,7 +80,7 @@ Write `report.md` with fixed sections (`Summary`, `Conclusion/Verdict`, `Discuss
 
 ## Step 9: Knowledge Staging & Seal
 
-Inspect `evidence/summaries/*.md`, deduplicate new patterns/pitfalls against Step 3 rules, and stage reusable findings through `report.md` frontmatter (`constraints`/`decisions`) for post-session closeout after `evolve session complete` (do **not** run `kb harvest` or invoke `ew-knowledge` closeout mid-chain). When execution resolves a non-obvious build/API/runtime pitfall, record a concise lesson via `evolve kb add --kind episodic "<lesson>" --type verified_fix --scene execute --session <session_id>`. Never write Wiki files directly.
+Inspect `evidence/summaries/*.md`, deduplicate new patterns/pitfalls against Step 3 rules, and stage reusable findings through `report.md` frontmatter (`constraints`/`decisions`) for post-session closeout after `evolve session complete` (do **not** run `kb harvest` or invoke `ew-knowledge` closeout mid-chain). When execution resolves a non-obvious build/API/runtime pitfall, record a concise lesson via `evolve kb add "<lesson>" --kind episodic --type verified_fix --scene execute --session <session_id> --evidence <source-ref>`. Never write Wiki files directly.
 Seal or transition the Run per `evolve skill workflows show session-run` with exit gates `--gate execution-complete --gate self-check-passed` (mapping `report.md` `verdict` per Step 8 and `session-run`).
 
 ---

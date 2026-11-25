@@ -4,7 +4,7 @@
 
 面向代码助手的自进化工作流：用可恢复的 **Session / Run** 编排任务，同步本地 **代码图谱 + 项目 Wiki + 工作记忆**，并基于执行证据回放改进 Skill。
 
-[![npm version](https://img.shields.io/npm/v/self-evolving-workflow?color=cb3837&logo=npm)](https://www.npmjs.com/package/self-evolving-workflow)
+[![CLI Release](https://img.shields.io/badge/CLI-GitHub%20Release-2088ff?logo=github)](https://github.com/zhao-wuyan/self-evolving-workflow/releases/tag/cli-latest)
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22.16.0-339933?logo=node.js&logoColor=white)](package.json)
 [![Hosts](https://img.shields.io/badge/Hosts-Codex%20%C2%B7%20Claude%20%C2%B7%20Antigravity-111827)](docs/install.md#2-安装工作流-skill)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -64,8 +64,8 @@ omp plugin install 'https://github.com/zhao-wuyan/self-evolving-workflow/release
 > 需要 `Node.js >= 22.16.0` 和 `Git`。完整宿主目录对照、安装记录与升级/清理用法见 [安装与升级指南](docs/install.md)。
 
 ```sh
-# 1. 全局安装 CLI
-npm install -g self-evolving-workflow
+# 1. 全局安装本 fork 的预编译 CLI（首个 cli-v* Release 发布后可用）
+npm install -g "https://github.com/zhao-wuyan/self-evolving-workflow/releases/download/cli-latest/self-evolving-workflow-cli.tgz"
 
 # 2. 在项目根目录安装 Skill（支持 codex / claude / agy / all）
 evolve skill install --scope project --host agy --yes
@@ -77,6 +77,10 @@ evolve skill install --plugin --scope project --host all --yes
 evolve kb add --kind episodic "发布前运行回归测试。" --id quickstart-regression --type work_method --session quickstart
 evolve search "回归测试" --mode context --session quickstart
 ```
+
+CLI 升级时重新执行上面的 URL 安装命令；npm registry 的同名包属于上游，不用于更新本 fork。版本固定安装与 `cli-v*` 发布规则见[安装指南](docs/install.md#1-安装-cli)。
+
+也可通过 mise 管理 CLI：`mise use -g node@24 "npm:https://github.com/zhao-wuyan/self-evolving-workflow/releases/download/cli-latest/self-evolving-workflow-cli.tgz"`；更新时执行 `mise upgrade "npm:https://github.com/zhao-wuyan/self-evolving-workflow/releases/download/cli-latest/self-evolving-workflow-cli.tgz"`。详见 [mise 安装与更新](docs/install.md#通过-mise-安装与更新)。
 
 升级已有安装并清理已退役旧包可执行 `evolve skill install --upgrade --prune --yes`，查看安装状态可执行 `evolve skill status`。常用会话恢复命令：`evolve session list`、`evolve session get --session <id>`、`evolve run get <run-id> --session <id>`、`evolve run read artifact <run-id> <alias> --session <id>`。
 
@@ -102,7 +106,7 @@ codex plugin add self-evolving-workflow@self-evolving-workflow
 agy plugin install <path-to-exported-plugin-or-repo>
 ```
 
-> 若先通过宿主安装插件，请同时确保全局已安装 CLI：`npm install -g self-evolving-workflow`（各宿主原生 `plugin install` 出于安全边界不会自动执行 `npm install -g`）。详细路径对照与升级用法见 [安装与升级指南](docs/install.md#3-作为原生插件安装claude-code--codex--antigravity)。
+> 若先通过宿主安装插件，请按[安装指南](docs/install.md#1-安装-cli)从本 fork 的 GitHub Release 安装全局 CLI（各宿主原生 `plugin install` 不会自动安装全局 CLI）。详细路径对照与升级用法见[安装与升级指南](docs/install.md#3-作为原生插件安装claude-code--codex--antigravity)。
 
 ## 工作流 Skills
 

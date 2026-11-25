@@ -27,9 +27,12 @@ Wiki 维护遵循三大常规动作：**Ingest（摄入）**、**Query（检索�
 
 本地工作记忆保存在 `<root>/.evolve/memory.db`，可通过以下 CLI 直接读写或配置自动提取：
 
+首次确认用户纠正、持久决策、非显而易见根因或复现方法时记录。内容应含适用项目/版本/条件、事实或决策、方法、证据与验证状态；仅经验证的修复使用 `verified_fix`，未确认的结论标明待验证。先检索已有记录并优先更新；`kb update` 省略 `--evidence` 保留原来源，传入时替换完整来源列表，须重复传入所有应保留的真实引用。常规任务请求和进度不作为长期记忆。
+
+
 | 操作 | 命令 | 说明 |
 | --- | --- | --- |
-| 手工写入记忆 | `evolve kb add --kind episodic "<text>" [--id <id>] [--type <type>] [--scene <scene>] [--session <session>]` | 立即保存工作经验并可供 `search --mode context` 召回 |
+| 手工写入记忆 | `evolve kb add "<text>" --kind episodic --type <type> --scene <scene> --session <session> --evidence <source-ref>` | 用真实 Session 或对话 ID 和证据保存高价值经验；无可关联 ID 时不虚构，先确认实际上下文 |
 | 分页检索记忆 | `evolve kb search "<query>" --kind episodic [--type <t>] [--scene <s>] [--session <id>] [--page <n>] [--limit <n>] [--format compact\|--verbose]` | 默认返回短前缀 ID、`<= 300` 字符内联正文或 `snippet` + `truncated: true`（加 `--reads` 时返回 `q-N` 与 `idx`；加 `--verbose` 返回 `commands` 模板） |
 | 精确读取单条或批量记忆 | `evolve kb get <id\|q-N:idx>... [--pick <n,...>]` | 支持 8+ 位短前缀或 `q-N:idx` / `--pick` 批量展开全文并自动关联 `--reads` 溯源 |
 | 查看记忆旧版本 | `evolve kb history <memory-id>` | `kb update` 覆盖或 `kb delete` 删除前的内容会归档到 `memory_history`，已删除记录也可查回 |

@@ -1,6 +1,6 @@
 {
   "name": "self-evolving-workflow",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Self-Evolving Workflow with a local code graph, a Markdown wiki, and agent memory search",
   "repository": {
     "type": "git",

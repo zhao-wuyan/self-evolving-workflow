@@ -173,14 +173,14 @@ Confirmed root cause + applied fix.
 
 ## Knowledge Persistence (§9)
 
-Include verified reusable findings in the Run summary and harvest the completed Session through `evolve skill workflows show ew-knowledge` (`evolve kb harvest session` → `evolve kb propose`).
+Include verified reusable findings in the Run summary and evidence; follow the shared A_RECORD and post-Session candidate governance in `odyssey-base.md`. Do not initiate harvest at Run seal.
 
 | Category | Content | Follow-up |
 |----------|---------|-----------|
-| Recurring root cause pattern | Type + triggers + fix + detection | `evolve kb harvest session` → `evolve kb propose` (`category: debug`) |
-| Non-obvious workaround | Problem + steps + why obvious fix fails | `evolve kb harvest session` → `evolve kb propose` (`category: debug`) |
-| Architecture boundary violation | Violation + correct boundary + verification | `evolve kb harvest session` → `evolve kb propose` (`category: arch`) |
-| Reusable generalization pattern | Signature + risk + fix template + scope | `evolve kb harvest session` → `evolve kb propose` (`category: coding`) |
+| Recurring root cause pattern | Type + triggers + fix + detection | Post-Session candidate review (`category: debug`) |
+| Non-obvious workaround | Problem + steps + why obvious fix fails | Post-Session candidate review (`category: debug`) |
+| Architecture boundary violation | Violation + correct boundary + verification | Post-Session candidate review (`category: arch`) |
+| Reusable generalization pattern | Signature + risk + fix template + scope | Post-Session candidate review (`category: coding`) |
 
 ---
 

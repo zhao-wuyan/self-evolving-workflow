@@ -4,6 +4,7 @@ All notable changes to `self-evolving-workflow` are documented in this file.
 
 ## [Unreleased]
 
+- 同步上游 v0.7.0（新增原生会话收尾队列 `native_closeouts`、`evolve kb closeouts|doctor|storage|feedback|harvest pending`、`evolve --version`、统一托管 `rules/AGENTS.md` 及检索/CodeGraph 修复），保留 OpenViking 集成、个人跨项目经验、通用 CLI 发布流程与 OMP 宿主支持。
 - 同步上游 v0.6.0（新增跨宿主历史信号收集 `evolve history`、Agent 原生自进化路线与 `evolve skill sync` / `validate --all`），保留 OpenViking 集成、个人跨项目经验与 OMP 宿主支持。
 - 同步上游 v0.5.0（含多宿主插件与 Marketplace 文档），保留 OpenViking 集成、个人跨项目经验与 OMP Skills 说明。
 - `kb lint` 兼容异步 OpenViking 知识源；三宿主插件导出与含 OMP 的普通 Skills 安装分别选择宿主，避免误写 Codex 插件目录。
@@ -11,6 +12,30 @@ All notable changes to `self-evolving-workflow` are documented in this file.
 - OpenViking 远端 Memory 支持 `kb get --pick`、`q-N:idx` 和批量读取，文本输出继续保存远端读取证据。
 - 共用模型客户端接纳上游响应校验，正确报告截断、仅推理输出和服务端错误。
 - OMP 会话中的知识提炼与审阅可复用 `@memory` 角色及认证，使用无工具 SDK 会话；未配置独立 HTTP 模型时自动选择，候选审批流程保持。
+
+## [0.7.0] - 2026-11-24
+
+### Highlights
+
+- **Unified Search Fixes, CodeGraph Protection & Chinese Cross-Source Ranking (`src/kb.ts`, `src/search.ts`, `src/knowledge-cli.ts`, `src/code.ts`, `src/wiki-tokens.ts`, `src/wiki.ts`, `src/upstream/tokenize.ts`)**:
+  - Fixed `.workflow/repository.json` / `.evolve/repository.json` auto-detection suppressing episodic memories in `evolve search` (`merged`), `evolve kb search`, and `evolve kb list`, and crashing `evolve search --from code` unless `--repository` is explicitly supplied.
+  - Added default internal directory isolation (`.evolve/`, `.agent-memory/`, `.workflow/`) in `CodeGraph.search()` and idempotent `.git/info/exclude` management on `build`/`sync`, plus read-only snapshot opening (`openReadOnlyGraph()`) and `autoRefresh` safeguards (`AUTO_REFRESH_MAX_DB_BYTES`, `AUTO_REFRESH_MAX_FILES`, `AUTO_REFRESH_MAX_DIRTY_PATHS`) for large or heavily dirty repositories while preserving incomplete-build recovery.
+  - Fixed Chinese stop-word filtering in `tokenizeWiki()` (with `tok:v2` index fingerprint bump) and `buildFtsQuery()`, added scale-invariant multi-concept query coverage weighting in `merged` RRF fusion, and tightened bounded exploration `minRelevanceRatio` to `0.65`.
+- **Durable Native Session Closeout Outbox, Version-Bound Feedback & Knowledge Diagnostics (`src/native-closeout.ts`, `src/storage-migration.ts`, `src/workflow-runtime.ts`, `src/knowledge-reads.ts`, `src/closeout.ts`, `src/memory-config.ts`, `src/history-signals.ts`, `src/knowledge-cli.ts`, `src/workflow-cli.ts`)**:
+  - Made `evolve session complete` atomically freeze sealed Run reports, artifacts, decisions, and session memories into a durable `native_closeouts` outbox and dispatch background extraction; added `evolve kb closeouts`, `evolve kb harvest pending`, and classified candidates (`constraint`, `workflow_issue`, `deterministic_check`).
+  - Added `evolve kb feedback` (bound to exact consumed read hashes without fabricated feedback), `evolve kb doctor`, `evolve kb migrate-storage`, and `evolve --version` / `-V`.
+  - Decoupled the semantic LLM cursor in `src/history-signals.ts` so unchanged failed entries retry cleanly and unread history backfills when `--llm` is enabled.
+- **Unified Managed Instructions & Strengthened Knowledge Gate (`rules/AGENTS.md`, `AGENTS.md`, `src/workflow-install.ts`, `skills/`, `wiki/entries/release-guide.md`)**:
+  - Rendered managed host instructions from single-source `rules/AGENTS.md` and refreshed instructions during Skill/Plugin installs; explicitly restored `git`/release/maintenance and mid-conversation scope-change triggers in Knowledge Gate instructions.
+  - Streamlined closeout and memory recording directives across `ew-knowledge`, `ew-orchestrate`, `ew-odyssey`, and `workflow-evolve`, and added the project release guide Wiki entry (`wiki/entries/release-guide.md`).
+
+### Verification
+
+- `npm run build`: passed
+- `npm test` (`node --test test/*.test.mjs`): 151/151 passed
+- `npm run test:ew-layout`: passed
+- `node dist/workflow-cli.js skill validate --all`: 32/32 passed
+- `npm pack --dry-run`: 353 files, 8.6 MB unpacked
 
 ## [0.6.0] - 2026-11-24
 
