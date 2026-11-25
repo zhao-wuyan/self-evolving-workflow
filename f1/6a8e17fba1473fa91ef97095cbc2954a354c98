@@ -1,0 +1,14 @@
+src/omp-ignore.ts
+  h_7f727d5a3fe0e5 3,25-29
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "f16a8e17fba1473fa91ef97095cbc2954a354c98",
+  "prompts": {},
+  "humans": {
+    "h_7f727d5a3fe0e5": {
+      "author": "诏无言 <59789646+zhao-wuyan@users.noreply.github.com>"
+    }
+  }
+}
