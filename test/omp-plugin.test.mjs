@@ -464,7 +464,7 @@ test('OMP OpenViking initialization changes Git and publishes only after confirm
     if (previousExperienceConfig === undefined) delete process.env.EVOLVE_EXPERIENCE_CONFIG;
     else process.env.EVOLVE_EXPERIENCE_CONFIG = previousExperienceConfig;
   });
-  f.git('rm', '-r', 'agents'); f.git('commit', '-qm', '测试: 不预置根目录 Agent');
+  if (existsSync(join(f.root, 'agents'))) { f.git('rm', '-r', 'agents'); f.git('commit', '-qm', '测试: 不预置根目录 Agent'); }
   f.write('.workflow/knowhow/migration.md', '---\ntitle: Legacy deployment notes\n---\n\nKeep this deployment note local.\n');
   f.evolve('kb', 'import', '--project', 'legacy-project', '--apply');
   const h = harness(f.root);
