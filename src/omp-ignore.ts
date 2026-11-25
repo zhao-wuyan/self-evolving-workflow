@@ -1,13 +1,7 @@
-import { appendFileSync, lstatSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import ignore from 'ignore';
 import { InputError } from './common.js';
 import type { OmpExtensionApi } from './omp-contract.js';
-import { gitText } from './openviking/git.js';
+import { manageEvolveIgnore } from './workflow-ignore.js';
 
-const directories = ['.evolve/', '.agent-memory/', '.codegraph/'];
-const projectConfiguration = ['.evolve/openviking.json', '.evolve/evolution.json'];
-const evolveRuntimeExamples = ['.evolve/workflow.db', '.evolve/install-manifest.json', '.evolve/runs/example/report.md', '.evolve/ovcli.conf'];
 const usage = '/evolve-ignore [check|apply|help]';
 const actions = [
   { value: 'check', label: 'check', description: '检查缺少的忽略规则，不写入' },
@@ -28,28 +22,11 @@ export function registerOmpIgnore(api: OmpExtensionApi) {
           return;
         }
         if (input !== 'check' && input !== 'apply') throw new InputError(usage);
-        const root = gitText(ctx.cwd, ['rev-parse', '--show-toplevel']);
-        const path = join(root, '.gitignore');
-        const stat = lstatSync(path, { throwIfNoEntry: false });
-        if (stat && !stat.isFile()) throw new InputError('仓库根 .gitignore 不是普通文件，未修改。');
-        const current = stat ? readFileSync(path, 'utf8') : '';
-        const matcher = ignore({ ignorecase: false }).add(current);
-        const missing = directories.slice(1).filter(dir => !matcher.ignores(dir)).map(dir => `/${dir}`);
-        if (!matcher.test('.evolve/').unignored || projectConfiguration.some(file => !matcher.test(file).unignored) ||
-            evolveRuntimeExamples.some(file => !matcher.ignores(file))) {
-          missing.unshift('!/.evolve/', '/.evolve/*', ...projectConfiguration.map(file => `!/${file}`));
-        }
-        const indexed = gitText(root, ['ls-files', '-z', '--', ...directories]).split('\0');
-        const tracked = directories.filter(dir => indexed.some(file => file.startsWith(dir) && !projectConfiguration.includes(file)));
-        if (missing.length && input === 'apply') {
-          const eol = current.match(/\r?\n/)?.[0] ?? '\n';
-          const separator = current ? (current.endsWith('\n') ? eol : eol + eol) : '';
-          appendFileSync(path, `${separator}# Evolve 本地运行产物${eol}${missing.join(eol)}${eol}`);
-        }
-        const outcome = !missing.length ? '规则已齐全，未修改。'
-          : `${input === 'check' ? '缺少规则（未写入）' : '已补齐规则'}：\n${missing.join('\n')}`;
-        const warning = tracked.length ? `\n以下目录中有已被 Git 跟踪的文件，忽略规则不会取消跟踪：${tracked.join('、')}` : '';
-        ctx.ui.notify(`${path}\n${outcome}${warning}`, 'info');
+        const result = manageEvolveIgnore(ctx.cwd, input);
+        const outcome = result.status === 'up_to_date' ? '规则已齐全，未修改。'
+          : `${result.status === 'missing' ? '缺少规则（未写入）' : '已补齐规则'}：\n${result.missing.join('\n')}`;
+        const warning = result.tracked.length ? `\n以下目录中有已被 Git 跟踪的文件，忽略规则不会取消跟踪：${result.tracked.join('、')}` : '';
+        ctx.ui.notify(`${result.gitignore_path}\n${outcome}${warning}`, 'info');
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), 'error');
       }
