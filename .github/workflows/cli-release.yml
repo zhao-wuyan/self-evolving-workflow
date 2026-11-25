@@ -1,0 +1,113 @@
+name: 发布通用 CLI
+
+on:
+  push:
+    tags:
+      - 'cli-v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cli-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.event.created && !github.event.deleted
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+
+      - name: 校验默认分支与版本
+        id: version
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^cli-v((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))\.([1-9][0-9]*)$ ]]; then
+            echo '发布标签格式为 cli-v<源码版本>.<CLI 修订号>，例如 cli-v0.6.0.1。' >&2
+            exit 1
+          fi
+          source_version=${BASH_REMATCH[1]}
+          revision=${BASH_REMATCH[5]}
+          git fetch --no-tags origin "refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+          if ! git merge-base --is-ancestor HEAD "refs/remotes/origin/$DEFAULT_BRANCH"; then
+            echo '标签必须指向默认分支上的提交。' >&2
+            exit 1
+          fi
+          if [[ "$(node -p "require('./package.json').version")" != "$source_version" ]]; then
+            echo "标签中的源码版本 $source_version 与 package.json 不一致。" >&2
+            exit 1
+          fi
+          if node -e 'process.exit(Object.hasOwn(require("./package.json"), "omp") ? 0 : 1)'; then
+            echo '通用 CLI 包不得包含 OMP 插件入口，请使用默认分支源码。' >&2
+            exit 1
+          fi
+          {
+            echo "source=$source_version"
+            echo "package=$source_version-cli.$revision"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 构建预编译包并验证安装
+        shell: bash
+        env:
+          PACKAGE_VERSION: ${{ steps.version.outputs.package }}
+        run: |
+          npm ci --no-audit --no-fund
+          npm version "$PACKAGE_VERSION" --no-git-tag-version --ignore-scripts
+          mkdir -p "$RUNNER_TEMP/cli-release"
+          npm pack --json --pack-destination "$RUNNER_TEMP/cli-release" > "$RUNNER_TEMP/cli-pack.json"
+          name=$(jq -er --arg version "$PACKAGE_VERSION" '.[0] | select(.version == $version) | (.files | map(.path)) as $files | select(($files | index("dist/workflow-cli.js")) != null and ($files | index("skills/ew-orchestrate/SKILL.md")) != null and ($files | index("dist/omp-extension.js")) == null) | .filename' "$RUNNER_TEMP/cli-pack.json")
+          path="$RUNNER_TEMP/cli-release/self-evolving-workflow-cli.tgz"
+          mv "$RUNNER_TEMP/cli-release/$name" "$path"
+          npm install --global --prefix "$RUNNER_TEMP/cli-smoke" --no-audit --no-fund "$path"
+          "$RUNNER_TEMP/cli-smoke/bin/evolve" --help
+
+      - name: 发布版本并更新 cli-latest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PACKAGE_VERSION: ${{ steps.version.outputs.package }}
+        run: |
+          tag=$GITHUB_REF_NAME
+          asset=self-evolving-workflow-cli.tgz
+          path=$RUNNER_TEMP/cli-release/$asset
+          version_notes="来源：$DEFAULT_BRANCH ($GITHUB_SHA)。包版本：$PACKAGE_VERSION。安装：npm install -g https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/$asset"
+          if gh release view "$tag" --json isDraft --jq '.isDraft' > "$RUNNER_TEMP/cli-release-draft"; then
+            test "$(cat "$RUNNER_TEMP/cli-release-draft")" = false
+            # 重跑时使用已发布附件，不覆盖固定版本的包。
+            gh release download "$tag" --pattern "$asset" --output "$path" --clobber
+          else
+            gh release create "$tag" "$path" --verify-tag --latest=false \
+              --title "CLI $tag" --notes "$version_notes"
+          fi
+
+          title="CLI Latest ($tag)"
+          notes="$version_notes 固定安装与升级入口：npm install -g https://github.com/$GITHUB_REPOSITORY/releases/download/cli-latest/$asset"
+          if current=$(gh release view cli-latest --json name --jq '.name'); then
+            if [[ ! "$current" =~ ^CLI\ Latest\ \((cli-v[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)\)$ ]]; then
+              echo "无法识别 cli-latest 的当前版本：$current" >&2
+              exit 1
+            fi
+            current_tag=${BASH_REMATCH[1]}
+            if [[ "$current_tag" == "$tag" ]]; then
+              exit 0
+            fi
+            # 发布旧版本或重跑旧任务不会把更新入口拨回旧包。
+            if [[ "$(printf '%s\n' "$current_tag" "$tag" | sort -V | tail -n1)" != "$tag" ]]; then
+              exit 0
+            fi
+            gh release upload cli-latest "$path" --clobber
+            gh release edit cli-latest --title "$title" --notes "$notes" --latest=false
+          else
+            gh release create cli-latest "$path" --target "$GITHUB_SHA" --prerelease --latest=false \
+              --title "$title" --notes "$notes"
+          fi

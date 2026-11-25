@@ -11,11 +11,53 @@
 
 ## 1. 安装 CLI
 
-### 从 npm 安装
+### 从 GitHub Release 安装本 fork
+
+发布首个 `cli-v*` 标签后，以下固定地址提供默认分支的预编译 CLI，无需 clone 或本地编译：
 
 ```sh
-npm install -g self-evolving-workflow
+npm install -g "https://github.com/zhao-wuyan/self-evolving-workflow/releases/download/cli-latest/self-evolving-workflow-cli.tgz"
 evolve --help
+```
+
+升级时重新执行同一条 URL 安装命令。需要固定版本时，将 `cli-latest` 换成版本标签（例如 `cli-v0.6.0.1`）。不要使用 `npm update -g self-evolving-workflow` 更新本 fork；npm registry 的同名包由上游发布。
+
+CLI 更新不会自动覆盖项目 Skills。在目标项目根目录执行 `evolve skill status --scope project --host codex`，保存本地修改后，再用 `evolve skill install --scope project --host codex --upgrade --yes` 更新；Claude Code / Antigravity 分别使用 `--host claude` / `--host agy`。
+
+### 通过 mise 安装与更新
+
+使用支持 npm tarball URL 的新版 [mise](https://mise.jdx.dev/dev-tools/backends/npm.html#install-from-a-tarball-url)，直接管理同一份预编译 Release 包（同样需要先发布首个 `cli-v*` Release）：
+
+```sh
+# 全局安装 Node.js 24 与本 fork 的 CLI
+mise use -g node@24 "npm:https://github.com/zhao-wuyan/self-evolving-workflow/releases/download/cli-latest/self-evolving-workflow-cli.tgz"
+mise exec -- evolve --help
+
+# 检查和更新 CLI
+mise outdated "npm:https://github.com/zhao-wuyan/self-evolving-workflow/releases/download/cli-latest/self-evolving-workflow-cli.tgz"
+mise upgrade "npm:https://github.com/zhao-wuyan/self-evolving-workflow/releases/download/cli-latest/self-evolving-workflow-cli.tgz"
+```
+
+mise 以下载包的 SHA-256 摘要识别版本；`cli-latest` 内容变化后，`mise upgrade` 会安装新包。需要固定版本时，将 URL 中的 `cli-latest` 换成 `cli-v0.6.0.1` 等标签。不要使用 `npm:self-evolving-workflow`，它会指向上游 npm registry。
+
+已通过 mise 管理兼容的 Node.js 时，可省略 `node@24`。去掉安装命令中的 `-g` 可将工具声明写入项目配置；后续在该项目目录执行更新。激活 mise 后可直接运行 `evolve`，也可始终用 `mise exec -- evolve ...`。CLI 升级后仍需另行更新目标宿主的 Skills。
+
+### 与 OMP 插件并存
+
+OMP 内置工具始终调用插件包自带的 CLI；终端中的 `evolve` 由当前 PATH 或 mise 配置决定。两者不会比较版本，也不会自动升级对方。更新全局 CLI 不会改变 OMP 插件正在使用的版本。
+
+在同一项目中，两者会共享 `.evolve/` 中的工作流、记忆与安装记录；用户级数据使用同一个 `~/.evolve/`。Skills 按宿主安装到各自目录，但若两者都对同一宿主执行 `skill install --upgrade`，会使用各自随包 Skills 替换同一个目标目录，最后一次安装生效。升级前先检查状态并保存本地修改；OMP 插件与通用 CLI 分别通过各自的发布入口更新。
+
+### 发布通用 CLI（维护者）
+
+`.github/workflows/cli-release.yml` 监听 `cli-v<源码版本>.<CLI 修订号>`，例如源码 `package.json` 为 `0.6.0` 时使用 `cli-v0.6.0.1`，下一次修订为 `cli-v0.6.0.2`。标签提交必须属于 GitHub 默认分支，且不得声明 OMP 插件入口。
+
+Action 执行 `npm ci`、构建、`npm pack`，并在隔离前缀安装运行 `evolve --help`，然后发布附件 `self-evolving-workflow-cli.tgz`。包版本为 `0.6.0-cli.1`，固定版本附件在重跑时保持不变；`cli-latest` 仅前进到较新版本。源码版本标签、OMP 的 `omp-v*` / `omp-latest` 与 CLI 的 `cli-v*` / `cli-latest` 分开管理。
+
+```sh
+# 在包含此 Action 的默认分支提交上打标签并推送
+git tag cli-v0.6.0.1
+git push origin cli-v0.6.0.1
 ```
 
 ### 从本地源码构建并链接
@@ -67,7 +109,7 @@ evolve --help
 
 除直接拷贝松散的 `skills/` 目录外，本仓库也内置三平台插件与 Marketplace 清单，并可通过 `evolve skill install --plugin` 生成或安装隔离的宿主插件包（自动排除非发布测试包 `release-gate`）。
 
-> **同步安装 `evolve` CLI**：Claude Code、Codex 与 Antigravity 的原生 `plugin install` 出于安全边界不会自动执行 `npm install -g` 或 `postinstall`。若先安装宿主插件，请确保全局已安装 CLI：`npm install -g self-evolving-workflow`（引导规则也会提示检查 `evolve --version`）。
+> **同步安装 `evolve` CLI**：Claude Code、Codex 与 Antigravity 的原生 `plugin install` 不会自动安装全局 CLI。若先安装宿主插件，请按本文第 1 节从本 fork 的 GitHub Release 安装 CLI（引导规则也会提示检查 `evolve --version`）。
 
 ### 方式 A：通过 `evolve` CLI 一键安装或导出插件包
 
