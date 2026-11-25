@@ -414,7 +414,7 @@ test('frozen Memory rejects writes before calling a model and retains identical 
   assert.equal(frozenKnowledgeHash(snapshot.path), snapshot.hash);
 });
 
-test('init commits only the profile and missing bundled Skills, and remains explicitly opt-in', async t => {
+test('init commits only the profile and missing bundled Skills into .agents/skills by default, and remains explicitly opt-in', async t => {
   const server = await protocol(t);
   const f = projectFixture(t, server, { profile: false });
   f.write('user-note.txt', 'Unrelated user work');
@@ -422,49 +422,85 @@ test('init commits only the profile and missing bundled Skills, and remains expl
   assert.equal(initialized.project.project_id, f.project.project_id);
   assert.equal(initialized.project.enabled, true);
   assert.equal(initialized.project.failure_policy, 'local');
+  assert.equal(initialized.skills_root, '.agents/skills');
   assert.throws(() => f.git('show', 'HEAD:user-note.txt'));
   assert.equal(readFileSync(join(f.root, 'user-note.txt'), 'utf8'), 'Unrelated user work');
-  assert.equal(existsSync(join(f.root, 'agents/workflow-executor.md')), true);
+  assert.equal(existsSync(join(f.root, '.agents/agents/workflow-executor.md')), true);
   assert.equal(existsSync(join(f.root, '.omp/agent/agents')), false);
+  assert.equal(existsSync(join(f.root, 'AGENTS.md')), false);
   const manifest = await loadRelease(f.client, f.project, initialized.head.release_id);
   assert.equal(manifest.verification.kind, 'bootstrap');
   assert.deepEqual(manifest.verification.replay_ids, []);
-  assert.ok(manifest.files.some(file => file.path === 'skills/workflow-evolve/scripts/evolve-loop.mjs'));
+  assert.ok(manifest.files.some(file => file.path === '.agents/skills/workflow-evolve/scripts/evolve-loop.mjs'));
+  assert.equal(f.git('ls-tree', '-r', '--name-only', 'HEAD', '--', '.agents/agents'), '');
   assert.equal(f.evolve('openviking', 'init', '--policy', 'evolution.json').head.release_id, initialized.head.release_id);
   assert.equal(f.evolve('openviking', 'config', '--enabled', 'false').backend, 'local');
 });
 
+test('init reuses a single existing managed Skill root, rejects multiple roots, and optionally updates AGENTS.md', async t => {
+  const server = await protocol(t);
+  // 1. 已提交单宿主插件目录时直接复用，不额外装第二套 Skills。
+  const pluginFixture = projectFixture(t, server, { profile: false });
+  pluginFixture.evolve('skill', 'install', '--plugin', '--scope', 'project', '--host', 'agy', '--yes');
+  pluginFixture.git('add', '.agents'); pluginFixture.git('commit', '-qm', '测试: 提交单宿主 AGY 插件');
+  const pluginInit = pluginFixture.evolve('--root', pluginFixture.root, 'openviking', 'init', '--project-id', pluginFixture.project.project_id, '--instructions');
+  assert.equal(pluginInit.skills_root, '.agents/plugins/self-evolving-workflow/skills');
+  assert.equal(existsSync(join(pluginFixture.root, '.agents/skills')), false);
+  assert.equal(pluginInit.instructions.status, 'updated');
+  assert.match(readFileSync(join(pluginFixture.root, 'AGENTS.md'), 'utf8'), /\.agents\/plugins\/self-evolving-workflow\/skills\//);
+  const pluginManifest = await loadRelease(pluginFixture.client, pluginFixture.project, pluginInit.head.release_id);
+  assert.ok(pluginManifest.files.some(file => file.path === '.agents/plugins/self-evolving-workflow/skills/ew-orchestrate/SKILL.md'));
+
+  // 2. 同时存在多套随包工作流目录（如 --plugin --host all）时拒绝初始化，避免重复上传。
+  const multiFixture = projectFixture(t, server, { profile: false });
+  multiFixture.evolve('skill', 'install', '--plugin', '--scope', 'project', '--host', 'all', '--yes');
+  multiFixture.git('add', '.agents', '.codex', '.claude', 'AGENTS.md', 'CLAUDE.md');
+  multiFixture.git('commit', '-qm', '测试: 提交多宿主插件');
+  await assert.rejects(initializeProject(multiFixture.root, undefined, multiFixture.project.project_id), /MULTIPLE_SKILL_ROOTS/);
+
+  // 3. 已有 .omp/skills 时默认自动复用，传不同 --host 时报错拦截。
+  const reuseFixture = projectFixture(t, server, { profile: false });
+  installSkills(reuseFixture.root, ['ew-knowledge'], 'omp');
+  reuseFixture.git('add', '.omp/skills'); reuseFixture.git('commit', '-qm', '测试: 提交已有 .omp/skills');
+  await assert.rejects(initializeProject(reuseFixture.root, undefined, reuseFixture.project.project_id, undefined, 'agy'), /MULTIPLE_SKILL_ROOTS/);
+  const reused = await initializeProject(reuseFixture.root, undefined, reuseFixture.project.project_id);
+  assert.equal(reused.skills_root, '.omp/skills');
+  assert.equal(existsSync(join(reuseFixture.root, '.agents/skills')), false);
+  assert.equal(existsSync(join(reuseFixture.root, '.omp/skills/ew-orchestrate/SKILL.md')), true);
+});
+
 test('init recovers installer-owned untracked Skills while preserving local edits and the index', async t => {
   const server = await protocol(t);
-  for (const host of [undefined, 'omp']) {
+  for (const [installHost, initTarget] of [['agy', 'agy'], ['omp', 'omp'], [undefined, 'generic']]) {
     const f = projectFixture(t, server, { profile: false });
-    const installed = installSkills(f.root, ['ew-knowledge'], host);
+    const installed = installSkills(f.root, ['ew-knowledge'], installHost);
     // 覆盖包已落盘、安装清单尚未写入就中断的情况。
-    if (host === 'omp') rmSync(installed.manifest_path);
-    const path = host ? '.omp/skills/ew-knowledge/SKILL.md' : 'skills/ew-knowledge/SKILL.md';
+    if (installHost === 'omp') rmSync(installed.manifest_path);
+    const path = installHost === 'omp' ? '.omp/skills/ew-knowledge/SKILL.md'
+      : installHost === 'agy' ? '.agents/skills/ew-knowledge/SKILL.md' : 'skills/ew-knowledge/SKILL.md';
     const body = readFileSync(join(f.root, path), 'utf8');
     const before = f.git('rev-parse', 'HEAD');
     f.write(path, body + '\nUser modification.\n');
-    await assert.rejects(initializeProject(f.root, undefined, f.project.project_id, host, host), /MANAGED_DIRTY/);
+    await assert.rejects(initializeProject(f.root, undefined, f.project.project_id, installHost, initTarget), /MANAGED_DIRTY/);
     assert.equal(readFileSync(join(f.root, path), 'utf8'), body + '\nUser modification.\n');
     assert.equal(f.git('rev-parse', 'HEAD'), before);
     f.write(path, body);
     f.write('skills/unknown/SKILL.md', 'User-owned untracked Skill.\n');
-    await assert.rejects(initializeProject(f.root, undefined, f.project.project_id, host, host), /MANAGED_DIRTY/);
+    await assert.rejects(initializeProject(f.root, undefined, f.project.project_id, installHost, initTarget), /MANAGED_DIRTY/);
     assert.equal(readFileSync(join(f.root, 'skills/unknown/SKILL.md'), 'utf8'), 'User-owned untracked Skill.\n');
     rmSync(join(f.root, 'skills/unknown'), { recursive: true });
     f.write('user-note.txt', 'Unrelated staged work'); f.git('add', 'user-note.txt');
-    await assert.rejects(initializeProject(f.root, undefined, f.project.project_id, host, host), /STAGED_CHANGES/);
+    await assert.rejects(initializeProject(f.root, undefined, f.project.project_id, installHost, initTarget), /STAGED_CHANGES/);
     assert.equal(f.git('show', ':user-note.txt'), 'Unrelated staged work');
     f.git('restore', '--staged', 'user-note.txt');
-    const initialized = await initializeProject(f.root, undefined, f.project.project_id, host, host);
+    const initialized = await initializeProject(f.root, undefined, f.project.project_id, installHost, initTarget);
     assert.equal(f.git('show', 'HEAD:' + path), body.trimEnd());
     assert.equal(readFileSync(join(f.root, path), 'utf8'), body);
     assert.equal(f.git('status', '--porcelain', '--', installed.skills_dir), '');
     assert.equal(readFileSync(join(f.root, 'user-note.txt'), 'utf8'), 'Unrelated staged work');
     const manifest = await loadRelease(f.client, f.project, initialized.head.release_id);
     assert.ok(manifest.files.some(file => file.path === path));
-    assert.equal((await initializeProject(f.root, undefined, f.project.project_id, host, host)).head.release_id, initialized.head.release_id);
+    assert.equal((await initializeProject(f.root, undefined, f.project.project_id, installHost, initTarget)).head.release_id, initialized.head.release_id);
   }
 });
 
@@ -473,7 +509,7 @@ test('init installs host Agents without moving Skills or publishing Agent defini
   const f = projectFixture(t, server, { profile: false, minimalSkills: true });
   if (existsSync(join(f.root, 'agents'))) { f.git('rm', '-r', 'agents'); f.git('commit', '-qm', '测试: 不预置通用 Agent'); }
   f.write('.claude/agents/workflow-reviewer.md', 'User customized Agent definition.\n');
-  const initialized = await initializeProject(f.root, undefined, f.project.project_id, 'claude');
+  const initialized = await initializeProject(f.root, undefined, f.project.project_id, 'claude', 'generic');
   assert.equal(existsSync(join(f.root, 'agents')), false);
   assert.equal(existsSync(join(f.root, '.claude/agents/workflow-executor.md')), true);
   assert.equal(existsSync(join(f.root, '.claude/skills')), false);
@@ -489,20 +525,21 @@ test('init installs host Agents without moving Skills or publishing Agent defini
   assert.equal(status.agents.find(agent => agent.name === 'workflow-executor').status, 'up_to_date');
 });
 
-test('OMP native init exports .omp/skills assets without root mirrors or Agent definitions', async t => {
+test('OMP explicit init exports .omp/skills assets with native .omp/agents without root mirrors or publishing Agents', async t => {
   const server = await protocol(t);
   const f = projectFixture(t, server, { profile: false });
-  const initialized = await initializeProject(f.root, undefined, f.project.project_id, 'omp', 'omp');
+  const initialized = await initializeProject(f.root, undefined, f.project.project_id, undefined, 'omp');
   assert.ok(existsSync(join(f.root, '.omp', 'skills', 'ew-orchestrate', 'SKILL.md')));
   assert.ok(existsSync(join(f.root, '.omp', 'skills', 'workflow-evolve', 'scripts', 'evolve-loop.mjs')));
-  assert.ok(existsSync(join(f.root, '.omp', 'agent', 'agents', 'workflow-executor.md')));
+  assert.ok(existsSync(join(f.root, '.omp', 'agents', 'workflow-executor.md')));
+  assert.equal(existsSync(join(f.root, '.omp', 'agent', 'agents')), false);
   assert.equal(existsSync(join(f.root, 'skills', 'ew-orchestrate', 'SKILL.md')), false);
   assert.ok(existsSync(join(f.root, 'skills', 'sample', 'SKILL.md')));
   const manifest = await loadRelease(f.client, f.project, initialized.head.release_id);
   assert.ok(manifest.files.some(file => file.path === '.omp/skills/ew-orchestrate/SKILL.md'));
   assert.ok(manifest.files.some(file => file.path === 'skills/sample/SKILL.md'));
-  assert.ok(manifest.files.every(file => !file.path.startsWith('.omp/agent/')));
-  assert.equal(f.git('ls-tree', '-r', '--name-only', 'HEAD', '--', '.omp/agent'), '');
+  assert.ok(manifest.files.every(file => !file.path.startsWith('.omp/agents/') && !file.path.startsWith('.omp/agent/')));
+  assert.equal(f.git('ls-tree', '-r', '--name-only', 'HEAD', '--', '.omp/agents'), '');
 
   const b = projectFixture(t, server, { id: f.project.project_id });
   const opened = b.open('omp-native-sync', 'ew-orchestrate');

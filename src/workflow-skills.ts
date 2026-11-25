@@ -135,17 +135,23 @@ export function readWorkflowLink(root: string, skill: WorkflowSkill, from: strin
   return readWorkflowMarkdown(root, skill, linkPath(from, destination));
 }
 
-// OMP 的原生项目目录优先于通用根目录，与各宿主 Skill 安装位置保持一致。
+// 通用根目录与跨宿主标准 .agents/skills 优先，兼容 .omp/skills、各宿主及原生插件 Skill 目录。
 export const projectSkillRoots = [
-  '.omp/skills',
   'skills',
   '.agents/skills',
+  '.omp/skills',
   '.codex/skills',
   '.claude/skills',
   '.agents/plugins/self-evolving-workflow/skills',
   '.codex/plugins/self-evolving-workflow/skills',
   '.claude/plugins/self-evolving-workflow/skills',
 ] as const;
+
+export type ProjectSkillRoot = typeof projectSkillRoots[number];
+
+export function projectSkillRootOf(path: string): ProjectSkillRoot | undefined {
+  return projectSkillRoots.find(skillRoot => path.startsWith(skillRoot + '/'));
+}
 
 export function isProjectSkillPath(path: string) {
   return projectSkillRoots.some(skillRoot => path.startsWith(skillRoot + '/'));

@@ -7,9 +7,9 @@ import { InputError } from '../common.js';
 import { createModelClient } from '../model-client.js';
 import { reviewSession, type ReviewedRun, type SkillSignal } from '../retrospective.js';
 import { readSkillReplayReceipt, verifySkillCommit } from '../skill-replay.js';
-import { installSkills, installStatus, type InstallHost } from '../workflow-install.js';
+import { installSkills, installStatus, shippedSkillNames, type InstallHost } from '../workflow-install.js';
 import { WorkflowStore, workflowId, type Mutation } from '../workflow-runtime.js';
-import { bindWorkflowSkill, findProjectSkillAsset, isProjectSkillPath, projectSkillPackageKey, projectSkillRoots, workflowHead, workflowPath } from '../workflow-skills.js';
+import { bindWorkflowSkill, findProjectSkillAsset, isProjectSkillPath, projectSkillPackageKey, projectSkillRootOf, projectSkillRoots, workflowHead, workflowPath, type ProjectSkillRoot } from '../workflow-skills.js';
 import { Wiki, readWikiPages } from '../wiki.js';
 import { readPolicy, readProject, privateProjectUri, projectFile, replaceJson } from './config.js';
 import { ensureDirectory, isMissing, OpenVikingClient, OpenVikingError } from './client.js';
@@ -48,6 +48,24 @@ async function locked<T>(folder: string, action: () => Promise<T>): Promise<T> {
   }
 }
 
+export type OpenVikingSkillTarget = InstallHost | 'generic';
+
+const standardRootToHost: Readonly<Partial<Record<ProjectSkillRoot, OpenVikingSkillTarget>>> = {
+  skills: 'generic',
+  '.agents/skills': 'agy',
+  '.omp/skills': 'omp',
+  '.codex/skills': 'codex',
+  '.claude/skills': 'claude',
+};
+
+const targetToSkillRoot: Readonly<Record<OpenVikingSkillTarget, ProjectSkillRoot>> = {
+  generic: 'skills',
+  agy: '.agents/skills',
+  omp: '.omp/skills',
+  codex: '.codex/skills',
+  claude: '.claude/skills',
+};
+
 function recoverableInstalledSkills(root: string) {
   return installStatus(root).targets.flatMap(target => target.skills.flatMap(skill => {
     if (skill.status !== 'up_to_date') return [];
@@ -57,7 +75,48 @@ function recoverableInstalledSkills(root: string) {
   })).sort();
 }
 
-export async function initializeProject(root: string, policyPath?: string, projectId?: string, agentsHost?: InstallHost, skillsHost?: InstallHost) {
+function workflowSkillRootsIn(root: string, commit: string, recovered: readonly string[]): ProjectSkillRoot[] {
+  const shipped = new Set(shippedSkillNames());
+  const found = new Set<ProjectSkillRoot>();
+  const collect = (path: string) => {
+    const skillRoot = projectSkillRootOf(path);
+    if (!skillRoot) return;
+    const pkg = path.slice(skillRoot.length + 1).split('/')[0];
+    if (pkg && shipped.has(pkg)) found.add(skillRoot);
+  };
+  for (const file of skillAssets(root, commit).files) collect(file.path);
+  for (const path of recovered) collect(path + '/');
+  return projectSkillRoots.filter(skillRoot => found.has(skillRoot));
+}
+
+export function inspectInitSkillRoots(root: string, commit = workflowHead(root)): ProjectSkillRoot[] {
+  return workflowSkillRootsIn(root, commit, recoverableInstalledSkills(root));
+}
+
+function resolveInitSkillPlan(
+  existingRoots: readonly ProjectSkillRoot[],
+  requested?: OpenVikingSkillTarget,
+): { mode: 'install'; host: InstallHost | undefined; skillsRoot: ProjectSkillRoot } | { mode: 'reuse'; skillsRoot: ProjectSkillRoot } {
+  if (existingRoots.length > 1) {
+    throw new InputError('OPENVIKING_MULTIPLE_SKILL_ROOTS: ' + existingRoots.join(', '));
+  }
+  if (existingRoots.length === 1) {
+    const existingRoot = existingRoots[0];
+    if (requested !== undefined) {
+      const wantedRoot = targetToSkillRoot[requested];
+      if (wantedRoot !== existingRoot) {
+        throw new InputError(`OPENVIKING_MULTIPLE_SKILL_ROOTS: ${existingRoot}, ${wantedRoot}`);
+      }
+    }
+    const host = standardRootToHost[existingRoot];
+    if (!host) return { mode: 'reuse', skillsRoot: existingRoot };
+    return { mode: 'install', host: host === 'generic' ? undefined : host, skillsRoot: existingRoot };
+  }
+  const target: OpenVikingSkillTarget = requested ?? 'agy';
+  return { mode: 'install', host: target === 'generic' ? undefined : target, skillsRoot: targetToSkillRoot[target] };
+}
+
+export async function initializeProject(root: string, policyPath?: string, projectId?: string, agentsHost?: InstallHost, skillsHost?: OpenVikingSkillTarget) {
   const client = new OpenVikingClient();
   const existing = readProject(root);
   if (existing) {
@@ -86,6 +145,8 @@ export async function initializeProject(root: string, policyPath?: string, proje
   // 上次安装留下的原版未跟踪包可纳入基线；已修改、已跟踪和未知文件仍受脏检查保护。
   const recovered = recoverableInstalledSkills(root);
   assertManagedClean(root, [...projectSkillRoots.map(path => path + '/'), ...recovered.map(path => ':(exclude,literal)' + path + '/')]);
+  const existingRoots = workflowSkillRootsIn(root, base, recovered);
+  const skillPlan = resolveInitSkillPlan(existingRoots, skillsHost);
   const createPolicy = policyPath === undefined &&
     !lstatSync(join(root, defaultEvolutionPolicyPath), { throwIfNoEntry: false }) &&
     !gitText(root, ['ls-files', '--', defaultEvolutionPolicyPath]);
@@ -106,7 +167,9 @@ export async function initializeProject(root: string, policyPath?: string, proje
     const wiki = exportWiki(root);
     const memory = exportMemory(root);
     if (JSON.stringify(recoverableInstalledSkills(root)) !== JSON.stringify(recovered)) throw new InputError('OPENVIKING_LOCAL_CHANGED');
-    const installed = installSkills(root, [], skillsHost, { agentsHost });
+    const installed = skillPlan.mode === 'install'
+      ? installSkills(root, [], skillPlan.host, { agentsHost })
+      : { installed: [] as string[], skills_dir: join(root, skillPlan.skillsRoot) };
     const skillsRoot = relative(root, installed.skills_dir).split('\\').join('/');
     const added: AssetFile[] = [];
     const bodies = new Map<string, Buffer>();
@@ -156,7 +219,7 @@ export async function initializeProject(root: string, policyPath?: string, proje
     acknowledgeKnowledge(root, wiki.consumed, memory.consumed);
     saveJob(join(folder, 'published.json'), head);
     saveJob(join(root, '.agent-memory', 'openviking', 'materialized.json'), { release_id: head.release_id, files: skills.files });
-    return { project, head, existing: false, skill_commit: commit, local_only_wiki: wiki.localOnly };
+    return { project, head, existing: false, skill_commit: commit, skills_root: skillsRoot, local_only_wiki: wiki.localOnly };
   });
 }
 

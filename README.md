@@ -11,7 +11,7 @@
 
 [快速开始](#快速开始) · [安装与升级](docs/install.md) · [工作流 Skills](#工作流-skills) · [知识与代码图谱](#知识与代码图谱) · [Session 与 Run 指南](skills/ew-orchestrate/references/orchestrator-run-loop.md)
 
-[OpenViking 接入](#openviking-服务可选) · [OMP Skills 与委派](#omp-安装与受限委派)
+[OpenViking 协同（可选）](#openviking-协同可选) · [OMP 无插件用法与受限委派](#omp-无插件用法与受限委派)
 
 </div>
 
@@ -22,10 +22,11 @@
 > 需要 `Node.js >= 22.16.0` 和 `Git`。完整宿主目录对照、安装记录与升级/清理用法见 [安装与升级指南](docs/install.md)。
 
 ```sh
-# 1. 全局安装本 fork 的预编译 CLI（首个 cli-v* Release 发布后可用）
+# 1. 全局安装本 fork 的预编译 CLI（npm 或 mise 二选一；升级时重跑同一命令）
 npm install -g "https://github.com/zhao-wuyan/self-evolving-workflow/releases/download/cli-latest/self-evolving-workflow-cli.tgz"
+# mise use -g node@24 "npm:https://github.com/zhao-wuyan/self-evolving-workflow/releases/download/cli-latest/self-evolving-workflow-cli.tgz"
 
-# 2. 在项目根目录安装 Skill（支持 codex / claude / agy / all）
+# 2. 在项目根目录安装 Skill（推荐 --host agy 安装到跨宿主通用的 .agents/skills/）
 evolve skill install --scope project --host agy --yes
 
 # 或导出/安装为各宿主原生插件包（Claude Code / Codex / Antigravity）
@@ -36,9 +37,7 @@ evolve kb add --kind episodic "发布前运行回归测试。" --id quickstart-r
 evolve search "回归测试" --mode context --session quickstart
 ```
 
-CLI 升级时重新执行上面的 URL 安装命令；npm registry 的同名包属于上游，不用于更新本 fork。版本固定安装与 `cli-v*` 发布规则见[安装指南](docs/install.md#1-安装-cli)。
-
-也可通过 mise 管理 CLI：`mise use -g node@24 "npm:https://github.com/zhao-wuyan/self-evolving-workflow/releases/download/cli-latest/self-evolving-workflow-cli.tgz"`；更新时执行 `mise upgrade "npm:https://github.com/zhao-wuyan/self-evolving-workflow/releases/download/cli-latest/self-evolving-workflow-cli.tgz"`。详见 [mise 安装与更新](docs/install.md#通过-mise-安装与更新)。
+> npm registry 的同名包属于上游，不用于更新本 fork；版本固定安装、`mise upgrade` 与 `cli-v*` 发布规则见 [安装指南](docs/install.md#1-安装-cli)。
 
 升级已有安装并清理已退役旧包可执行 `evolve skill install --upgrade --prune --yes`，查看安装状态可执行 `evolve skill status`。常用会话恢复命令：`evolve session list`、`evolve session get --session <id>`、`evolve run get <run-id> --session <id>`、`evolve run read artifact <run-id> <alias> --session <id>`。
 
@@ -64,19 +63,7 @@ codex plugin add self-evolving-workflow@self-evolving-workflow
 agy plugin install <path-to-exported-plugin-or-repo>
 ```
 
-> 若先通过宿主安装插件，请按[安装指南](docs/install.md#1-安装-cli)从本 fork 的 GitHub Release 安装全局 CLI（各宿主原生 `plugin install` 不会自动安装全局 CLI）。详细路径对照与升级用法见[安装与升级指南](docs/install.md#3-作为原生插件安装claude-code--codex--antigravity)。
-
-## OMP 安装与受限委派
-
-使用本分支的 [GitHub Release 或源码安装的 `evolve`](docs/install.md#1-安装-cli)：
-
-```sh
-evolve skill install --scope user --host omp --yes
-evolve skill install --scope project --host omp --yes
-evolve agent exec "检查当前项目的测试覆盖" --to omp --mode analysis
-```
-
-前两条分别安装用户级 Skills（`~/.omp/agent/skills/`）和项目级 Skills（`.omp/skills/`），按需选择；项目 Skills 和引导文件应提交到 Git，供 Run 绑定版本。第三条委派一次只读分析。升级时先更新 CLI，再执行 `evolve skill status --scope project`；确认差异后用 `evolve skill install --scope project --host omp --upgrade --yes` 更新项目副本，存在本地或自进化修改时先保存再合并。需要斜杠命令？使用 [OMP 插件分支](https://github.com/zhao-wuyan/self-evolving-workflow/tree/omp-plugin-integration#omp-插件入口)。
+> 若先通过宿主安装插件，请按 [安装指南](docs/install.md#1-安装-cli) 安装本 fork 的全局 CLI（各宿主原生 `plugin install` 不会自动安装全局 CLI）。若项目同时启用 OpenViking 同步，建议使用唯一一套项目 Skill 目录（推荐 `.agents/skills/`），避免与 `--plugin --scope project --host all` 混用生成多份重复副本。详细路径对照与升级用法见 [安装与升级指南](docs/install.md#3-作为原生插件安装claude-code--codex--antigravity)。
 
 ## 工作流 Skills
 
@@ -86,6 +73,7 @@ evolve agent exec "检查当前项目的测试覆盖" --to omp --mode analysis
 | --- | --- |
 | [ew-orchestrate](skills/ew-orchestrate/SKILL.md) | 串行编排初始化、规划、执行、验证与评审，轻量单步任务走内置 `ew-companion`。 |
 | [ew-knowledge](skills/ew-knowledge/SKILL.md) | 统一承担 Knowledge Gate 检索、工作记忆同步、收尾沉淀、候选审查与 Wiki 发布/迁移。 |
+| [ew-openviking](skills/ew-openviking/SKILL.md) | 指导 Evolve 与 OpenViking 共存时的知识路由、跨项目经验积累与项目资产同步。 |
 | [ew-odyssey](skills/ew-odyssey/SKILL.md) | 独立发起的迭代排查（`debug`）、质量提升（`improve`）、多维评审（`review`）、安全/防御审计与 UI 优化。 |
 | [ew-swarm](skills/ew-swarm/SKILL.md) | 对复杂或竞争性方案派出多路探索者并行实验、评分筛选与收敛。 |
 | [ew-skill-design](skills/ew-skill-design/SKILL.md) | 设计或迁移 Skill，定义输入/输出契约并校验包结构。 |
@@ -114,24 +102,29 @@ evolve skill workflows show ew-impeccable
   ```
 - **多宿主同步与进化**：`evolve kb config --host all` / `evolve kb sync --host all` 同步 Codex CLI、Claude Code 与 Antigravity 会话记忆，再经 `kb harvest` → `skill draft` → `skill replay` → `skill apply` 完成 Skill 迭代。
 
-### OpenViking 服务（可选）
+## OpenViking 协同（可选）
 
-本地工作流不需要 OpenViking。启用共享前，先在 `~/.openviking/ovcli.conf` 配置服务的 `url` 与 `api_key`，不要提交凭据。没有服务时，参照 [OpenViking 部署指南](https://docs.openviking.ai/en/getting-started/04-setup-for-agent)。
+本地工作流不需要 OpenViking。启用远端同步前，先在 `~/.openviking/ovcli.conf` 配置 `url` 与 `api_key`（不要提交凭据）；部署见 [OpenViking 部署指南](https://docs.openviking.ai/en/getting-started/04-setup-for-agent)。
 
-**共享项目 Skill、Wiki 和记忆**：在仓库根目录运行 `evolve openviking init`。首次会准备 `.evolve/evolution.json`，空策略只同步，不自动演进 Skill。详见[项目资产接入说明](docs/openviking-integration-plan.md#可拔插后端与故障策略)。
-
-**发布收尾后新增的 Wiki**：本地审批发布成功后，CLI 返回 `openviking_sync` 状态及下一步命令；这一步不访问远端，也不代表已上传。已启用 OpenViking 的项目可直接预览并发布，无需重新创建 Session：
+### 项目资产同步
 
 ```sh
-evolve openviking knowledge preview entries/preflight
-evolve openviking knowledge publish --approval <预览返回的哈希>
+# 首次初始化：复用已有唯一工作流 Skill 目录，全新仓库默认落到 .agents/skills/
+# 可选 --host agy|omp|codex|claude|generic 指定目录，--instructions 同步补齐项目根 AGENTS.md
+evolve openviking init
 ```
 
-预览不上传内容；确认展示的正文和项目目的地后再发布。已有“同步这些条目”的明确授权可直接使用。省略条目 ID 会检查本地已审批 Wiki；仅发布预览列出的差异，保留远端 Skills、Memory 和未选择的 Wiki，不触发 Skill 演进。本地内容或远端版本变化时重新预览；结果不确定时用同一批准哈希重试，CLI 核实远端版本后恢复回执。`openviking sync` 用于拉取 Session 资产，`finish` 用于完成 Session 的资产发布。
+- 首次初始化会创建空策略 `.evolve/evolution.json`（只同步 Skills / 已批 Wiki / 共享记忆，不自动演进 Skill）；详见 [项目资产接入说明](docs/openviking-integration-plan.md#可拔插后端与故障策略)。
+- **Session 外发布新 Wiki**：本地 `kb apply` 后返回 `openviking_sync` 提示（不自动上传），无需重建 Session，直接预览并确认发布：
+  ```sh
+  evolve openviking knowledge preview [entries/<id> ...]
+  evolve openviking knowledge publish --approval <预览返回的哈希>
+  ```
+  发布仅更新预览中的差异条目，保留远端 Skills、Memory 与未选 Wiki；`openviking sync` / `finish` 仍用于 Session 级资产同步。
 
-### OpenViking 个人经验库（可选）
+### 个人跨项目经验库
 
-只想跨项目复用个人经验，不必初始化项目资产。在目标仓库根目录运行：
+无需初始化项目资产即可单独启用（默认关闭，候选须经确认才发布）：
 
 ```sh
 evolve experience enable    # 开启当前仓库的采集
@@ -139,11 +132,16 @@ evolve experience status    # 查看是否开启
 evolve experience disable   # 停止采集，不删除已发布经验
 ```
 
-采集默认关闭，候选经验须经确认才发布。详见[经验检索](skills/ew-knowledge/references/knowledge-route.md#个人跨项目经验可选)和[审阅发布](skills/ew-knowledge/references/closeout-protocol.md#个人跨项目经验审阅)。
+- 详见 [经验检索](skills/ew-knowledge/references/knowledge-route.md#个人跨项目经验可选) 与 [审阅发布](skills/ew-knowledge/references/closeout-protocol.md#个人跨项目经验审阅)。
+- 在 OMP 会话中，未配置独立 HTTP 模型时知识提炼与审阅会自动复用 OMP `memory` 角色（可用 `EVOLVE_MODEL_PROVIDER=omp|http` 显式指定）。
+- 项目 Skill、引导文件、审阅后的 Wiki 与 OpenViking 配置可提交到 Git；运行产物与凭据留在本地。
 
-在 OMP 会话中，未配置独立 HTTP 模型时，知识提炼和 Session 审阅会复用 OMP 的 `memory` 模型角色与认证，无需另填 API 地址。独立终端可用 `EVOLVE_MODEL_PROVIDER=omp` 显式选择；已有 HTTP 模型配置继续生效，也可用 `EVOLVE_MODEL_PROVIDER=http` 固定使用 HTTP。生成的知识候选仍须审阅批准后发布。
+## OMP 无插件用法与受限委派
 
-项目 Skill、引导文件、审阅后的 Wiki 和 OpenViking 项目配置可以提交；运行产物和凭据留在本地。
+- **跨宿主共享（推荐）**：项目 Skills 安装到 `.agents/skills/` 时 OMP 原生可读；未装 OMP 插件时，可执行一次 `evolve skill install --scope user --host omp --yes`（写入 `~/.omp/agent/agents/` 全局兜底子 Agent 定义）。
+- **OMP 项目专属目录**：如需仅放 `.omp/`，执行 `evolve skill install --scope project --host omp --yes`（Skills 写入 `.omp/skills/`，Agents 写入 `.omp/agents/`）。
+- **受限委派**：`evolve agent exec "检查当前项目的测试覆盖" --to omp --mode analysis`。
+- **原生斜杠命令与内嵌 CLI**：请使用 [OMP 插件分支](https://github.com/zhao-wuyan/self-evolving-workflow/tree/omp-plugin-integration#omp-插件入口)。
 
 ## 迁移与开发
 
