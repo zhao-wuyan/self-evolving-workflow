@@ -1,0 +1,18 @@
+src/omp-cli-bridge.ts
+  h_7f727d5a3fe0e5 29-30,45,47-49,56-59,71-72
+src/omp-extension.ts
+  h_7f727d5a3fe0e5 22,226
+test/omp-plugin.test.mjs
+  h_7f727d5a3fe0e5 708-748
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "327be4a46c8511c8e1dc75e9861f2a534c396395",
+  "prompts": {},
+  "humans": {
+    "h_7f727d5a3fe0e5": {
+      "author": "诏无言 <59789646+zhao-wuyan@users.noreply.github.com>"
+    }
+  }
+}
