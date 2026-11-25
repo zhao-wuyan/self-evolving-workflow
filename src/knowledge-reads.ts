@@ -52,6 +52,16 @@ export interface KnowledgeQueryRecord {
   items: KnowledgeQueryItem[];
 }
 
+export type KnowledgeOutcome = 'adopted' | 'helpful' | 'ineffective' | 'not_applicable' | 'conflict';
+
+export interface KnowledgeFeedback {
+  id: string;
+  kind: KnowledgeReadKind;
+  content_sha256: string;
+  outcome: KnowledgeOutcome;
+  evidence: string[];
+}
+
 export interface KnowledgeReadsReceipt {
   schema_version: typeof KNOWLEDGE_READS_VERSION;
   searches: KnowledgeSearchRecord[];
@@ -59,6 +69,7 @@ export interface KnowledgeReadsReceipt {
   constraints_bound: KnowledgeConstraintRecord[];
   priors_reuse?: KnowledgePriorReuse[];
   queries?: KnowledgeQueryRecord[];
+  feedback?: KnowledgeFeedback[];
 }
 
 export interface KnowledgeSearchInput {
@@ -214,6 +225,24 @@ function parseQueryRecord(value: unknown, index: number, searchIds: Set<string>)
   };
 }
 
+function parseFeedback(value: unknown, reads: KnowledgeReadRecord[], constraints: KnowledgeConstraintRecord[]): KnowledgeFeedback {
+  const item = record(value, 'feedback');
+  const id = requireText(item.id, 'feedback knowledge ID');
+  const readKind = kind(item.kind, 'feedback kind');
+  const hash = optionalSha(item.content_sha256, 'feedback content hash');
+  if (!hash) throw new InputError('Feedback requires an exact content hash');
+  if (!reads.some(read => read.id === id && read.kind === readKind && read.content_sha256 === hash) &&
+      !(readKind === 'wiki' && constraints.some(entry => entry.knowledge_id === id && entry.content_sha256 === hash))) {
+    throw new InputError('Feedback requires a matching recorded knowledge read or bound constraint');
+  }
+  const outcome = item.outcome;
+  if (outcome !== 'adopted' && outcome !== 'helpful' && outcome !== 'ineffective' &&
+      outcome !== 'not_applicable' && outcome !== 'conflict') throw new InputError('Invalid knowledge feedback outcome');
+  const evidence = stringList(item.evidence, 'feedback evidence');
+  if (!evidence.length) throw new InputError('Feedback requires concrete evidence');
+  return { id, kind: readKind, content_sha256: hash, outcome, evidence };
+}
+
 export function validateKnowledgeReads(value: unknown): KnowledgeReadsReceipt {
   const input = record(value, 'receipt');
   if (input.schema_version !== KNOWLEDGE_READS_VERSION || !Array.isArray(input.searches) ||
@@ -235,11 +264,18 @@ export function validateKnowledgeReads(value: unknown): KnowledgeReadsReceipt {
   if (queries && new Set(queries.map(item => item.query_id)).size !== queries.length) {
     throw new InputError('Duplicate knowledge query ID');
   }
+  const constraints = input.constraints_bound.map(parseConstraint);
+  if (input.feedback !== undefined && !Array.isArray(input.feedback)) throw new InputError('Invalid knowledge feedback');
+  const feedback = input.feedback?.map(item => parseFeedback(item, reads, constraints));
+  if (feedback && new Set(feedback.map(item => JSON.stringify([item.id, item.kind, item.content_sha256]))).size !== feedback.length) {
+    throw new InputError('Duplicate knowledge feedback');
+  }
   return {
     schema_version: KNOWLEDGE_READS_VERSION,
     searches,
     reads,
-    constraints_bound: input.constraints_bound.map(parseConstraint),
+    constraints_bound: constraints,
+    ...(feedback === undefined ? {} : { feedback }),
     ...(input.priors_reuse === undefined ? {} : { priors_reuse: input.priors_reuse.map(parsePriorReuse) }),
     ...(queries === undefined ? {} : { queries }),
   };
@@ -253,6 +289,7 @@ export class KnowledgeReads {
   private readonly constraints: KnowledgeConstraintRecord[] = [];
   private readonly priorReuse?: KnowledgePriorReuse[];
   private readonly queries: KnowledgeQueryRecord[] = [];
+  private readonly feedback: KnowledgeFeedback[] = [];
 
   constructor(initial?: KnowledgeReadsReceipt) {
     if (!initial) return;
@@ -262,6 +299,7 @@ export class KnowledgeReads {
     this.constraints.push(...receipt.constraints_bound);
     this.priorReuse = receipt.priors_reuse;
     if (receipt.queries) this.queries.push(...receipt.queries);
+    if (receipt.feedback) this.feedback.push(...receipt.feedback);
     for (const search of this.searches) {
       const match = /^search-(\d+)$/.exec(search.search_id);
       if (match) this.sequence = Math.max(this.sequence, Number(match[1]));
@@ -301,7 +339,7 @@ export class KnowledgeReads {
     if (input.version !== undefined && (!Number.isSafeInteger(input.version) || input.version < 1)) {
       throw new InputError('Knowledge read version must be a positive integer');
     }
-    if (this.reads.some(read => read.kind === input.kind && read.id === id && read.from_search_id === fromSearchId)) return;
+    if (this.reads.some(read => read.kind === input.kind && read.id === id && read.from_search_id === fromSearchId && read.content_sha256 === contentHash && read.version === input.version)) return;
     this.reads.push({
       kind: input.kind,
       id,
@@ -396,6 +434,24 @@ export class KnowledgeReads {
     return match?.from_search_id ?? this.findSearchId(kind, id, scope);
   }
 
+  recordFeedback(id: string, outcome: string, evidence: string[], contentHash?: string): KnowledgeFeedback {
+    const matching = [
+      ...this.reads.filter(read => read.id === id && read.content_sha256),
+      ...this.constraints.filter(entry => entry.knowledge_id === id && entry.content_sha256)
+        .map(entry => ({ id: entry.knowledge_id, kind: 'wiki' as const, content_sha256: entry.content_sha256 })),
+    ].filter(entry => !contentHash || entry.content_sha256 === contentHash);
+    const unique = [...new Map(matching.map(entry => [JSON.stringify([entry.kind, entry.content_sha256]), entry])).values()];
+    if (unique.length !== 1) throw new InputError('Feedback requires one exact recorded read/version; specify --content-hash when ambiguous');
+    const read = unique[0];
+    const next = parseFeedback({ id, kind: read.kind, content_sha256: read.content_sha256, outcome, evidence }, this.reads, this.constraints);
+    const index = this.feedback.findIndex(item => item.id === next.id && item.kind === next.kind && item.content_sha256 === next.content_sha256);
+    if (index >= 0) {
+      next.evidence = [...new Set([...this.feedback[index].evidence, ...next.evidence])];
+      this.feedback[index] = next;
+    } else this.feedback.push(next);
+    return next;
+  }
+
   toJSON(): KnowledgeReadsReceipt {
     return validateKnowledgeReads({
       schema_version: KNOWLEDGE_READS_VERSION,
@@ -404,6 +460,7 @@ export class KnowledgeReads {
       constraints_bound: this.constraints,
       ...(this.priorReuse ? { priors_reuse: this.priorReuse } : {}),
       ...(this.queries.length ? { queries: this.queries } : {}),
+      ...(this.feedback.length ? { feedback: this.feedback } : {}),
     });
   }
 }
@@ -416,5 +473,6 @@ export function formatKnowledgeReadsMessage(receipt: KnowledgeReadsReceipt): str
   const constraints = receipt.constraints_bound.map(item => item.knowledge_id).join(', ') || 'none';
   const reuse = receipt.priors_reuse?.map(item => `${item.artifact_id} from ${item.producer_run_id} (${item.content_sha256})`).join(', ');
   return `Knowledge searches: ${searches || 'none'}. Knowledge reads: ${reads}. Bound constraints: ${constraints}.` +
-    (reuse ? ` Reused session priors: ${reuse}.` : '');
+    (reuse ? ` Reused session priors: ${reuse}.` : '') +
+    (receipt.feedback?.length ? ` Knowledge outcomes: ${receipt.feedback.map(item => `${item.id}: ${item.outcome} (${item.evidence.join(', ')})`).join('; ')}.` : '');
 }

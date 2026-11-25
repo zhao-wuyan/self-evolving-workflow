@@ -16,51 +16,19 @@ For this repository, the Knowledge Gate and Workflow Routing below take preceden
 
 ## Knowledge Gate (required)
 
-Search project knowledge before inspecting, analyzing, planning against, or changing project files. Start with a query of 1–3 task-specific keywords. Run the knowledge lookup before `git status`, `rg`, file reads, or other project exploration.
-
-| Task context | Required opening |
-| --- | --- |
-| Standalone task | In this checkout, run `node dist/workflow-cli.js search "<query>" --mode context [--format compact]` as the first project-related tool call. The installed equivalent is `evolve search "<query>" --mode context [--format compact]`. |
-| New Evolve Run | Inspect the Run packet. Open bound `session-priors` when it covers the current scope. Otherwise, use `evolve search "<query>" --mode context --reads "<run-dir>/knowledge-reads.json"` and open governing or truncated hits with `evolve kb get <id|q-N:idx>... --reads "<run-dir>/knowledge-reads.json"` (or `--pick <n,...>`, auto-linking `from_search_id`; `--from-search <search-id|q-N>` overrides explicitly) before exploring the project. |
-| Resumed Evolve Run | Recover the packet with `evolve run get <run-id> --session <session-id>`, then resolve project knowledge before resuming exploration. Reuse complete entries already in context and reload any entry represented only by an ID or summary. |
-
-For a CLI lookup in a Run, use `evolve search "<query>" --mode context --session <session-id> --reads "<run-dir>/knowledge-reads.json"`. Add `--task` or `--path` when that scope is known. Use one receipt source per Run. Code search with `evolve code search <query>` is available after the opening lookup.
-
-- Search returns single-line compact JSON by default (`--format compact` for terse plain text, `--verbose` for full fields and `commands` templates), using collision-safe short prefix IDs (`search_id` `q-N` + `idx` with `--reads`), inline `content` for bodies `<= 300` chars or `snippet` + `truncated: true`, and a `20`-item / `4000`-char `constraints` cap (`constraints_notice` indicates overflow).
-- Inspect governing or truncated hits with `evolve kb get <id|q-N:idx>... --resolved` or `--pick <n,...>` (supports short prefixes and batch IDs across Wiki/memory/code symbols). Reusing the same `--reads` receipt auto-links `from_search_id` (`--from-search <search-id|q-N>` overrides explicitly).
-- Refine an empty or irrelevant query before exploring; proceed after inspecting a zero-result refined query. Follow any initialization/recovery hint and re-query when entering a new subsystem, facing a design decision, or after 2 failed fixes.
-- Persist in-flight lessons via `evolve kb add --kind episodic` or Run `report.md` frontmatter — NEVER run `evolve kb harvest` or `ew-knowledge` closeout mid-task (see **Wiki Recording** and **Key Knowledge Commands**). Keep previous project knowledge directories as migration inputs.
+Before inspecting project files or running `git`, release, or maintenance actions — and whenever the task scope changes mid-conversation — run `node dist/workflow-cli.js search "<1–3 task keywords>" --mode context` (installed equivalent: `evolve search`); inspect governing or truncated hits using `evolve kb get <id|q-N:idx>... --resolved`. Reuse complete, applicable `session-priors` for a Run or use one `--reads "<run-dir>/knowledge-reads.json"` receipt with `--session <session-id>`. Refine irrelevant results; re-query on scope change or repeated failed fixes. See `evolve skill workflows show session-run`.
 
 ## Memory Recording
 
-- Record useful working evidence as `--kind episodic` during execution. On the first confirmed misunderstanding or user correction, save the mistaken interpretation, correction, and basis before continuing dependent work.
-- Also record key evidence ruling out hypotheses, confirmed requirements/decisions with rationale, informative failed approaches with conditions, non-obvious verified methods, and handoff blockers (label unresolved conclusions as unverified).
-- Make each memory self-contained: subject, applicable project/version/environment, observation or decision, evidence/source references, and verification state. Distinguish user decisions, suggestions, tool observations, and Agent inferences; omit fragments and unsupported causes. Use `correction`, `work_fact`, `error`, or `verified_fix` (demonstrated fix only).
-- Search existing memories before adding; update the same subject when conclusions change, noting what is superseded or unresolved. Omitting `--evidence` preserves existing sources; passing `--evidence` replaces the full list, so repeat all retained refs. Keep project-specific evidence in project scope.
-- Check memory completeness before compaction, handoff, or closeout (don't rely on background reminders); confirm the write result and read back with `evolve kb get <id>` before claiming it was saved.
+Record the first confirmed correction before dependent work; also retain durable decisions, informative failures, non-obvious verified methods and handoff blockers with real evidence. Search existing records before adding; use `evolve kb add "<lesson>" --kind episodic --type <type> --scene <step> --session <session-id> --evidence <source-ref>` or update the existing record. Do not save routine requests/progress; mark unresolved hypotheses as unverified. Before handoff/compaction confirm material records using `kb get`. Follow `evolve skill workflows show ew-knowledge` for source retention and scope.
 
-## Wiki Recording
+## Closeout & Self-Evolution
 
-- Propose Wiki knowledge only for reusable methods, references, or constraints with sufficient evidence and stable scope; keep suggestions, unresolved hypotheses, and one-off task state in working memory.
-- **Harvest timing**: NEVER run `kb harvest` during execution or between chain steps. Run the returned `closeout_command` only after `evolve session complete` finishes the whole Session, and run `kb harvest conversation` for a standalone task only on explicit user closeout request (`/ew-knowledge`) or confirmed final wrap-up (zero eligible candidates is valid).
-- `kb harvest` generates review candidates (exact duplicates only supplement sources via governance). `kb propose` stages a change without publishing it; inspect the diff and run `kb apply` only with explicit human authorization for IDs, targets, and action. Follow [ew-knowledge](skills/ew-knowledge/SKILL.md) / `evolve skill workflows show ew-knowledge` for publication and conflict handling.
+- Before `run complete`, record actual knowledge adoption/outcomes using `evolve kb feedback` on the existing Run receipt (see session-run); do not fabricate feedback.
+- `evolve session complete` freezes evidence and queues extraction; inspect `evolve kb closeouts <session-id>` instead of launching duplicate harvest. Standalone tasks use explicit/final closeout only; never harvest between chain steps.
+- Wiki publication and Skill modifications require explicit approval. Use governed `kb propose` / `kb apply` and the `ew-knowledge` route; keep unapproved candidates pending. `workflow-evolve` is explicit only for confirmed Skill/process defects.
+- For knowledge/Hook failures or maintenance, run `evolve kb doctor` and follow `ew-knowledge`. Do not migrate, bulk-retry or change user-wide configuration without authorization.
 
-## Key Knowledge Commands
-
-| Command | Purpose and timing |
-| --- | --- |
-| `evolve search "<keywords>" --mode context [--format compact]` | Before project exploration or scope change, retrieve constraints, references, memories, and code. |
-| `evolve kb get <id|q-N:idx>...` / `evolve kb sources <memory-id>` | Batch-read full records or code symbol slices; trace memory provenance to original messages. |
-| `evolve kb add "<memory>" --kind episodic --type <type> --scene <step> --session <session-id> --evidence <source-ref>` | Save an in-flight memory immediately using real evidence references (never invented IDs). |
-| `evolve kb update <memory-id> "<revised memory>" --kind episodic` | Revise content while retaining provenance (add repeated `--evidence` flags only when replacing the source list). |
-| `evolve kb delete <memory-id> --kind episodic` | Remove an exact memory only when explicitly requested (never to hide failed attempts). |
-| `evolve kb harvest session <session-id> --project <project-id>` | **Post-completion only**: after `evolve session complete` (never mid-chain); prefer the returned `closeout_command`. |
-| `evolve kb harvest conversation <conversation-id> --host <host> --project <project-id>` | **Explicit/final closeout only**: after a standalone task fully finishes, using actual conversation ID and host (`codex`, `claude`, or `agy`). |
-| `evolve kb candidates show <receipt-id> --project <project-id>` | Inspect candidates using `receipt_id` from harvest output and the same `--project` value. |
-| `evolve kb propose <change.json> --evidence <source-ref>` / `evolve kb changes <change-id>` | Stage and inspect a governed Wiki change (does not publish). |
-| `evolve kb apply <change-id>` | Publish an inspected Wiki change after authorization, then read back the affected entry and receipt. |
-
-Use canonical full IDs from `kb get` for formal mutations (`propose` / `apply`) and `--root <project-root>` when targeting another root. In a Run, pass the same `--reads "<run-dir>/knowledge-reads.json"` to searches and `kb get`, and bind searches with `--session <session-id>`. Reads default to project + global; writes default to project (`evolve kb --help` for options).
 
 ## Workflow Routing
 

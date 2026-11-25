@@ -138,14 +138,14 @@ Review findings with severity >= medium.
 
 ## Knowledge Persistence (§8)
 
-Include verified reusable findings in the Run summary and harvest the completed Session through `evolve skill workflows show ew-knowledge` (`evolve kb harvest session` → `evolve kb propose`).
+Include verified reusable findings in the Run summary and evidence; follow the shared A_RECORD and post-Session candidate governance in `odyssey-base.md`. Do not initiate harvest at Run seal.
 
 | Category | Content | Follow-up |
 |----------|---------|-----------|
-| Cross-dimension recurring pattern | Pattern + affected dimensions + coding standard | `evolve kb harvest session` → `evolve kb propose` (`category: review`) |
-| Security finding | Vulnerability type + triggers + fix approach | `evolve kb harvest session` → `evolve kb propose` (`category: debug`) |
-| Architecture violation pattern | Violation + correct boundary + verification | `evolve kb harvest session` → `evolve kb propose` (`category: arch`) |
-| Reusable generalization pattern | Signature + risk + fix template + scope | `evolve kb harvest session` → `evolve kb propose` (`category: coding`) |
+| Cross-dimension recurring pattern | Pattern + affected dimensions + coding standard | Post-Session candidate review (`category: review`) |
+| Security finding | Vulnerability type + triggers + fix approach | Post-Session candidate review (`category: debug`) |
+| Architecture violation pattern | Violation + correct boundary + verification | Post-Session candidate review (`category: arch`) |
+| Reusable generalization pattern | Signature + risk + fix template + scope | Post-Session candidate review (`category: coding`) |
 
 ---
 

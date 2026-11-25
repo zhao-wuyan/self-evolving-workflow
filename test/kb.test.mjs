@@ -347,3 +347,32 @@ test('Memory exact search ranks by priority then recency and get resolves unique
   assert.equal(kb.get(collide2)?.id, collide2);
 });
 
+test('kb.list and kb.search retain episodic memory when filtering Wiki by repository UUID', async t => {
+  const { kb } = await fixture(t);
+  const activeRepo = 'c7c015e1-7254-4156-b716-27931b51cc01';
+  const otherRepo = 'd8d126f2-8365-4267-8827-38042c62dd02';
+  await kb.add({ id: 'mem-rotor', content: 'Calibration rotor tooth parameter contract.' });
+  await kb.add({
+    id: 'wiki-current', kind: 'reference', title: 'Current repo guide',
+    content: 'Calibration guide for current repo.', repositories: [activeRepo],
+  }, { evidence: ['test:repo-current'], apply: true });
+  await kb.add({
+    id: 'wiki-other', kind: 'reference', title: 'Other repo guide',
+    content: 'Calibration guide for other repo.', repositories: [otherRepo],
+  }, { evidence: ['test:repo-other'], apply: true });
+
+  const listed = await kb.list({ repository: activeRepo, limit: 20 });
+  assert.ok(listed.results.some(item => item.kind === 'episodic' && item.id === 'mem-rotor'));
+  assert.ok(listed.results.some(item => item.id === 'entries/wiki-current'));
+  assert.ok(!listed.results.some(item => item.id === 'entries/wiki-other'));
+
+  const searched = await kb.search('Calibration', { repository: activeRepo, limit: 20 });
+  assert.ok(searched.results.some(item => item.kind === 'episodic' && item.id === 'mem-rotor'));
+  assert.ok(searched.results.some(item => item.id === 'entries/wiki-current'));
+  assert.ok(!searched.results.some(item => item.id === 'entries/wiki-other'));
+
+  const episodicOnly = await kb.search('Calibration', { kind: 'episodic', repository: activeRepo, limit: 20 });
+  assert.deepEqual(episodicOnly.results.map(item => item.id), ['mem-rotor']);
+});
+
+

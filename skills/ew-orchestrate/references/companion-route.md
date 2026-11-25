@@ -25,7 +25,7 @@ evolve run create --session <session-id>
 ```
 
 3. **按需读取上下文（极简仪式）**：可用原生文件工具直接读取 `skill_entry_path`（`evolve run read skill` 为可选项，`run complete` 不再强制要求，仅在需要固定 commit 隔离或审计追踪时使用）；简单交付物修复可省略 `knowledge-reads.json`（仍建议在探索前用 `evolve search "<topic>" --mode context` 快速检索约束）；如有 `latest-review` / `latest-debug` 上游输入通过 `evolve run read artifact` 读取。
-4. 直接在当前主上下文利用完整模型能力定位目标、完成边界内改动并执行最窄验证命令（**默认不拆分子 Agent，也不套用 `ew-analyze`/`ew-plan` 仪式**）。对于简单交付物修复，`outputs/companion-log.md` 为**可选项**（仅在需要留档或较复杂改动时写入 `{run_dir}/outputs/companion-log.md` 并带匹配 `companion-log/1.0` 的 YAML frontmatter；`run_dir/outputs` 仅在实际写文件或步骤契约要求时惰性创建）。若过程中解决了非显而易见的问题或环境坑点，仍直接通过 `evolve kb add --kind episodic "<lesson>" --type verified_fix --scene coding --session <session-id>` 记录到工作记忆，然后封存当前 Run（若后续已有 pending 步骤需一并派发，可加 `--next`）：
+4. 直接在当前主上下文利用完整模型能力定位目标、完成边界内改动并执行最窄验证命令（**默认不拆分子 Agent，也不套用 `ew-analyze`/`ew-plan` 仪式**）。对于简单交付物修复，`outputs/companion-log.md` 为**可选项**（仅在需要留档或较复杂改动时写入 `{run_dir}/outputs/companion-log.md` 并带匹配 `companion-log/1.0` 的 YAML frontmatter；`run_dir/outputs` 仅在实际写文件或步骤契约要求时惰性创建）。若过程中解决了非显而易见的问题或环境坑点，仍直接通过 `evolve kb add "<lesson>" --kind episodic --type verified_fix --scene coding --session <session-id> --evidence <source-ref>` 记录适用条件、根因、方法和真实验证证据；按公共 session-run 规范先记录实际知识反馈，然后封存当前 Run（若后续已有 pending 步骤需一并派发，可加 `--next`）：
 
 ```text
 evolve run complete <run_id> --session <session-id> --summary "<observed change and verification>" --verdict done|done_with_concerns [--next]
@@ -33,7 +33,7 @@ evolve run complete <run_id> --session <session-id> --summary "<observed change 
 
 5. **延迟关闭 Topic Session（Deferred Closeout）**：
    - **预计同一主题仍有后续迭代/追问时**：完成 `evolve run complete` 后**保持 Session 为 `open`**（不要每轮立即关闭），等待下一轮复用该 Session 追加步骤；
-   - **确认当前主题已收口或属一次性完结任务时**：再执行 `evolve session complete --session <session-id>`，并按返回的 `closeout_command` 转交 `ew-knowledge`（`evolve skill workflows show ew-knowledge`）处理候选知识（候选为零同样正常完结）。不要在业务任务执行中自动调用 `workflow-evolve` 或 `evolve session review`；仅当 `evolve_reminder` 确实反映了 Skill/编排流程本身的缺陷时，在收尾简要告知用户可显式使用 `/workflow-evolve`。
+   - **确认当前主题已收口或属一次性完结任务时**：再执行 `evolve session complete --session <session-id>`，自动冻结证据并进入收尾队列；先检查 `evolve kb closeouts <session-id>`，按状态转交 `ew-knowledge`（不重复抽取正在运行的任务）（`evolve skill workflows show ew-knowledge`）处理候选知识（候选为零同样正常完结）。不要在业务任务执行中自动调用 `workflow-evolve` 或 `evolve session review`；仅当 `evolve_reminder` 确实反映了 Skill/编排流程本身的缺陷时，在收尾简要告知用户可显式使用 `/workflow-evolve`。
 
 ## 退出与升级
 

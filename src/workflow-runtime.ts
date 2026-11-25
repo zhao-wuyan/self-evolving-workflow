@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import {
   evolveDir, evolvePath, InputError, LEGACY_AGENT_MEMORY_DIR, openDb, requireText,
@@ -13,6 +13,7 @@ import { buildWikiPrior, wikiLookupScope, type WikiLookupScope, type WikiPrior }
 import { workflowName } from './workflow-names.js';
 import type { AssetBinding, OpenVikingReadEvidence } from './openviking/types.js';
 import { readRemoteReceipt, validateRemoteReads } from './openviking/evidence.js';
+import { defaultMemoryDbPath, MemoryStore, type ConversationMessage } from './memory.js';
 import {
   bindWorkflowSkill, readWorkflowLink, readWorkflowMarkdown, workflowBlob, workflowHash, workflowHeader, workflowMeta,
   workflowPath, workflowRecord, type ArtifactType, type WorkflowSkill, type OutputSlot,
@@ -81,6 +82,7 @@ interface Run {
   verdict?: 'done' | 'done_with_concerns';
   knowledge_reads?: KnowledgeReadsReceipt;
   openviking_reads?: OpenVikingReadEvidence[];
+  closeout_evidence?: string;
   wiki_priors?: WikiPrior[];
   priors_reuse?: KnowledgePriorReuse[];
   assignments?: Record<string, Assignment>;
@@ -289,7 +291,7 @@ export function sessionEvolveSignals(session: Session): string[] {
   return signals;
 }
 
-export function evolveSessionReceipt(session: Session) {
+export function evolveSessionReceipt(session: Session, excludedRunIds: ReadonlySet<string> = new Set()): { schema_version: 'evolve-session-completion/1.0'; id: string; session_id: string; recorded_at: string; messages: ConversationMessage[] } {
   if (session.status !== 'completed' || !session.completed_at) {
     throw new InputError('Complete the Evolve Session before harvesting its evidence');
   }
@@ -298,7 +300,7 @@ export function evolveSessionReceipt(session: Session) {
     id: workflowHash(JSON.stringify([session.id, session.created_at, session.completed_at, session.revision])).slice(7),
     session_id: session.id,
     recorded_at: session.completed_at,
-    messages: session.runs.flatMap(run => {
+    messages: session.runs.filter(run => !excludedRunIds.has(run.id)).flatMap(run => {
       const timestamp = run.finished_at ?? session.completed_at!;
       return [
         { id: run.id + ':outcome', role: 'tool' as const, timestamp,
@@ -338,6 +340,75 @@ export function* readCompletedVerificationArtifacts(root: string, id?: string) {
   } finally { db.close(); }
 }
 
+export interface NativeCloseoutJob {
+  receipt_id: string;
+  session_id: string;
+  project: string;
+  receipt: ReturnType<typeof evolveSessionReceipt>;
+  state: 'pending' | 'running' | 'failed' | 'done';
+  attempts: number;
+  last_error: string | null;
+  updated_at: string;
+}
+
+function ensureNativeCloseouts(db: ReturnType<typeof openDb>) {
+  db.exec(`CREATE TABLE IF NOT EXISTS native_closeouts (
+    receipt_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, project TEXT NOT NULL,
+    receipt TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','running','failed','done')),
+    attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, updated_at TEXT NOT NULL,
+    FOREIGN KEY(session_id) REFERENCES sessions(id)
+  ) STRICT;`);
+}
+
+export function readNativeCloseoutJobs(root: string, session?: string): NativeCloseoutJob[] {
+  const path = workflowDbPath(root);
+  if (!existsSync(path)) return [];
+  const db = openDb(path, true);
+  try {
+    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'native_closeouts'").get()) return [];
+    const rows = session === undefined
+      ? db.prepare('SELECT * FROM native_closeouts ORDER BY updated_at, receipt_id').all()
+      : db.prepare('SELECT * FROM native_closeouts WHERE session_id = ? ORDER BY updated_at, receipt_id').all(session);
+    return rows.map(row => ({ ...row, receipt: JSON.parse(String(row.receipt)) })) as NativeCloseoutJob[];
+  } finally { db.close(); }
+}
+
+/** The completion receipt is immutable; only the processing state changes. */
+export function updateNativeCloseoutJob(root: string, receiptId: string, state: NativeCloseoutJob['state'], error?: string) {
+  const db = openDb(workflowDbPath(root));
+  try {
+    db.prepare(`UPDATE native_closeouts SET state = ?, last_error = ?, updated_at = ?,
+      attempts = attempts + ? WHERE receipt_id = ? AND state != 'done'`)
+      .run(state, error ?? null, new Date().toISOString(), state === 'running' ? 1 : 0, receiptId);
+  } finally { db.close(); }
+}
+
+export function nativeCloseoutProject(root: string): string {
+  return basename(resolve(root));
+}
+
+function boundedEvidence(content: string, max = 12_000): string {
+  return content.length <= max ? content : content.slice(0, max) + '\n[Evidence truncated; inspect the referenced sealed source.]';
+}
+
+/** Freeze only exact-session records; never infer links from topic similarity or global memory. */
+function sessionMemoryEvidence(root: string, session: Session): ConversationMessage[] {
+  const memory = new MemoryStore(defaultMemoryDbPath(root), { readOnly: true });
+  try {
+    const result: ConversationMessage[] = [];
+    for (const type of ['correction', 'verified_fix', 'work_method', 'work_fact', 'error']) {
+      for (const record of memory.list({ session: session.id, type, limit: 40 }).results) {
+        if (!record.sourceMessageIds.length || Date.parse(record.updatedAt) > Date.parse(session.completed_at!)) continue;
+        result.push({
+          id: `memory:${record.id}@${record.version}`, role: 'tool', timestamp: record.updatedAt,
+          content: boundedEvidence(`Unverified episodic record (${record.type}); validate against its sources: ${record.sourceMessageIds.join(', ')}\n${record.content}`, 4000),
+        });
+      }
+    }
+    return result;
+  } finally { memory.close(); }
+}
+
 export class WorkflowStore {
   private readonly db: ReturnType<typeof openDb>;
   constructor(readonly root: string) {
@@ -350,6 +421,7 @@ export class WorkflowStore {
       'CREATE TABLE IF NOT EXISTS requests (session TEXT NOT NULL, id TEXT NOT NULL, fingerprint TEXT NOT NULL, receipt TEXT NOT NULL, PRIMARY KEY (session, id), FOREIGN KEY (session) REFERENCES sessions(id)) STRICT;',
       'CREATE TABLE IF NOT EXISTS artifacts (session TEXT NOT NULL, id TEXT NOT NULL, body BLOB NOT NULL, PRIMARY KEY (session, id), FOREIGN KEY (session) REFERENCES sessions(id)) STRICT;',
     ].join('\n'));
+    ensureNativeCloseouts(this.db);
   }
 
   close() { this.db.close(); }
@@ -855,6 +927,8 @@ export class WorkflowStore {
       run.finished_at = new Date().toISOString();
       run.verdict = verdict;
       run.summary = requireText(summary, 'Run summary');
+      const report = safeFile(this.runDir(id, run.id), 'report.md');
+      if (report) run.closeout_evidence = boundedEvidence(report.toString('utf8'));
       run.knowledge_reads = knowledge;
       run.openviking_reads = remoteReads;
       delete run.wiki_priors;
@@ -930,25 +1004,85 @@ export class WorkflowStore {
     });
   }
 
-  completeSession(id: string, change: Mutation) {
-    return this.mutate(id, 'session.complete', change, {}, session => {
+  completeSession(id: string, change: Mutation, project = nativeCloseoutProject(this.root)) {
+    project = requireText(project, 'source project ID');
+    return this.mutate(id, 'session.complete', change, { project }, session => {
       if (!session.steps.length || nextAction(session).action !== 'complete') throw new InputError('Resolve pending workflow steps and decisions');
       session.status = 'completed';
       session.completed_at = new Date().toISOString();
       if (session.openviking) session.openviking.publication = { state: 'pending' };
-      const completion = evolveSessionReceipt({ ...session, revision: session.revision + 1 });
+      // Respect an explicitly read-only retrospective in the frozen receipt, not just in agent prose.
+      const excludedRunIds = new Set(session.runs
+        .filter(run => run.skill.skill_id === 'ew-retrospective' && run.task.args.includes('--no-route'))
+        .map(run => run.id));
+      const readSealed = (artifact: Artifact) => {
+        const row = this.db.prepare('SELECT body FROM artifacts WHERE session = ? AND id = ?').get(id, artifact.id);
+        if (!row?.body || !(row.body instanceof Uint8Array)) return;
+        const bytes = Buffer.from(row.body);
+        if (workflowHash(bytes) !== artifact.sha256) throw new InputError('Sealed evidence hash mismatch: ' + artifact.id);
+        return bytes;
+      };
+      for (const artifact of Object.values(session.artifacts)) {
+        if (artifact.kind !== 'retrospective' || artifact.schema !== 'retrospective/1.0' || !/\.json$/i.test(artifact.path)) continue;
+        const bytes = readSealed(artifact);
+        if (!bytes) continue;
+        const retrospective = JSON.parse(bytes.toString('utf8').replace(/^\uFEFF/, '')) as { routing_skipped?: unknown };
+        if (retrospective.routing_skipped === true) excludedRunIds.add(artifact.run_id);
+      }
+      const completion = evolveSessionReceipt({ ...session, revision: session.revision + 1 }, excludedRunIds);
+      const timestamp = session.completed_at;
+      // A standalone no-route retrospective produces a valid empty closeout receipt.
+      const onlyExcludedRuns = session.runs.length > 0 && session.runs.every(run => excludedRunIds.has(run.id));
+      const evidence: ConversationMessage[] = onlyExcludedRuns ? [] : [
+        { id: 'session:objective', role: 'user', timestamp,
+          content: boundedEvidence(JSON.stringify({ objective: session.objective, definition_of_done: session.definition_of_done,
+            boundary_contract: session.boundary_contract, goals: session.goals, amendments: session.amendments,
+            decisions: session.steps.filter(step => step.decision).map(step => ({
+              id: step.id, decision: step.decision, confidence: step.confidence,
+            })) })) },
+        ...session.runs.filter(run => run.closeout_evidence && !excludedRunIds.has(run.id)).map(run => ({
+          id: run.id + ':sealed-report', role: 'tool' as const, timestamp: run.finished_at ?? timestamp,
+          content: run.closeout_evidence!,
+        })),
+        ...sessionMemoryEvidence(this.root, session),
+      ];
+      // Reuse sealed outputs, never read mutable worktree files during closeout.
+      let remaining = 72_000;
+      for (const artifact of Object.values(session.artifacts)) {
+        if (remaining <= 0 || excludedRunIds.has(artifact.run_id) || artifact.wiki_priors || !/\.(md|json|txt)$/i.test(artifact.path)) continue;
+        const bytes = readSealed(artifact);
+        if (!bytes) continue;
+        const content = boundedEvidence(bytes.toString('utf8'), Math.min(12_000, remaining));
+        remaining -= content.length;
+        evidence.push({ id: artifact.id, role: 'tool', timestamp,
+          content: `Sealed artifact ${artifact.path}; SHA ${artifact.sha256}\n${content}` });
+      }
+      const requests = this.db.prepare('SELECT id, receipt FROM requests WHERE session = ? ORDER BY id').all(id);
+      for (const request of onlyExcludedRuns ? [] : requests) {
+        const record = JSON.parse(String(request.receipt));
+        if (record.receipt?.action === 'run.decide' || record.receipt?.action === 'session.amend') {
+          evidence.push({ id: `decision:${request.id}`, role: 'tool', timestamp: record.receipt.recorded_at,
+            content: boundedEvidence(JSON.stringify({ verdict: record.verdict, summary: record.summary,
+              reason: record.receipt.reason, evidence: record.receipt.evidence }), 4000) });
+        }
+      }
+      completion.messages.push(...evidence);
+      this.db.prepare(`INSERT INTO native_closeouts (receipt_id, session_id, project, receipt, state, updated_at)
+        VALUES (?, ?, ?, ?, 'pending', ?)`).run(completion.id, id, project, JSON.stringify(completion), timestamp);
       const evolveSignals = sessionEvolveSignals(session);
-      const closeoutCommand = `evolve kb harvest session ${session.id} --project <project-id>`;
+      const closeoutCommand = `evolve kb harvest session ${session.id} --project ${JSON.stringify(project)}`;
       const reviewCommand = `evolve session review ${session.id}`;
       return {
         status: session.status,
         completed_at: session.completed_at,
         completion_id: completion.id,
+        closeout_state: 'pending' as const,
+        closeout_project: project,
         closeout_command: closeoutCommand,
         evolve_reminder: evolveSignals.length > 0,
         ...(evolveSignals.length > 0 ? { evolve_signals: evolveSignals, review_command: reviewCommand } : {}),
         recommended_actions: [
-          closeoutCommand,
+          `evolve kb closeouts ${session.id}`,
           ...(evolveSignals.length > 0 ? [reviewCommand] : []),
         ],
       };

@@ -112,8 +112,8 @@ Write `outputs/explore.json` + `evidence.ndjson` (`phase=explore`). Update `unde
 ### A_RECORD
 
 1. Finalize `understanding.md` summary/learnings per the mode's `## Knowledge Persistence` table; resolve pending decisions and audit `phase_goals[]` (`pending -> done|skipped|failed`, `phase_goals_all_done = true` iff all confirmed).
-2. Set `current_state = "END"` in `outputs/session.json`, emit the mode's Completion Summary, and seal atomically with fenced `evolve run complete` including verified reusable findings in `--summary`.
-3. Persist verified non-obvious root causes and generalizable pitfalls via `evolve kb add --kind episodic "<lesson>" --type verified_fix --scene <mode> --session <session-id>`, and follow `evolve skill workflows show ew-knowledge` (repo: `skills/ew-knowledge/SKILL.md`) to stage Wiki candidates post-seal via `evolve kb harvest session <session-id>` and `evolve kb propose` / `apply` (never direct corpus writes).
+2. Before Run seal, record verified non-obvious lessons with applicability, method, verification, and real evidence using the memory/feedback contract in `evolve skill workflows show session-run`. Set `current_state = "END"` in `outputs/session.json`, emit the mode’s Completion Summary, and seal with fenced `evolve run complete` and a grounded summary.
+3. Let the orchestrator finish the Session, then inspect its queued closeout through `evolve skill workflows show ew-knowledge`. Do not initiate harvest at Run seal; candidates are reviewed after `evolve session complete`, and Wiki publication requires explicit authorization.
 
 </shared_actions>
 
@@ -136,7 +136,7 @@ Before discovery or code search, satisfy the **Knowledge Gate** (`evolve skill w
 
 | Outcome | Recommended follow-up |
 |---|---|
-| Reusable patterns/rules ready to publish | Follow `evolve skill workflows show ew-knowledge` (`evolve kb harvest session` -> `evolve kb propose`) |
+| Reusable patterns/rules ready for review | Follow `evolve skill workflows show ew-knowledge` after Session completion |
 | Independent second opinion needed | `evolve agent exec "<review prompt>" --to codex\|agy\|claude\|omp --mode analysis`; explicitly select an authorized different model for cross-model verification (OMP `--model <selector>`, one-shot restricted worker), with binding rules in [runtime adapters](runtime-adapters.md) |
 | Pending `phase=decision` items remain | Filter `evidence.ndjson` (`phase == "decision" && status == "pending"`) |
 | Backlog `phase=issue` items logged | Filter `evidence.ndjson` (`phase == "issue"`) |

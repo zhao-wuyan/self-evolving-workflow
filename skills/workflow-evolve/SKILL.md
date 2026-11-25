@@ -4,7 +4,7 @@ disable-model-invocation: true
 description: "Agent-driven Skill evolution: collect incremental signals from host run histories, memory, and wiki; propose a Skill modify/create strategy; apply and validate."
 argument-hint: "[--session <id>] [--skill <id>] [--host codex|claude|agy|all] [--since <7d>] [--query <text>]"
 session-mode: none
-version: 0.5.0
+version: 0.6.0
 ---
 
 # Workflow Evolution
@@ -15,26 +15,25 @@ Run this Skill on explicit user `/workflow-evolve` invocation. The **Agent direc
 
 ### 1. Collect & Search Historical Signals
 
-Gather evidence across host transcripts, episodic memory, Wiki/Session state, and closeout candidates before proposing any change:
+Start with existing candidate and receipt evidence; do not repeat model extraction by default.
 
 ```text
-# 1) Incrementally collect signals (skips already-scanned byte offsets and unchanged records)
-evolve history collect [--host codex|claude|agy|all] [--session <id>] [--llm]
-
-# 2) List & search historical runs across Codex, Claude Code, and Agy (includes tool calls & errors)
-evolve history list [--signals-only] [--since 7d] [--format compact]
-evolve history search "<query>" [--role user|assistant|tool|error] [--skill <id>] [--signals-only] [--format compact]
-evolve history show <session-id> --anchor <anchor-id> --include-tools [--context 5]
-
-# 3) Inspect episodic memory, deterministic session review, and closeout/reminder state
-evolve kb search "<topic>" --kind episodic [--session <id>]
-evolve session review <session-id> --no-llm
+evolve kb closeouts [<session-id>]
+evolve kb candidates show <receipt-id> --project <project-id>
 evolve kb reminders
 ```
 
-- Always inspect exact message/tool anchors (`history show --include-tools`) rather than relying on unverified summaries alone.
-- *Done when*: Relevant historical signals across host transcripts, `memory.db`, `workflow.db`, and `closeout.db` are gathered with concrete source IDs.
+Use the exact job's receipt/project and existing classification. Reuse routed evidence where adequate. Only for unresolved attribution, gather missing deterministic evidence:
 
+```text
+evolve history collect [--host codex|claude|agy|all] [--session <id>]
+evolve history search "<query>" [--skill <id>] [--signals-only] [--format compact]
+evolve history show <session-id> --anchor <anchor-id> --include-tools
+evolve kb search "<topic>" --kind episodic [--session <id>]
+evolve session review <session-id> --no-llm
+```
+
+Opt into `history collect --llm` or model session review only when deterministic/candidate evidence cannot resolve the question. Inspect source anchors, not unverified summaries. Do not harvest running Sessions or perform batch recovery in this Skill. *Done when*: the responsible Skill/version or deterministic issue is grounded in concrete evidence.
 ### 2. Formulate Evolution Strategy & Obtain Confirmation
 
 Before editing any file, run **Four-Way Triage** on every collected signal:
@@ -72,7 +71,7 @@ Apply the approved strategy directly in the workspace while preserving package c
    - Verify the fix/new workflow with targeted regression checks or an isolated verification subagent against concrete failing & passing scenarios.
 3. **Close the loop**:
    - Record the verified evolution via `evolve kb add "..." --kind episodic --type verified_fix --evidence <anchor>`.
-   - Acknowledge handled reminders (`evolve kb reminders ack`) and sync evolved or new project Skills to host directories (`evolve skill sync [--scope project|user] [--host codex|claude|agy|all]`).
+   - Acknowledge handled reminders (`evolve kb reminders ack <id>` (only the exact handled reminder; never acknowledge all by default)) and sync evolved or new project Skills to host directories (`evolve skill sync [--scope project|user] [--host codex|claude|agy|all]`).
 - *Done when*: Static validation and verification checks pass, and verification state + any remaining follow-ups are recorded.
 
 ## Optional Offline Replay Harness

@@ -8,7 +8,7 @@ contract:
   discovery: self-described
   consumes: []
   produces: []
-version: 0.6.0
+version: 0.6.1
 ---
 
 For Evolve Session/Run dispatch, decisions, and recovery, inspect `evolve skill workflows show session-run` (repo source: `skills/ew-orchestrate/references/orchestrator-run-loop.md`).

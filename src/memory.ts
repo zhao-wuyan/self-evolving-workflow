@@ -737,7 +737,7 @@ export async function extractMemoryInputs(messages: ConversationMessage[], optio
   const useL1Prompt = !options.systemPrompt && agentMemoryPrompt.kind === 'memory-extract';
   const prompt = useL1Prompt ? formatExtractionPrompt({ newMessages: messages }) : formatEvidencePrompt(messages);
   const formatHint = agentMemoryPrompt.kind === 'closeout-harvest'
-    ? 'Return ONLY a JSON array shaped like [{"memories":[{"type":"work_method","content":"...","source_message_ids":["exact supplied ID"]}]}] or [].'
+    ? 'Return ONLY a JSON array shaped like [{"memories":[{"type":"work_method","content":"...","source_message_ids":["exact supplied ID"]}]}] or []. Allowed types: work_method, constraint, workflow_issue, deterministic_check.'
     : agentMemoryPrompt.kind === 'session-signal'
       ? 'Return ONLY a JSON array shaped like [{"memories":[{"type":"correction","content":"...","source_message_ids":["exact supplied ID"]}]}] or [].'
       : 'Return ONLY a JSON array shaped like [{"scene_name":"...","message_ids":["..."],"memories":[{"content":"...","type":"work_fact","source_message_ids":["..."]}]}].';

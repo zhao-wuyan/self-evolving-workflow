@@ -182,13 +182,13 @@ Shallow pass-through patterns, leaked internal seams, deep-import patterns bypas
 
 ## Knowledge Persistence (§9)
 
-Include verified reusable architectural findings in the Run summary and harvest the completed Session via `evolve skill workflows show ew-knowledge` (`evolve kb harvest session` → `evolve kb propose`). When `GLOSSARY.md` or `docs/adr/` exist in the repository, record crystallized seam vocabulary or rejected-candidate ADRs when durable.
+Include verified reusable findings in the Run summary and evidence; follow the shared A_RECORD and post-Session candidate governance in `odyssey-base.md`. Do not initiate harvest at Run seal.
 
 | Category | Content | Follow-up |
 |----------|---------|-----------|
-| Architecture seam constraint | Shallow hotspot + deepened interface contract + guardrail rule | `evolve kb harvest session` → `evolve kb propose` (`category: arch`) |
-| Deepening / adapter pattern | Dependency category + port/adapter shape + test surface | `evolve kb harvest session` → `evolve kb propose` (`category: coding`) |
-| Boundary test / guardrail rule | Deterministic check + "prove the rules bite" verification | `evolve kb harvest session` → `evolve kb propose` (`category: test`) |
+| Architecture seam constraint | Shallow hotspot + deepened interface contract + guardrail rule | Post-Session candidate review (`category: arch`) |
+| Deepening / adapter pattern | Dependency category + port/adapter shape + test surface | Post-Session candidate review (`category: coding`) |
+| Boundary test / guardrail rule | Deterministic check + "prove the rules bite" verification | Post-Session candidate review (`category: test`) |
 
 ---
 

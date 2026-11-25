@@ -217,14 +217,14 @@ Max iterations (default 3; at most 1 bounded `+2` extension in Normal mode) prev
 
 ## Knowledge Persistence (§8)
 
-Include verified reusable findings in the Run summary and harvest the completed Session through `evolve skill workflows show ew-knowledge` (`evolve kb harvest session` → `evolve kb propose`).
+Include verified reusable findings in the Run summary and evidence; follow the shared A_RECORD and post-Session candidate governance in `odyssey-base.md`. Do not initiate harvest at Run seal.
 
 | Category | Content | Follow-up |
 |----------|---------|-----------|
-| Multi-round fix cycle pattern | Problem scenario + fix iteration + final approach | `evolve kb harvest session` → `evolve kb propose` (`category: debug`) |
-| Reusable implementation pattern | Pattern + applicable scope + code template | `evolve kb harvest session` → `evolve kb propose` (`category: coding`) |
-| Acceptance criteria template | Standard template + verify_method suggestion | `evolve kb harvest session` → `evolve kb propose` (`category: review`) |
-| Generalization pattern | Signature + risk + fix template | `evolve kb harvest session` → `evolve kb propose` (`category: coding`) |
+| Multi-round fix cycle pattern | Problem scenario + fix iteration + final approach | Post-Session candidate review (`category: debug`) |
+| Reusable implementation pattern | Pattern + applicable scope + code template | Post-Session candidate review (`category: coding`) |
+| Acceptance criteria template | Standard template + verify_method suggestion | Post-Session candidate review (`category: review`) |
+| Generalization pattern | Signature + risk + fix template | Post-Session candidate review (`category: coding`) |
 
 ---
 

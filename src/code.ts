@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { createRequire } from 'node:module';
-import { join, posix } from 'node:path';
+import { isAbsolute, join, posix, resolve } from 'node:path';
 import type { CodeGraph as Graph, Edge, IndexProgress, Node } from '@colbymchenry/codegraph';
 import { DatabaseSync, InputError, NotFoundError, requireText, searchLimit } from './common.js';
 
@@ -25,6 +25,12 @@ const LOCK_EMPTY_GRACE_MS = 1_000;
 const WRITE_LOCK_WAIT_MS = 5_000;
 const READ_LOCK_WAIT_MS = 200;
 const PATH_SEARCH_INITIAL_LIMIT = 500;
+export const AUTO_REFRESH_MAX_DB_BYTES = 100 * 1024 * 1024;
+export const AUTO_REFRESH_MAX_FILES = 5_000;
+export const AUTO_REFRESH_MAX_DIRTY_PATHS = 500;
+export const EVOLVE_INTERNAL_CODE_PREFIXES = ['.evolve/', '.agent-memory/', '.workflow/'] as const;
+const GIT_EXCLUDE_START = '# evolve:codegraph-ignore:start';
+const GIT_EXCLUDE_END = '# evolve:codegraph-ignore:end';
 const LOCK_ERROR_PATTERN = /file lock|locked by another|database is locked|SQLITE_BUSY|SQLITE_LOCKED|EBUSY|EPERM|resource busy/i;
 const TRANSIENT_DB_PATTERN = /CodeGraph not initialized|Database not found|Invalid CodeGraph directory|unable to open database/i;
 
@@ -160,6 +166,55 @@ function createStderrProgress(label: string, custom?: (progress: IndexProgress) 
   };
 }
 
+export function isInternalEvolveCodePath(path: string): boolean {
+  const normalized = path.replaceAll('\\', '/').replace(/^\.\//, '');
+  return EVOLVE_INTERNAL_CODE_PREFIXES.some(prefix =>
+    normalized === prefix.slice(0, -1) || normalized.startsWith(prefix),
+  );
+}
+
+function resolveGitDirForExcludes(root: string): string | null {
+  const dotGit = join(root, '.git');
+  if (!existsSync(dotGit)) return null;
+  const stat = statSync(dotGit);
+  if (stat.isDirectory()) return dotGit;
+  if (!stat.isFile()) return null;
+  const match = /^gitdir:\s*(.+)$/im.exec(readFileSync(dotGit, 'utf8'));
+  if (!match) return null;
+  const target = match[1].trim();
+  const gitDir = isAbsolute(target) ? target : resolve(root, target);
+  return existsSync(gitDir) ? gitDir : null;
+}
+
+function ensureGitLocalExcludes(root: string): void {
+  try {
+    const gitDir = resolveGitDirForExcludes(root);
+    if (!gitDir) return;
+    const infoDir = join(gitDir, 'info');
+    mkdirSync(infoDir, { recursive: true });
+    const excludePath = join(infoDir, 'exclude');
+    const existing = existsSync(excludePath) ? readFileSync(excludePath, 'utf8') : '';
+    const block = [GIT_EXCLUDE_START, ...EVOLVE_INTERNAL_CODE_PREFIXES, GIT_EXCLUDE_END].join('\n');
+    const startIdx = existing.indexOf(GIT_EXCLUDE_START);
+    const endIdx = startIdx >= 0 ? existing.indexOf(GIT_EXCLUDE_END, startIdx + GIT_EXCLUDE_START.length) : -1;
+    let next: string;
+    if (startIdx >= 0 && endIdx >= 0) {
+      const currentBlock = existing.slice(startIdx, endIdx + GIT_EXCLUDE_END.length);
+      if (currentBlock.replaceAll('\r\n', '\n') === block) return;
+      next = `${existing.slice(0, startIdx)}${block}${existing.slice(endIdx + GIT_EXCLUDE_END.length)}`;
+      if (!next.endsWith('\n')) next += '\n';
+    } else if (existing.length === 0) {
+      next = `${block}\n`;
+    } else {
+      const separator = existing.endsWith('\n') ? '' : '\n';
+      next = `${existing}${separator}${block}\n`;
+    }
+    writeFileSync(excludePath, next, 'utf8');
+  } catch {
+    /* ignore */
+  }
+}
+
 export function codeMatchesPaths(path: string, paths?: readonly string[]): boolean {
   if (!paths?.length) return true;
   const normalized = path.replaceAll('\\', '/').replace(/^\.\//, '');
@@ -185,21 +240,42 @@ interface SyncStateRecord {
 interface GitSnapshot {
   head: string;
   clean: boolean;
+  dirtyCount: number;
+}
+
+export interface CodeGraphOptions {
+  autoRefresh?: boolean;
+  onProgress?: (progress: IndexProgress) => void;
+  autoRefreshMaxDbBytes?: number;
+  autoRefreshMaxFiles?: number;
+  autoRefreshMaxDirtyPaths?: number;
 }
 
 export class CodeGraph {
   readonly root: string;
   private readonly autoRefresh: boolean;
   private readonly onProgress?: (progress: IndexProgress) => void;
+  private readonly autoRefreshMaxDbBytes: number;
+  private readonly autoRefreshMaxFiles: number;
+  private readonly autoRefreshMaxDirtyPaths: number;
 
   constructor(
     root: string,
-    { autoRefresh = false, onProgress }: { autoRefresh?: boolean; onProgress?: (progress: IndexProgress) => void } = {},
+    {
+      autoRefresh = false,
+      onProgress,
+      autoRefreshMaxDbBytes = AUTO_REFRESH_MAX_DB_BYTES,
+      autoRefreshMaxFiles = AUTO_REFRESH_MAX_FILES,
+      autoRefreshMaxDirtyPaths = AUTO_REFRESH_MAX_DIRTY_PATHS,
+    }: CodeGraphOptions = {},
   ) {
     this.root = realpathSync(root);
     if (!statSync(this.root).isDirectory()) throw new InputError('Code root must be a directory');
     this.autoRefresh = autoRefresh;
     this.onProgress = onProgress;
+    this.autoRefreshMaxDbBytes = autoRefreshMaxDbBytes;
+    this.autoRefreshMaxFiles = autoRefreshMaxFiles;
+    this.autoRefreshMaxDirtyPaths = autoRefreshMaxDirtyPaths;
   }
 
   static hasIndex(root: string): boolean {
@@ -288,18 +364,25 @@ export class CodeGraph {
   async search(query: string, limit?: number, options: { paths?: readonly string[] } = {}) {
     const text = requireText(query, 'query');
     const maxResults = searchLimit(limit);
+    const allowInternal = Boolean(options.paths?.some(path => isInternalEvolveCodePath(path)));
+    const keepHit = (filePath: string) =>
+      (allowInternal || !isInternalEvolveCodePath(filePath)) && codeMatchesPaths(filePath, options.paths);
     return this.read(graph => {
-      if (!options.paths?.length) return graph.searchNodes(text, { limit: maxResults });
+      if (!options.paths?.length) {
+        const batchLimit = Math.min(Math.max(maxResults * 4, 40), PATH_SEARCH_INITIAL_LIMIT);
+        const initial = graph.searchNodes(text, { limit: batchLimit });
+        return initial.filter(hit => keepHit(hit.node.filePath)).slice(0, maxResults);
+      }
       // SDK 在候选截断后才筛路径；先做轻量批量召回，仅在结果被上限截断时按全表规模重召回。
       if (!/\b(?:path|name):/i.test(text)) {
         const batchLimit = Math.max(maxResults * 10, PATH_SEARCH_INITIAL_LIMIT);
         const initial = graph.searchNodes(text, { limit: batchLimit });
         if (initial.length < batchLimit) {
-          return initial.filter(hit => codeMatchesPaths(hit.node.filePath, options.paths)).slice(0, maxResults);
+          return initial.filter(hit => keepHit(hit.node.filePath)).slice(0, maxResults);
         }
       }
       const candidates = graph.searchNodes(text, { limit: Math.max(1, this.countNodes()) });
-      return candidates.filter(hit => codeMatchesPaths(hit.node.filePath, options.paths)).slice(0, maxResults);
+      return candidates.filter(hit => keepHit(hit.node.filePath)).slice(0, maxResults);
     });
   }
 
@@ -429,9 +512,27 @@ export class CodeGraph {
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
       });
-      return { head, clean: status.trim().length === 0 };
+      const dirtyCount = status.split(/\r?\n/).filter(line => line.trim().length > 0).length;
+      return { head, clean: dirtyCount === 0, dirtyCount };
     } catch {
       return null;
+    }
+  }
+
+  private gitDirtyPathCount(): number {
+    if (!existsSync(join(this.root, '.git'))) return 0;
+    try {
+      const status = execFileSync('git', ['status', '--porcelain'], {
+        cwd: this.root,
+        encoding: 'utf8',
+        timeout: 10000,
+        maxBuffer: 10 * 1024 * 1024,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+      return status.split(/\r?\n/).filter(line => line.trim().length > 0).length;
+    } catch {
+      return 0;
     }
   }
 
@@ -456,6 +557,7 @@ export class CodeGraph {
   }
 
   private async completeFullIndex(graph: Graph, label: string) {
+    ensureGitLocalExcludes(this.root);
     const before = this.gitSnapshot();
     this.writeBuildState({ state: 'building', pid: process.pid, startedAt: Date.now() });
     const result = await this.indexAll(graph, label);
@@ -481,6 +583,7 @@ export class CodeGraph {
   }
 
   private async syncGraph(graph: Graph, label = 'sync') {
+    ensureGitLocalExcludes(this.root);
     const before = this.gitSnapshot();
     const reporter = createStderrProgress(label, this.onProgress);
     // SDK 拿不到文件锁时会直接返回空结果，扫描回调用于区分正常空项目。
@@ -508,34 +611,83 @@ export class CodeGraph {
       || (typeof state.startedAt === 'number' && Date.now() - state.startedAt < LOCK_STALE_MS);
   }
 
+  private openReadOnlyGraph(): Graph {
+    const { CodeGraph: SdkGraph } = sdk();
+    try {
+      return SdkGraph.openSync(this.root, { readOnly: true });
+    } catch (error) {
+      if (toCodeIndexLockedError(error, this.codeGraphDir())) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      if (existsSync(sdk().getDatabasePath(this.root))
+        && /SQLITE_CANTOPEN|SQLITE_READONLY|readonly|unable to open database/i.test(message)) {
+        return SdkGraph.openSync(this.root);
+      }
+      throw error;
+    }
+  }
+
+  private autoRefreshDeferralReason(): string | null {
+    try {
+      const dbBytes = statSync(sdk().getDatabasePath(this.root)).size;
+      if (dbBytes >= this.autoRefreshMaxDbBytes) {
+        return `index size ${(dbBytes / (1024 * 1024)).toFixed(0)} MB >= ${(this.autoRefreshMaxDbBytes / (1024 * 1024)).toFixed(0)} MB`;
+      }
+    } catch { /* ignore */ }
+    const dirtyCount = this.gitDirtyPathCount();
+    if (dirtyCount > 0 && dirtyCount >= this.autoRefreshMaxDirtyPaths) {
+      return `${dirtyCount} uncommitted paths >= ${this.autoRefreshMaxDirtyPaths}`;
+    }
+    return null;
+  }
+
   private async read<T>(run: (graph: Graph) => T | Promise<T>): Promise<T> {
     if (!this.autoRefresh) return this.withReadOnlyGraph(run);
-    if (sdk().isInitialized(this.root) && this.canSkipCleanSync()) {
-      let graph: Graph;
-      try {
-        graph = sdk().CodeGraph.openSync(this.root);
-      } catch (error) {
-        throw toCodeIndexLockedError(error, this.codeGraphDir()) ?? error;
-      }
-      try {
-        if (!this.isIncompleteBuild(graph)) return await run(graph);
-      } catch (error) {
-        throw toCodeIndexLockedError(error, this.codeGraphDir()) ?? error;
-      } finally {
-        graph.close();
+    if (sdk().isInitialized(this.root) && !this.hasIncompleteMarker()) {
+      const cleanSkip = this.canSkipCleanSync();
+      let deferReason = cleanSkip ? null : this.autoRefreshDeferralReason();
+      if (cleanSkip || deferReason !== null || this.autoRefreshMaxFiles > 0) {
+        let graph: Graph | null = null;
+        let ready = false;
+        try {
+          graph = this.openReadOnlyGraph();
+          const incomplete = this.isIncompleteBuild(graph);
+          const fileCount = incomplete ? 0 : graph.getStats().fileCount;
+          if (!incomplete && (cleanSkip || fileCount > 0)) {
+            if (!cleanSkip && deferReason === null && fileCount >= this.autoRefreshMaxFiles) {
+              deferReason = `${fileCount} indexed files >= ${this.autoRefreshMaxFiles}`;
+            }
+            ready = cleanSkip || deferReason !== null;
+          }
+        } catch (error) {
+          if (cleanSkip) throw toCodeIndexLockedError(error, this.codeGraphDir()) ?? error;
+          // 快路径/降级检查失败时回退到受锁同步路径（含锁冲突快照降级）。
+        }
+        if (graph && ready) {
+          if (!cleanSkip && deferReason) {
+            console.warn(`[evolve:code] Skipping auto-refresh (${deferReason}); querying existing snapshot. Run "evolve code sync" to refresh.`);
+          }
+          try {
+            return await run(graph);
+          } catch (error) {
+            throw toCodeIndexLockedError(error, this.codeGraphDir()) ?? error;
+          } finally {
+            graph.close();
+          }
+        }
+        graph?.close();
       }
     }
     return this.write(() => this.withFreshGraphLocked(run, { waitMs: READ_LOCK_WAIT_MS, allowReadFallback: true }));
   }
 
   private async withReadOnlyGraph<T>(run: (graph: Graph) => T | Promise<T>): Promise<T> {
-    const { CodeGraph: SdkGraph, isInitialized } = sdk();
+    const { isInitialized } = sdk();
     if (!isInitialized(this.root)) {
       throw new NotFoundError('Code index missing. Run code build first.');
     }
     let graph: Graph;
     try {
-      graph = SdkGraph.openSync(this.root);
+      graph = this.openReadOnlyGraph();
     } catch (error) {
       throw toCodeIndexLockedError(error, this.codeGraphDir()) ?? error;
     }
@@ -578,7 +730,7 @@ export class CodeGraph {
       if (!options.allowReadFallback || !sdk().isInitialized(this.root)) throw reason;
       let graph: Graph;
       try {
-        graph = sdk().CodeGraph.openSync(this.root);
+        graph = this.openReadOnlyGraph();
       } catch (error) {
         throw toCodeIndexLockedError(error, dir) ?? error;
       }

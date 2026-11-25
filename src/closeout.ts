@@ -27,7 +27,7 @@ const terminalStatuses = new Set<unknown>(['succeeded', 'failed', 'cancelled']);
 const maintenanceSkills = new Set(['ew-knowledge', 'workflow-closeout', 'workflow-evolve']);
 
 export interface CandidateRouteState {
-  route: 'wiki' | 'skill-addition' | 'skill-design';
+  route: 'wiki' | 'skill-addition' | 'skill-design' | 'deterministic-check';
   status: 'routed' | 'applied' | 'rolled_back';
   skill_id?: string;
   design_task_id?: string;
@@ -40,6 +40,7 @@ interface Candidate {
   content: string;
   sources: string[];
   matched_entry: string | null;
+  candidate_kind?: 'constraint' | 'workflow_issue' | 'deterministic_check';
   related_entries?: Array<{ id: string; relation: 'same_content' | 'overlap' | 'conflict'; sources: string[] }>;
   route_state?: CandidateRouteState;
 }
@@ -555,19 +556,28 @@ async function harvestResolvedCompletion(wiki: Wiki, project: string, completion
     const extracted = completion.messages.length ? await extractMemoryInputs(completion.messages, {
       llm: model(), session: completion.session, agentMemoryPrompt: buildCloseoutHarvestPrompt(),
     }) : [];
-    const proposals: Array<Pick<Candidate, 'id' | 'content' | 'sources'> & {
+    const proposals: Array<Pick<Candidate, 'id' | 'content' | 'sources' | 'candidate_kind'> & {
       related: Candidate['related_entries'];
     }> = [];
+    const grouped = new Map<string, Omit<(typeof proposals)[number], 'related'>>();
     for (const item of extracted) {
       if (!item.sourceMessageIds?.length) continue;
-      proposals.push({
+      const kind = item.type === 'constraint' || item.type === 'workflow_issue' || item.type === 'deterministic_check' ? item.type : undefined;
+      const key = JSON.stringify([kind ?? 'reference', item.content.trim()]);
+      const sources = item.sourceMessageIds.map(source => `receipt:${project}:${completion.id}#${source}`);
+      const existing = grouped.get(key);
+      if (existing) existing.sources = [...new Set([...existing.sources, ...sources])];
+      else grouped.set(key, {
         id: createHash('sha256').update(JSON.stringify([identity, item.id])).digest('hex'),
         content: item.content,
-        sources: item.sourceMessageIds.map(source => `receipt:${project}:${completion.id}#${source}`),
-        related: wiki.getEntriesByExactBody(item.content).length === 0 ? await compareReferences(wiki, item.content, model) : undefined,
+        ...(kind ? { candidate_kind: kind } : {}),
+        sources: [...new Set(sources)],
       });
     }
-    const replay = previous();
+    for (const proposal of grouped.values()) proposals.push({
+      ...proposal,
+      related: wiki.getEntriesByExactBody(proposal.content).length === 0 ? await compareReferences(wiki, proposal.content, model) : undefined,
+    });    const replay = previous();
     if (replay) return { id: identity, replayed: true, candidates: replay, ...metadata };
     const candidates: Candidate[] = proposals.map(({ related, ...proposal }) => {
       const exact = wiki.getEntriesByExactBody(proposal.content);
@@ -582,7 +592,7 @@ async function harvestResolvedCompletion(wiki: Wiki, project: string, completion
         } : {}),
       };
     });
-    const pending = candidates.filter(candidate => !appendReferenceSources(wiki, identity, candidate));
+    const pending = candidates.filter(candidate => candidate.candidate_kind !== undefined || !appendReferenceSources(wiki, identity, candidate));
     if (pending.length !== candidates.length && !wiki.readableIndexPath()) wiki.build();
     const result = transaction(db, () => {
       const savedReplay = previous();
@@ -617,6 +627,7 @@ export function readCloseoutCandidate(wiki: Wiki, closeoutId: string, candidateI
 export function publishReference(wiki: Wiki, closeoutId: string, candidateId: string, title: string, entry?: string) {
   title = requireText(title, 'reference title');
   const candidate = readCloseoutCandidate(wiki, closeoutId, candidateId);
+  if (candidate.candidate_kind) throw new InputError('Classified constraint or process candidate requires explicit review and routing before publication');
   const id = entry === undefined ? `entries/${candidateId}` : requireText(entry, 'Wiki entry ID');
   if (candidate.matched_entry || candidate.related_entries?.length) {
     throw new InputError('Candidate has related Wiki entries; review the relationship and stage a Wiki change');

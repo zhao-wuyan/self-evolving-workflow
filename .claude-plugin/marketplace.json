@@ -10,7 +10,7 @@
       "name": "self-evolving-workflow",
       "source": "./",
       "description": "Self-Evolving Workflow: Session/Run orchestration, local code graph, Markdown wiki, episodic memory, and skill evolution.",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "category": "productivity"
     }
   ]

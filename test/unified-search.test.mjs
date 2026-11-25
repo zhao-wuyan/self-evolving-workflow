@@ -8,7 +8,9 @@ import { KnowledgeStore } from '../dist/kb.js';
 import { KnowledgeReads, validateKnowledgeReads } from '../dist/knowledge-reads.js';
 import { MemoryStore } from '../dist/memory.js';
 import { parseSearchFrom, search, unifiedSearch } from '../dist/search.js';
+import { buildFtsQuery } from '../dist/upstream/tokenize.js';
 import { applyWikiChange, proposeWikiChange } from '../dist/wiki-change.js';
+import { tokenizeWiki } from '../dist/wiki-tokens.js';
 import { Wiki } from '../dist/wiki.js';
 
 async function fixture(t) {
@@ -313,4 +315,64 @@ test('unified search keeps kb results when code index is locked on mixed scope',
   const mixedUnavailable = await unifiedSearch({ kb, code: unavailableCode }, 'calibration', { mode: 'context' });
   assert.equal(mixedUnavailable.references.length, 1);
   assert.deepEqual(mixedUnavailable.code, []);
+});
+
+test('unified merged retains episodic with repository filter and weights multi-concept coverage', async t => {
+  const { memory, wiki } = await fixture(t);
+  const repoId = 'c7c015e1-7254-4156-b716-27931b51cc01';
+  publish(wiki, 'weak-ref', 'reference', 'Alpha overview without other terms.', { repositories: [repoId] });
+  await memory.put({ id: 'mem-exact', content: 'Alpha beta gamma contract verified.' });
+  const kb = new KnowledgeStore([{ scope: 'project', wiki, memory }]);
+  const code = { search: async () => [codeHit('alphaHelper', 'src/alpha.ts', 50)] };
+
+  const merged = await unifiedSearch({ kb, code }, 'alpha beta gamma', {
+    mode: 'merged', repository: repoId, limit: 10,
+  });
+  assert.ok(merged.results.some(hit => hit.kind === 'episodic' && hit.id === 'mem-exact'));
+  assert.equal(merged.results[0].id, 'mem-exact');
+
+  // Single-concept query preserves authority weight order (constraint > reference > code > episodic).
+  publish(wiki, 'single-rule', 'constraint', 'Singleterm constraint.');
+  publish(wiki, 'single-ref', 'reference', 'Singleterm reference.', { repositories: [repoId] });
+  await memory.put({ id: 'single-mem', content: 'Singleterm episodic.' });
+  const single = await unifiedSearch({
+    kb, code: { search: async () => [codeHit('singleterm', 'src/single.ts', 1e12)] },
+  }, 'singleterm', { mode: 'merged', repository: repoId, limit: 10 });
+  assert.deepEqual(single.results.map(hit => hit.kind), ['constraint', 'reference', 'code', 'episodic']);
+});
+
+test('CodeGraph.search hides internal Evolve directories by default unless targeted via paths', async t => {
+  const { root } = await fixture(t);
+  await mkdir(join(root, '.evolve', 'runs', 'r1'), { recursive: true });
+  await mkdir(join(root, '.agent-memory'), { recursive: true });
+  await mkdir(join(root, 'src'), { recursive: true });
+  await writeFile(join(root, '.evolve', 'runs', 'r1', 'snap.ts'), 'export function internalCalibration() { return 1; }\n');
+  await writeFile(join(root, '.agent-memory', 'memo.ts'), 'export function internalCalibrationMem() { return 2; }\n');
+  await writeFile(join(root, 'src', 'real.ts'), 'export function realCalibration() { return 3; }\n');
+
+  const code = new CodeGraph(root);
+  await code.build();
+
+  const defaultHits = await code.search('Calibration', 10);
+  assert.deepEqual(defaultHits.map(hit => hit.node.filePath), ['src/real.ts']);
+
+  const targetedHits = await code.search('Calibration', 10, { paths: ['.evolve'] });
+  assert.deepEqual(targetedHits.map(hit => hit.node.filePath), ['.evolve/runs/r1/snap.ts']);
+});
+
+test('Chinese tokenizers filter question stop words and keep fallback for pure stop-word queries', () => {
+  const wikiTokens = tokenizeWiki('铁心损耗计算需要注意什么');
+  assert.ok(wikiTokens.includes('铁心'));
+  assert.ok(wikiTokens.includes('损耗'));
+  assert.ok(wikiTokens.includes('计算'));
+  assert.ok(!wikiTokens.includes('需要'));
+  assert.ok(!wikiTokens.includes('注意'));
+  assert.ok(!wikiTokens.includes('什么'));
+  assert.ok(!wikiTokens.includes('铁心损耗计算需要注意什么'));
+  assert.ok(tokenizeWiki('需要注意什么').length > 0);
+
+  const memFts = buildFtsQuery('铁心损耗计算需要注意什么');
+  assert.ok(memFts);
+  assert.doesNotMatch(memFts, /"需要"|"注意"|"什么"/);
+  assert.ok(buildFtsQuery('需要注意什么'));
 });

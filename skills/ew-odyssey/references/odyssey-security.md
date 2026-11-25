@@ -143,14 +143,14 @@ Security findings with severity >= medium + vulnerability patterns across scan p
 
 ## Knowledge Persistence (§7)
 
-Include verified reusable findings in the Run summary and harvest the completed Session through `evolve skill workflows show ew-knowledge` (`evolve kb harvest session` → `evolve kb propose`).
+Include verified reusable findings in the Run summary and evidence; follow the shared A_RECORD and post-Session candidate governance in `odyssey-base.md`. Do not initiate harvest at Run seal.
 
 | Category | Content | Follow-up |
 |----------|---------|-----------|
-| Vulnerability pattern | CWE + trigger + detection pattern + remediation | `evolve kb harvest session` → `evolve kb propose` (`category: debug`) |
-| Security constraint | Trust boundary + validation rule + enforcement | `evolve kb harvest session` → `evolve kb propose` (`category: arch`) |
-| Dependency risk | Package + CVE + safe version + migration path | `evolve kb harvest session` → `evolve kb propose` (`category: coding`) |
-| CI/CD hardening | Misconfiguration + fix + prevention check | `evolve kb harvest session` → `evolve kb propose` (`category: coding`) |
+| Vulnerability pattern | CWE + trigger + detection pattern + remediation | Post-Session candidate review (`category: debug`) |
+| Security constraint | Trust boundary + validation rule + enforcement | Post-Session candidate review (`category: arch`) |
+| Dependency risk | Package + CVE + safe version + migration path | Post-Session candidate review (`category: coding`) |
+| CI/CD hardening | Misconfiguration + fix + prevention check | Post-Session candidate review (`category: coding`) |
 
 ---
 

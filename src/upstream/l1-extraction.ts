@@ -380,7 +380,13 @@ export function getExtractMemoriesSystemPrompt(mode: MemoryPromptMode = "chat"):
 export function getExtractMemoriesAgentPrompt(mode: MemoryPromptMode = "chat"): AgentMemoryPrompt {
   return createAgentMemoryPrompt(
     'memory-extract',
-    mode === "code" ? EXTRACT_WORK_MEMORIES_SYSTEM_PROMPT : EXTRACT_MEMORIES_SYSTEM_PROMPT,
+    mode === "code" ? EXTRACT_WORK_MEMORIES_SYSTEM_PROMPT + [
+      '\n\n## Evolve engineering retention policy (takes precedence over generic work-task examples)',
+      '- Do not save the current request, ordinary progress, checklist items, generic confirmation, or routine task state as a long-lived memory. Session/Run or the source transcript already retains them.',
+      '- Retain a work_task only when it describes a persistent cross-session blocker or a concrete handoff that cannot be reconstructed from workflow state.',
+      '- Prioritize confirmed corrections, non-obvious verified fixes, failure conditions, reproducible methods, and durable project decisions; use correction/error/verified_fix for those explicit categories.',
+      '- A test count or assertion of completion alone does not establish a reusable fix. Preserve evidence IDs and applicability. Return [] when there is no material knowledge.',
+    ].join('\n') : EXTRACT_MEMORIES_SYSTEM_PROMPT,
   );
 }
 

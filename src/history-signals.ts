@@ -262,7 +262,7 @@ function collectMemorySignals(
     for (let page = 1; ; page++) {
       const batch = store.list({ limit: 100, page });
       for (const record of batch.results) {
-        if (!relevantTypes.has(record.type) && !record.session) continue;
+        if (!relevantTypes.has(record.type)) continue;
         checked += 1;
         const cursorKey = `memory:${record.id}`;
         const token = `${record.version}:${record.updatedAt}`;
@@ -439,56 +439,52 @@ async function collectIncrementalLlmSignals(
   entries: HistoryEntry[],
   lastOffset: number,
   db: NonNullable<ReturnType<typeof openSignalsDb>>,
-  llm: LlmClient,
+  model: () => LlmClient,
   knownSkills?: ReadonlySet<string>,
 ): Promise<number> {
-  const cursorKey = `llm:${ref.host}:${ref.session}`;
-  const prevOffset = Number(readSourceCursor(db, cursorKey) ?? 0);
-  if (prevOffset >= lastOffset) return 0;
+  const cursorKey = `llm-v2:${ref.host}:${ref.session}`;
   const messages: ConversationMessage[] = entries
     .filter(item => item.kind === 'message' || item.role === 'error')
-    .slice(-40)
     .map(item => ({
       id: item.id,
       role: item.role === 'error' ? 'tool' : item.role === 'user' ? 'user' : 'assistant',
       timestamp: item.timestamp,
       content: item.content,
     }));
-  if (!messages.length) {
-    writeSourceCursor(db, cursorKey, String(lastOffset));
-    return 0;
-  }
-  const extracted = await extractMemoryInputs(messages, {
-    llm,
-    session: ref.session,
-    agentMemoryPrompt: buildSessionSignalPrompt(),
-  });
-  const now = new Date().toISOString();
-  const rows: CollectedSignalRecord[] = extracted
-    .filter(item => item.id && item.sourceMessageIds?.length)
-    .map(item => {
-      const skillId = detectSkillMention(item.content, knownSkills);
-      return {
-        id: stableSignalId(['llm', ref.host, ref.session, item.id]),
-        source_kind: 'llm',
-        host: ref.host,
-        session: ref.session,
-        anchor: item.sourceMessageIds![0],
-        signal_type: item.type ?? 'workflow_issue',
-        summary: clipSummary(item.content),
-        snippet: clipSnippet(item.content),
-        ...(skillId ? { skill_id: skillId } : {}),
-        timestamp: messages.at(-1)!.timestamp as string,
-        evidence: item.sourceMessageIds!,
-        created_at: now,
-      };
+  const rows: CollectedSignalRecord[] = [];
+  // Process all messages in bounded batches, not just the last 40.
+  for (let start = 0; start < messages.length; start += 40) {
+    const batch = messages.slice(start, start + 40);
+    const extracted = await extractMemoryInputs(batch, {
+      llm: model(), session: ref.session, agentMemoryPrompt: buildSessionSignalPrompt(),
     });
-  let count = 0;
-  transaction(db, () => {
-    count = upsertSignals(db, rows);
-    writeSourceCursor(db, cursorKey, String(lastOffset));
+    const now = new Date().toISOString();
+    for (const item of extracted) {
+      if (!item.id || !item.sourceMessageIds?.length) continue;
+      const skillId = detectSkillMention(item.content, knownSkills);
+      rows.push({
+        id: stableSignalId(['llm', ref.host, ref.session, item.id]),
+        source_kind: 'llm', host: ref.host, session: ref.session,
+        anchor: item.sourceMessageIds[0], signal_type: item.type ?? 'workflow_issue',
+        summary: clipSummary(item.content), snippet: clipSnippet(item.content),
+        ...(skillId ? { skill_id: skillId } : {}),
+        timestamp: batch.at(-1)!.timestamp as string, evidence: item.sourceMessageIds, created_at: now,
+      });
+    }
+  }
+  return transaction(db, () => {
+    const count = upsertSignals(db, rows);
+    writeSourceCursor(db, cursorKey, JSON.stringify({ path: ref.path, offset: lastOffset, size: ref.size, mtime: ref.mtimeMs }));
+    return count;
   });
-  return count;
+}
+
+interface TranscriptCursor { path: string; offset: number; size: number; mtime: number }
+
+function pendingOffset(ref: HostTranscriptRef, cursor?: TranscriptCursor): number | undefined {
+  if (!cursor || cursor.path !== ref.path || cursor.size > ref.size ||
+      (cursor.size === ref.size && cursor.mtime !== ref.mtimeMs)) return 0;
+  return cursor.offset >= ref.size ? undefined : cursor.offset;
 }
 
 export async function collectHistorySignals(options: {
@@ -524,7 +520,7 @@ export async function collectHistorySignals(options: {
         session: options.session,
         allProjects: options.allProjects,
       });
-      const getCursor = db.prepare('SELECT path, byte_offset, file_size FROM history_cursors WHERE host = ? AND session = ?');
+      const getCursor = db.prepare('SELECT path, byte_offset, file_size, mtime_ms FROM history_cursors WHERE host = ? AND session = ?');
       const setCursor = db.prepare(`
         INSERT INTO history_cursors (host, session, path, byte_offset, file_size, mtime_ms, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -535,41 +531,56 @@ export async function collectHistorySignals(options: {
       for (const ref of refs) {
         stats.sessions_checked += 1;
         const cursor = getCursor.get(ref.host, ref.session) as
-          | { path: string; byte_offset: number; file_size: number }
+          | { path: string; byte_offset: number; file_size: number; mtime_ms: number }
           | undefined;
-        const samePath = cursor?.path === ref.path;
-        if (samePath && cursor.byte_offset >= ref.size) {
+        const transcriptOffset = sources.has('transcript') ? pendingOffset(ref, cursor && {
+          path: cursor.path, offset: cursor.byte_offset, size: cursor.file_size, mtime: cursor.mtime_ms,
+        }) : undefined;
+        const llmToken = readSourceCursor(db, `llm-v2:${ref.host}:${ref.session}`);
+        const llmCursor = llmToken ? JSON.parse(llmToken) as TranscriptCursor : undefined;
+        const llmOffset = sources.has('llm') && options.llm ? pendingOffset(ref, llmCursor) : undefined;
+        if (transcriptOffset === undefined && llmOffset === undefined) {
           stats.sessions_skipped += 1;
           continue;
         }
-        const fromOffset = samePath && ref.size > cursor.byte_offset ? cursor.byte_offset : 0;
-        try {
-          const { entries, lastOffset } = await readHostHistoryEntries(ref, { fromOffset, includeTools: true });
-          const rows = sources.has('transcript') ? toTranscriptSignalRows(entries, knownSkills) : [];
-          let added = 0;
-          transaction(db, () => {
-            if (rows.length) added += upsertSignals(db, rows);
-            setCursor.run(ref.host, ref.session, ref.path, lastOffset, ref.size, ref.mtimeMs, new Date().toISOString());
-          });
-          stats.by_source.transcript += added;
-          stats.new_signals += added;
-          if (lastOffset > fromOffset) stats.sessions_incremental += 1;
-          else stats.sessions_skipped += 1;
-
-          if (sources.has('llm') && options.llm && entries.length && lastOffset > fromOffset) {
-            const llmAdded = await collectIncrementalLlmSignals(ref, entries, lastOffset, db, options.llm(), knownSkills);
-            stats.by_source.llm += llmAdded;
-            stats.new_signals += llmAdded;
-          }
-        } catch (error) {
-          stats.failures.push({
-            host: ref.host,
-            session: ref.session,
-            error: error instanceof Error ? error.message : String(error),
-          });
+        const reads = new Map<number, Awaited<ReturnType<typeof readHostHistoryEntries>>>();
+        const read = async (offset: number) => {
+          const cached = reads.get(offset);
+          if (cached) return cached;
+          const result = await readHostHistoryEntries(ref, { fromOffset: offset, includeTools: true });
+          reads.set(offset, result);
+          return result;
+        };
+        let advanced = false;
+        const failed = (error: unknown) => stats.failures.push({
+          host: ref.host, session: ref.session, error: error instanceof Error ? error.message : String(error),
+        });
+        if (transcriptOffset !== undefined) {
+          try {
+            const { entries, lastOffset } = await read(transcriptOffset);
+            const rows = toTranscriptSignalRows(entries, knownSkills);
+            const added = transaction(db, () => {
+              const count = upsertSignals(db, rows);
+              setCursor.run(ref.host, ref.session, ref.path, lastOffset, ref.size, ref.mtimeMs, new Date().toISOString());
+              return count;
+            });
+            stats.by_source.transcript += added;
+            stats.new_signals += added;
+            advanced ||= lastOffset > transcriptOffset;
+          } catch (error) { failed(error); }
         }
-      }
-    }
+        if (llmOffset !== undefined && options.llm) {
+          try {
+            const { entries, lastOffset } = await read(llmOffset);
+            const added = await collectIncrementalLlmSignals(ref, entries, lastOffset, db, options.llm, knownSkills);
+            stats.by_source.llm += added;
+            stats.new_signals += added;
+            advanced ||= lastOffset > llmOffset;
+          } catch (error) { failed(error); }
+        }
+        if (advanced) stats.sessions_incremental += 1;
+        else stats.sessions_skipped += 1;
+      }    }
 
     if (sources.has('memory')) {
       const memStats = collectMemorySignals(options.root, db, knownSkills);

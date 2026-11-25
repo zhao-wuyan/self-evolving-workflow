@@ -566,7 +566,7 @@ export class KnowledgeStore {
     const includeWiki = filters.kind !== 'episodic' &&
       filters.type === undefined && filters.scene === undefined && filters.session === undefined;
     const hasWikiOnlyFilters = Boolean(
-      filters.categories?.length || filters.repository || filters.keyword ||
+      filters.categories?.length || filters.keyword ||
       filters.paths?.length || filters.includePathScoped,
     );
     const includeMemory = (!filters.kind || filters.kind === 'episodic') &&
@@ -671,7 +671,7 @@ export class KnowledgeStore {
     const includeWiki = filters.kind !== 'episodic' &&
       filters.type === undefined && filters.scene === undefined && filters.session === undefined;
     const hasWikiOnlyFilters = Boolean(
-      filters.categories?.length || filters.repository || filters.keyword ||
+      filters.categories?.length || filters.keyword ||
       filters.paths?.length || filters.includePathScoped,
     );
     const includeMemory = (!filters.kind || filters.kind === 'episodic') &&
@@ -828,6 +828,7 @@ export class KnowledgeStore {
           getId: item => `${item.kind}:${item.id}`,
           getScore: item => item.score,
           searchHits: this.getSearchHitCounts(filters.scope ?? 'local'),
+          minRelevanceRatio: 0.65,
         })
       : fused;
 

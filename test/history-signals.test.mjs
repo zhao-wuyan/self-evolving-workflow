@@ -225,10 +225,12 @@ test('history collect incrementally indexes transcript, memory, wiki, and llm si
     AGENT_MEMORY_LLM_BASE_URL: `http://127.0.0.1:${server.address().port}/v1`,
   });
   assert.equal(third.sessions_checked, 3);
-  assert.equal(third.sessions_incremental, 1);
-  assert.equal(third.sessions_skipped, 2);
+  // Enabling the semantic consumer must backfill all of its unread history,
+  // even when the deterministic consumer already reached EOF.
+  assert.equal(third.sessions_incremental, 3);
+  assert.equal(third.sessions_skipped, 0);
   assert.equal(third.by_source.llm, 1);
-  assert.equal(llmCalls, 1);
+  assert.equal(llmCalls, 3);
 
   // List sessions with incremental state
   const listed = await f.runJson(['history', 'list', '--signals-only']);

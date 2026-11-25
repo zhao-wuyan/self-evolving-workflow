@@ -171,6 +171,43 @@ export function installCodexMemoryHook(root: string) {
   return { path: hook.file.path, changed: !!updated };
 }
 
+/** Read-only, credential-free inspection of effective host hook configuration. */
+export function inspectMemoryHooks(root: string) {
+  return memoryHosts.map(host => {
+    const scopes = (['project', 'user'] as const).map(scope => {
+      const path = hookPath(root, host, scope);
+      try {
+        const file = readJson(path);
+        const handlers = (event: 'Stop' | 'SessionStart', action: MemoryHookAction) => {
+          const values: unknown[] = [];
+          if (host === 'agy') {
+            const own = object(file.content[agyHookName]);
+            if (own?.enabled !== false && Array.isArray(own?.[event])) values.push(...own[event]);
+          } else {
+            const groups = object(file.content.hooks)?.[event];
+            if (Array.isArray(groups)) for (const group of groups) {
+              if (Array.isArray(group?.hooks)) values.push(...group.hooks);
+            }
+          }
+          const owned = values.filter(value => ownsHandler(host, value, action));
+          const expected = memoryHandler(host, root, scope, action).command;
+          return { count: owned.length, current: owned.filter(value => object(value)?.command === expected).length };
+        };
+        return { scope, path, exists: file.previous !== undefined,
+          stop: handlers('Stop', 'host-hook'), session_start: handlers('SessionStart', 'session-start-hook') };
+      } catch (error) {
+        return { scope, path, exists: existsSync(path), stop: { count: 0, current: 0 },
+          session_start: { count: 0, current: 0 }, error: error instanceof Error ? error.message : String(error) };
+      }
+    });
+    const count = (key: 'stop' | 'session_start') => scopes.reduce((sum, scope) => sum + scope[key].count, 0);
+    const current = (key: 'stop' | 'session_start') => scopes.reduce((sum, scope) => sum + scope[key].current, 0);
+    return { host, scopes, stop_count: count('stop'), session_start_count: count('session_start'),
+      configuration_current: current('stop') > 0 && current('session_start') > 0,
+      duplicate_hooks: count('stop') > 1 || count('session_start') > 1 };
+  });
+}
+
 function globalConfigPath() {
   return join(homedir(), EVOLVE_DIR, 'config.json');
 }

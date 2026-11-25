@@ -241,14 +241,14 @@ Critical/High findings that propagate to a level-1 sink + cross-module duplicate
 
 ## Knowledge Persistence (§9)
 
-Include verified reusable findings in the Run summary and harvest the completed Session through `evolve skill workflows show ew-knowledge` (`evolve kb harvest session` → `evolve kb propose`).
+Include verified reusable findings in the Run summary and evidence; follow the shared A_RECORD and post-Session candidate governance in `odyssey-base.md`. Do not initiate harvest at Run seal.
 
 | Category | Content | Follow-up |
 |----------|---------|-----------|
-| Failure→Value transformation pattern | transformation signature + trigger + detection pattern + fix template | `evolve kb harvest session` → `evolve kb propose` (`category: coding`) |
-| 异常语义坍缩 (exception semantic collapse) | multi-exception → single-state signature + business consequence + detection | `evolve kb harvest session` → `evolve kb propose` (`category: coding`) |
-| Constraint/default inconsistency | variable + per-location values + unit/meaning conflict + resolution | `evolve kb harvest session` → `evolve kb propose` (`category: arch`) |
-| Critical propagation chain | sink + chain + hiding mechanism + remediation strategy | `evolve kb harvest session` → `evolve kb propose` (`category: debug`) |
+| Failure→Value transformation pattern | transformation signature + trigger + detection pattern + fix template | Post-Session candidate review (`category: coding`) |
+| 异常语义坍缩 (exception semantic collapse) | multi-exception → single-state signature + business consequence + detection | Post-Session candidate review (`category: coding`) |
+| Constraint/default inconsistency | variable + per-location values + unit/meaning conflict + resolution | Post-Session candidate review (`category: arch`) |
+| Critical propagation chain | sink + chain + hiding mechanism + remediation strategy | Post-Session candidate review (`category: debug`) |
 
 ---
 
