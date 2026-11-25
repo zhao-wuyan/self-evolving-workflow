@@ -1,0 +1,22 @@
+README.md
+  h_7f727d5a3fe0e5 137
+docs/install.md
+  h_7f727d5a3fe0e5 104
+src/workflow-cli.ts
+  h_7f727d5a3fe0e5 25,72,377,386-389,414-418
+src/workflow-ignore.ts
+  h_7f727d5a3fe0e5 1-66
+test/evolve-workflow.test.mjs
+  h_7f727d5a3fe0e5 811-841
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "b1ac288ea63d2b4e0ef54c7ce03d6cdcd4027990",
+  "prompts": {},
+  "humans": {
+    "h_7f727d5a3fe0e5": {
+      "author": "诏无言 <59789646+zhao-wuyan@users.noreply.github.com>"
+    }
+  }
+}
