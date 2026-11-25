@@ -705,3 +705,44 @@ test('OMP workflow supports v0.6.0 history signals, skill sync, and kb reminders
   await assert.rejects(runBundledWorkflow(f.root, ['history', 'purge']), /history collect\/list\/search\/show/);
   await assert.rejects(runBundledWorkflow(f.root, ['kb', 'reminders', 'delete']), /knowledge closeout supports/);
 });
+
+test('OMP workflow supports v0.7.0 version, closeouts, doctor, storage preview, feedback, and harvest pending while blocking storage apply', async t => {
+  const f = fixture('evolve-omp-v070-bridge-');
+  t.after(async () => { await closeHarnesses(f.root); f.cleanup(); });
+  const h = harness(f.root);
+  await h.event('session_start');
+
+  const ver = await h.call('workflow', { argv: ['--version'] });
+  assert.equal(ver.exit_code, 0);
+  assert.equal(ver.stdout.trim(), '0.7.0');
+  const shortVer = await h.call('workflow', { argv: ['-V'] });
+  assert.equal(shortVer.exit_code, 0);
+  assert.equal(shortVer.stdout.trim(), '0.7.0');
+
+  const closeouts = await h.call('workflow', { argv: ['kb', 'closeouts'] });
+  assert.equal(closeouts.exit_code, 0);
+  assert.ok(Array.isArray(JSON.parse(closeouts.stdout).jobs));
+
+  const doctor = await h.call('workflow', { argv: ['kb', 'doctor'] });
+  assert.equal(doctor.exit_code, 0);
+  assert.ok(Array.isArray(JSON.parse(doctor.stdout).hosts));
+
+  const storage = await h.call('workflow', { argv: ['kb', 'storage'] });
+  assert.equal(storage.exit_code, 0);
+  assert.equal(JSON.parse(storage.stdout).applied, false);
+
+  const pending = await h.call('workflow', { argv: ['kb', 'harvest', 'pending'] });
+  assert.equal(pending.exit_code, 0);
+
+  const added = await h.call('workflow', { argv: ['kb', 'add', 'Use v0.7.0 feedback receipts.', '--kind', 'episodic', '--id', 'omp-fb-1'] });
+  assert.equal(added.exit_code, 0);
+  const readsPath = join(f.root, '.evolve', 'omp-fb-reads.json');
+  f.evolve('kb', 'get', 'omp-fb-1', '--reads', readsPath);
+  const feedback = await h.call('workflow', { argv: ['kb', 'feedback', 'omp-fb-1', '--reads', readsPath, '--outcome', 'helpful', '--evidence', 'test:omp'] });
+  assert.equal(feedback.exit_code, 0);
+  assert.equal(JSON.parse(feedback.stdout).outcome, 'helpful');
+
+  await assert.rejects(runBundledWorkflow(f.root, ['kb', 'storage', '--apply']), /read-only preview only/);
+  await assert.rejects(runBundledWorkflow(f.root, ['kb', 'storage', '--apply=true']), /read-only preview only/);
+  await assert.rejects(runBundledWorkflow(f.root, ['kb', 'apply', 'change-1']), /knowledge closeout supports/);
+});

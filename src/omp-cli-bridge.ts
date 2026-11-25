@@ -26,8 +26,8 @@ function hasOnlyEpisodicKind(argv: string[]): boolean {
 
 export async function runBundledWorkflow(root: string, argv: unknown, signal?: AbortSignal, agentKind?: 'main' | 'sub') {
   if (!Array.isArray(argv) || !argv.length || argv.some(arg => typeof arg !== 'string' || arg.includes('\0')) ||
-      !(Object.hasOwn(commands, argv[0]) || argv.length === 1 && argv[0] === '--help')) {
-    throw new InputError('Supply a workflow control argv array (session/run/skill/code/history/kb/experience/openviking/--help)');
+      !(Object.hasOwn(commands, argv[0]) || argv.length === 1 && (argv[0] === '--help' || argv[0] === '--version' || argv[0] === '-V'))) {
+    throw new InputError('Supply a workflow control argv array (session/run/skill/code/history/kb/experience/openviking/--help/--version)');
   }
   if (argv[0] === 'skill' && !Object.hasOwn(skillActions, argv[1] ?? 'list')) {
     throw new InputError('OMP supports Skill list/install/sync/status/validate/inspect/workflows');
@@ -42,17 +42,21 @@ export async function runBundledWorkflow(root: string, argv: unknown, signal?: A
     throw new InputError('OMP may only read personal experience (status/search/get)');
   }
   if (argv[0] === 'kb') {
-    const isHarvest = argv[1] === 'harvest' && ['session', 'receipt', 'conversation', 'skill'].includes(argv[2]);
+    const isHarvest = argv[1] === 'harvest' && ['session', 'receipt', 'conversation', 'skill', 'pending'].includes(argv[2]);
     const isCandidatesShow = argv[1] === 'candidates' && argv[2] === 'show';
-    const isReadOnlyKb = argv[1] === 'sources' || argv[1] === 'lint';
+    const isReadOnlyKb = argv[1] === 'sources' || argv[1] === 'lint' || argv[1] === 'closeouts' || argv[1] === 'doctor';
+    const isStoragePreview = argv[1] === 'storage' && !argv.slice(2).some(arg => arg === '--apply' || arg.startsWith('--apply='));
+    const isFeedback = argv[1] === 'feedback';
     const isReminders = argv[1] === 'reminders' && (argv[2] === undefined || argv[2] === 'ack' || argv[2].startsWith('-'));
     const isEpisodicWrite = (argv[1] === 'add' || argv[1] === 'update') && hasOnlyEpisodicKind(argv);
     if (argv[1] === 'add' || argv[1] === 'update') {
       if (!isEpisodicWrite) {
         throw new InputError('OMP kb add/update requires --kind episodic; Wiki publication requires explicit approval');
       }
-    } else if (!isHarvest && !isCandidatesShow && !isReadOnlyKb && !isReminders) {
-      throw new InputError('OMP knowledge closeout supports harvest, candidates show, sources, lint, reminders, and episodic add/update only; publication requires explicit approval');
+    } else if (argv[1] === 'storage' && !isStoragePreview) {
+      throw new InputError('OMP kb storage supports read-only preview only; --apply requires explicit authorization');
+    } else if (!isHarvest && !isCandidatesShow && !isReadOnlyKb && !isStoragePreview && !isFeedback && !isReminders) {
+      throw new InputError('OMP knowledge closeout supports harvest, candidates show, closeouts, doctor, storage preview, feedback, sources, lint, reminders, and episodic add/update only; publication requires explicit approval');
     }
   }
   if (argv[0] === 'openviking' && argv[1] !== 'policy') throw new InputError('OMP Agent may only manage OpenViking policy');
@@ -64,7 +68,8 @@ export async function runBundledWorkflow(root: string, argv: unknown, signal?: A
   // OMP 的 process.execPath 是 omp.exe；只依赖 Node，不依赖全局 evolve。
   const node = /^node(?:\.exe)?$/i.test(basename(process.execPath)) ? process.execPath : 'node';
   const cli = fileURLToPath(new URL('./workflow-cli.js', import.meta.url));
-  const child = spawn(node, [cli, '--root', root, ...argv], {
+  const cliArgs = argv.length === 1 && (argv[0] === '--version' || argv[0] === '-V') ? argv : ['--root', root, ...argv];
+  const child = spawn(node, [cli, ...cliArgs], {
     env: { ...process.env, EVOLVE_OMP_AGENT_KIND: agentKind ?? 'main',
       ...(/^omp(?:\.exe)?$/i.test(basename(process.execPath)) && !process.env.OMP_EXECUTABLE ? { OMP_EXECUTABLE: process.execPath } : {}) },
     cwd: root, shell: false, windowsHide: true, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'],
