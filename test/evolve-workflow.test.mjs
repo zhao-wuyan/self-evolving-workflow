@@ -556,7 +556,7 @@ test('Project install wraps skills in host folders (.agents, .codex, .claude) an
   }
 });
 
-test('OMP project install writes native .omp/skills, keeps Agents in .omp/agent and binds native runs', () => {
+test('OMP project install writes .omp/skills, puts Agents in .omp/agents and binds runs with new root precedence', () => {
   const f = fixture('evolve-install-omp-native-');
   try {
     f.git('rm', '-rfq', 'skills');
@@ -565,9 +565,10 @@ test('OMP project install writes native .omp/skills, keeps Agents in .omp/agent 
     assert.equal(installed.host, 'omp');
     assert.equal(installed.root, join(f.root, '.omp'));
     assert.equal(installed.skills_dir, join(f.root, '.omp', 'skills'));
-    assert.equal(installed.agents_dir, join(f.root, '.omp', 'agent', 'agents'));
+    assert.equal(installed.agents_dir, join(f.root, '.omp', 'agents'));
     assert.ok(existsSync(join(f.root, '.omp', 'skills', 'ew-orchestrate', 'SKILL.md')));
-    assert.ok(existsSync(join(f.root, '.omp', 'agent', 'agents', 'workflow-planner.md')));
+    assert.ok(existsSync(join(f.root, '.omp', 'agents', 'workflow-planner.md')));
+    assert.equal(existsSync(join(f.root, '.omp', 'agent', 'agents')), false);
     assert.equal(existsSync(join(f.root, 'skills', 'ew-orchestrate', 'SKILL.md')), false);
     assert.match(readFileSync(join(f.root, 'AGENTS.md'), 'utf8'), /\.omp\/skills\//);
 
@@ -575,7 +576,7 @@ test('OMP project install writes native .omp/skills, keeps Agents in .omp/agent 
     const target = status.targets[0];
     assert.equal(target.root, join(f.root, '.omp'));
     assert.equal(target.skills_dir, join(f.root, '.omp', 'skills'));
-    assert.equal(target.agents_dir, join(f.root, '.omp', 'agent', 'agents'));
+    assert.equal(target.agents_dir, join(f.root, '.omp', 'agents'));
     assert.equal(target.manifest_recorded, true);
     assert.equal(target.skills.find(item => item.name === 'ew-orchestrate').status, 'up_to_date');
 
@@ -588,11 +589,18 @@ test('OMP project install writes native .omp/skills, keeps Agents in .omp/agent 
     assert.equal(run.skill_ref.package_path, '.omp/skills/ew-orchestrate/steps/ew-analyze');
     readBound(f, 'omp-native-bind', run);
 
+    // 验证 projectSkillRoots 优先级：skills > .agents/skills > .omp/skills。
+    const agyInstall = f.evolve('skill', 'install', '--scope', 'project', '--host', 'agy', '--skill', 'ew-orchestrate', '--yes');
+    assert.equal(agyInstall.skills_dir, join(f.root, '.agents', 'skills'));
+    f.git('add', '.agents/skills');
+    f.git('commit', '-qm', 'Commit .agents/skills beside .omp/skills');
+    assert.equal(f.evolve('skill', 'validate', 'ew-analyze').package_path, '.agents/skills/ew-orchestrate/steps/ew-analyze');
+
     const rootInstall = f.evolve('skill', 'install', '--scope', 'project', '--skill', 'ew-orchestrate', '--yes');
     assert.equal(rootInstall.skills_dir, join(f.root, 'skills'));
     f.git('add', 'skills');
-    f.git('commit', '-qm', 'Commit legacy root Skills beside native OMP Skills');
-    assert.equal(f.evolve('skill', 'validate', 'ew-analyze').package_path, '.omp/skills/ew-orchestrate/steps/ew-analyze');
+    f.git('commit', '-qm', 'Commit root skills beside .agents/skills and .omp/skills');
+    assert.equal(f.evolve('skill', 'validate', 'ew-analyze').package_path, 'skills/ew-orchestrate/steps/ew-analyze');
   } finally {
     f.cleanup();
   }

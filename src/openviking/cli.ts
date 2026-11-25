@@ -3,7 +3,8 @@ import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { InputError, requireText } from '../common.js';
 import { WorkflowStore, workflowId, type Mutation } from '../workflow-runtime.js';
-import { initializeProject, prepareSession, finishSession } from './lifecycle.js';
+import { installHosts, provisionProjectInstructions, type InstallHost } from '../workflow-install.js';
+import { initializeProject, prepareSession, finishSession, type OpenVikingSkillTarget } from './lifecycle.js';
 import { isUnavailable, OpenVikingClient } from './client.js';
 import { projectFile, readProject, replaceJson } from './config.js';
 import { loadRelease, readProjectHead } from './assets.js';
@@ -12,7 +13,7 @@ import { manageEvolutionPolicy } from './policy.js';
 import { previewWikiPublication, publishWikiPublication } from './wiki-publication.js';
 
 export const openVikingHelp = [
-  'evolve openviking init [--policy <file>] [--project-id <UUID>] [--root <project>]',
+  'evolve openviking init [--policy <file>] [--project-id <UUID>] [--host agy|omp|codex|claude|generic] [--instructions] [--root <project>]',
   'evolve openviking policy [--entry <skill> --runner <script> --scenarios <file> [--apply <preview-id>]]',
   'evolve openviking config [--enabled true|false] [--failure-policy local|fail] [--root <project>]',
   'evolve openviking status [--root <project>]',
@@ -23,19 +24,30 @@ export const openVikingHelp = [
   'evolve openviking knowledge publish --approval <preview-sha256> [--root <project>]',
   'No project profile: local backend. init enables OpenViking; failure-policy defaults to local.',
   'init defaults to .evolve/evolution.json and creates an empty policy when absent. Empty targets sync assets without evolving Skills.',
+  'init reuses a single existing managed Skill root or defaults to .agents/skills (override with --host; pass --instructions to update AGENTS.md).',
   'policy previews by default; --apply creates a local Git commit and never publishes.',
   'sync prepares/pulls Session assets; finish publishes completed Session assets. Use knowledge for Wiki approved after closeout or without a Session.',
   'knowledge preview reads remote state without uploading; publish requires authorization for the exact preview and preserves remote Skills/Memory.',
   'Fallback never publishes, bypasses integrity checks, or substitutes local data for an ov: ID.',
 ].join('\n');
 
+function parseOpenVikingSkillTarget(value: string | undefined): OpenVikingSkillTarget | undefined {
+  if (value === undefined) return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'generic' || installHosts.includes(normalized as InstallHost)) {
+    return normalized as OpenVikingSkillTarget;
+  }
+  throw new InputError(`Choose ${installHosts.join(', ')} or generic for --host`);
+}
+
 export async function runOpenVikingCli(argv: string[]): Promise<void> {
   const string = { type: 'string' } as const;
   const { values, positionals: [action, ...args] } = parseArgs({ args: argv, allowPositionals: true, options: {
-    root: string, policy: string, 'project-id': string, session: string, actor: string,
+    root: string, policy: string, 'project-id': string, host: string, session: string, actor: string,
     entry: string, runner: string, scenarios: string, apply: string, approval: string,
     'expected-orchestration-revision': string, 'request-id': string, 'candidate-commit': string,
-    enabled: string, 'failure-policy': string, help: { type: 'boolean', short: 'h' }, json: { type: 'boolean' },
+    enabled: string, 'failure-policy': string, instructions: { type: 'boolean' },
+    help: { type: 'boolean', short: 'h' }, json: { type: 'boolean' },
   } });
   if (!action || values.help) { process.stdout.write(openVikingHelp + '\n'); return; }
   const root = resolve(values.root ?? '.');
@@ -49,7 +61,12 @@ export async function runOpenVikingCli(argv: string[]): Promise<void> {
   }
   if (action === 'init') {
     if (args.length) throw new InputError(openVikingHelp);
-    return print(await initializeProject(root, values.policy, values['project-id']));
+    const skillTarget = parseOpenVikingSkillTarget(values.host);
+    const result = await initializeProject(root, values.policy, values['project-id'], undefined, skillTarget);
+    const instructions = values.instructions
+      ? provisionProjectInstructions(root, 'skills_root' in result ? result.skills_root : skillTarget ?? 'agy')
+      : undefined;
+    return print(instructions ? { ...result, instructions } : result);
   }
   if (action === 'policy') {
     if (args.length) throw new InputError(openVikingHelp);

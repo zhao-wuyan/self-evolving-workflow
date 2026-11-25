@@ -42,9 +42,9 @@ const hosts = {
     user: { path: ['.gemini', 'config'], instructions: ['.gemini', 'AGENTS.md'] },
   },
   omp: {
-    // OMP 原生项目 Skill 位于 .omp/skills，Agents 仍由 .omp/agent 承载。
+    // OMP 显式项目专属 Skill 位于 .omp/skills，项目 Agents 位于 OMP 原生 .omp/agents（未装插件时的兜底目录）。
     project: {
-      path: ['.omp'], skills: ['.omp', 'skills'], agents: ['.omp', 'agent', 'agents'],
+      path: ['.omp'], skills: ['.omp', 'skills'], agents: ['.omp', 'agents'],
       instructions: ['AGENTS.md'],
     },
     user: { path: ['.omp', 'agent'], instructions: ['.omp', 'agent', 'AGENTS.md'] },
@@ -294,6 +294,10 @@ export function workflowDocument(id: string, root?: string) {
     if (existsSync(projectFile)) return readFileSync(projectFile, 'utf8');
   }
   return readFileSync(join(bundle, document.path), 'utf8');
+}
+
+export function shippedSkillNames(): string[] {
+  return shippedSkills();
 }
 
 function shippedSkills() {
@@ -775,6 +779,37 @@ function replaceManagedInstructions(current: string, guideBlock: string): string
     return current.slice(0, legacyGlobalMatch.index) + guideBlock + current.slice(legacyGlobalMatch.index + legacyGlobalMatch[0].length);
   }
   return undefined;
+}
+
+function resolveProjectInstructionTarget(root: string, skillsRootOrHost?: InstallHost | 'generic' | string): { path: string; label: string } {
+  if (!skillsRootOrHost || skillsRootOrHost === 'generic' || skillsRootOrHost === 'skills') {
+    return { path: join(root, 'AGENTS.md'), label: 'skills/' };
+  }
+  if (installHosts.includes(skillsRootOrHost as InstallHost)) {
+    const target = scopeAndHost(root, 'project', skillsRootOrHost as InstallHost);
+    return { path: target.instructions, label: target.skillsLabel };
+  }
+  const normalized = skillsRootOrHost.replace(/\/+$/, '');
+  const instructions = normalized.startsWith('.claude/') ? join(root, 'CLAUDE.md') : join(root, 'AGENTS.md');
+  return { path: instructions, label: `${normalized}/` };
+}
+
+export function projectInstructionPlan(root: string, skillsRootOrHost?: InstallHost | 'generic' | string) {
+  const { path, label } = resolveProjectInstructionTarget(root, skillsRootOrHost);
+  const labels = activeInstructionLabels(root, 'project', path, [label]);
+  const status = managedInstructionStatus(path, labels);
+  const info = lstatSync(path, { throwIfNoEntry: false });
+  const current = info?.isFile() ? readFileSync(path, 'utf8') : '';
+  const hasUnmarkedEvolveHeading = status === 'custom' && /^# (?:Evolve Workflow|Self-Evolving Workflow)\s*$/m.test(current);
+  const needsProvision = !info ? true : info.isFile() && (status === 'outdated' || (status === 'custom' && !hasUnmarkedEvolveHeading));
+  return { path, labels, status, needs_provision: needsProvision };
+}
+
+export function provisionProjectInstructions(root: string, skillsRootOrHost?: InstallHost | 'generic' | string) {
+  const plan = projectInstructionPlan(root, skillsRootOrHost);
+  if (!plan.needs_provision) return { path: plan.path, status: 'kept' as const };
+  provisionInstructions(plan.path, plan.labels);
+  return { path: plan.path, status: 'updated' as const };
 }
 
 function provisionInstructions(path: string, skillsLabels: string[]) {
