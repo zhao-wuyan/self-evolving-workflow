@@ -134,7 +134,7 @@ evolve experience disable   # 停止采集，不删除已发布经验
 
 - 详见 [经验检索](skills/ew-knowledge/references/knowledge-route.md#个人跨项目经验可选) 与 [审阅发布](skills/ew-knowledge/references/closeout-protocol.md#个人跨项目经验审阅)。
 - 在 OMP 会话中，未配置独立 HTTP 模型时知识提炼与审阅会自动复用 OMP `memory` 角色（可用 `EVOLVE_MODEL_PROVIDER=omp|http` 显式指定）。
-- 项目 Skill、引导文件、审阅后的 Wiki 与 OpenViking 配置可提交到 Git；运行产物与凭据留在本地。
+- 项目 Skill、引导文件、审阅后的 Wiki 与 OpenViking 配置可提交到 Git；运行产物与凭据留在本地，可运行 `evolve ignore`（或 `evolve ignore check`）补齐仓库根 `.gitignore` 规则。
 
 ## OMP 无插件用法与受限委派
 

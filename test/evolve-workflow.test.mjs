@@ -808,3 +808,34 @@ test('Plugin install and export create host-valid bundles for claude, codex, and
     f.cleanup();
   }
 });
+
+test('evolve ignore check and apply manage repo root .gitignore rules without hiding OpenViking configs', () => {
+  const f = fixture('evolve-cli-ignore-');
+  try {
+    f.write('.gitignore', '/.evolve/\n/bin/\n');
+    const checked = f.evolve('ignore', 'check');
+    assert.equal(checked.schema_version, 'evolve-ignore/1.0');
+    assert.equal(checked.status, 'missing');
+    assert.ok(checked.missing.includes('/.evolve/*'));
+    assert.ok(checked.missing.includes('!/.evolve/openviking.json'));
+    assert.ok(checked.missing.includes('/.codegraph/'));
+    assert.deepEqual(checked.applied, []);
+    assert.equal(readFileSync(join(f.root, '.gitignore'), 'utf8'), '/.evolve/\n/bin/\n');
+
+    const applied = f.evolve('ignore');
+    assert.equal(applied.status, 'applied');
+    assert.deepEqual(applied.applied, checked.missing);
+    const runtime = ['.evolve/workflow.db', '.evolve/runs/session/report.md', '.evolve/ovcli.conf', '.agent-memory/index', '.codegraph/index'];
+    assert.deepEqual(
+      f.git('check-ignore', '--no-index', '--', ...runtime, '.evolve/openviking.json', '.evolve/evolution.json').split('\n'),
+      runtime,
+    );
+
+    const repeated = f.evolve('ignore', 'apply');
+    assert.equal(repeated.status, 'up_to_date');
+    assert.deepEqual(repeated.missing, []);
+    assert.deepEqual(repeated.applied, []);
+  } finally {
+    f.cleanup();
+  }
+});
