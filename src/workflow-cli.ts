@@ -22,6 +22,7 @@ import {
   bundlePackageVersion, exportPlugins, installPlugins, installSkills, installStatus, installWorkflow,
   pluginStatus, syncProjectSkills, workflowDocument, workflowDocuments,
 } from './workflow-install.js';
+import { ignoreHelp, manageEvolveIgnore } from './workflow-ignore.js';
 import { runOpenVikingCli, openVikingHelp } from './openviking/cli.js';
 import { readProject } from './openviking/config.js';
 import { isUnavailable, OpenVikingClient } from './openviking/client.js';
@@ -68,6 +69,7 @@ const usage = [
   'evolve agent exec <prompt> --to codex|agy|claude|omp --mode analysis|write [--worktree <name> | --isolate] [--agent-session <id>] [--stream] [--timeout <ms>]',
   'evolve agent providers|list|get|create|send|delete|worktree [options]',
   'evolve experience enable|disable|status|pending|review|publish|search|get',
+  'evolve ignore [check|apply] [--root <project>]',
 ].join('\n');
 
 const agentHelp = [
@@ -372,13 +374,17 @@ async function runAgentCommand(root: string, action: string | undefined, args: s
 async function runWorkflowCli(argv: string[]) {
   const { positionals, values } = parseArgs({ options, args: argv, allowPositionals: true });
   let [group, action, ...args] = positionals;
-  if (group && !['session', 'run', 'agent', 'skill', 'experience'].includes(group)) throw new InputError('Unknown command: ' + group);
+  if (group && !['session', 'run', 'agent', 'skill', 'experience', 'ignore'].includes(group)) throw new InputError('Unknown command: ' + group);
   if (group === 'agent' && values.help) {
     process.stdout.write(agentHelp + '\n');
     return;
   }
   if (group === 'experience' && (!action || values.help)) {
     process.stdout.write(experienceHelp + '\n');
+    return;
+  }
+  if (group === 'ignore' && (values.help || action === 'help')) {
+    process.stdout.write(ignoreHelp + '\n');
     return;
   }
   if (!group || values.help) {
@@ -405,6 +411,11 @@ async function runWorkflowCli(argv: string[]) {
   if (group === 'experience') return print(await experienceCommand(root, action, args, {
     relation: values.relation, related: values.related, approval: values.approval, limit: values.limit,
   }));
+  if (group === 'ignore') {
+    if (args.length) throw new InputError(ignoreHelp);
+    const mode = action === undefined ? 'apply' : select(action, ['check', 'apply'] as const, 'ignore action');
+    return print(manageEvolveIgnore(root, mode));
+  }
   if (group === 'skill' && action === 'workflows') {
     if (!args.length) return print(workflowDocuments(root));
     if (args[0] === 'show' && args.length === 2) {

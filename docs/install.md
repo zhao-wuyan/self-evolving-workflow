@@ -101,7 +101,7 @@ evolve --help
   ```
 
 - **项目级提交到 Git**：按项目安装后，请将已安装的 Skill 目录（推荐跨宿主共享的 `.agents/skills/`；或 `.codex/skills/`、`.claude/skills/`、`.omp/skills/`、`skills/`）与 `AGENTS.md` / `CLAUDE.md` 提交到 Git，以便 Evolve 将 Run 绑定到固定 Git 提交版本。使用 OpenViking 同步时，每个仓库只应保留唯一一套工作流 Skill 目录（`evolve openviking init` 默认复用已有单套目录，全新仓库默认安装到 `.agents/skills/`，可传 `--host` 覆盖或 `--instructions` 补齐 `AGENTS.md`），避免与 `--plugin --scope project --host all` 混用产生多份副本。若在 OMP 中未安装 OMP 插件、仅使用全局 `evolve` CLI，可执行一次 `evolve skill install --scope user --host omp --yes`（写入 `~/.omp/agent/agents/` 全局生效）或使用 `--host omp`（写入项目 `.omp/agents/`）兜底子 Agent 定义。
-- **忽略本地运行时产物**：索引、数据库与过程文件统一保存在项目根目录的 `.evolve/` 下，建议在 `.gitignore` 中添加 `/.evolve/`（以及按需忽略代码图谱 `/.codegraph/`）。
+- **忽略本地运行时产物**：索引、数据库与过程文件统一保存在项目根目录的 `.evolve/` 下，可直接运行 `evolve ignore`（或先用 `evolve ignore check` 预览）自动在仓库根 `.gitignore` 补齐 `/.evolve/*`（放行 `.evolve/openviking.json` 与 `.evolve/evolution.json`）、`/.agent-memory/` 与 `/.codegraph/` 规则。
 
 ---
 
