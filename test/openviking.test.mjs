@@ -190,6 +190,8 @@ test('single-pointer CAS has one winner and recognizes server commit after a los
 test('remote Session retries bind one commit; the next Session receives the new validated release', async t => {
   const server = await protocol(t);
   const f = projectFixture(t, server);
+  f.write('evolution.json', JSON.stringify({ schema_version: 'evolve-openviking-policy/1.0', targets: [] }));
+  f.git('add', 'evolution.json'); f.git('commit', '-qm', '测试: 本机仅同步资产不触发演进');
   childModel(f, server);
   const first = await seed(f);
   f.open('pinned', 'sample');
@@ -197,7 +199,8 @@ test('remote Session retries bind one commit; the next Session receives the new 
   assert.equal(attempt.skill_ref.commit, f.status('pinned').openviking.skill_commit);
   f.evolve('run', 'skill-read', attempt.run_id, '--session', 'pinned');
   f.evolve('run', 'cancel', attempt.run_id, ...f.fence('pinned'), '--expected-run-revision', '0', '--reason', 'Observed retry');
-  const next = await evolved(f, first);
+  const other = projectFixture(t, server, { id: f.project.project_id });
+  const next = await evolved(other, first);
   const retry = f.next('pinned');
   assert.equal(retry.skill_ref.commit, attempt.skill_ref.commit);
   assert.doesNotMatch(f.evolve('run', 'skill-read', retry.run_id, '--session', 'pinned').markdown, /migration_approval/);
@@ -468,7 +471,7 @@ test('init recovers installer-owned untracked Skills while preserving local edit
 test('init installs host Agents without moving Skills or publishing Agent definitions', async t => {
   const server = await protocol(t);
   const f = projectFixture(t, server, { profile: false, minimalSkills: true });
-  f.git('rm', '-r', 'agents'); f.git('commit', '-qm', '测试: 不预置通用 Agent');
+  if (existsSync(join(f.root, 'agents'))) { f.git('rm', '-r', 'agents'); f.git('commit', '-qm', '测试: 不预置通用 Agent'); }
   f.write('.claude/agents/workflow-reviewer.md', 'User customized Agent definition.\n');
   const initialized = await initializeProject(f.root, undefined, f.project.project_id, 'claude');
   assert.equal(existsSync(join(f.root, 'agents')), false);
