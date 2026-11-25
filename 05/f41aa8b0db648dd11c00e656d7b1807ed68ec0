@@ -1,0 +1,20 @@
+src/omp-contract.ts
+  h_7f727d5a3fe0e5 41
+src/omp-extension.ts
+  h_7f727d5a3fe0e5 226
+src/omp-openviking.ts
+  h_7f727d5a3fe0e5 10,12,36,241-306,359-363,366-368,374,388,393-394,402-403
+test/omp-plugin.test.mjs
+  h_7f727d5a3fe0e5 460,475,477-478,487-494,496,507,509-515,521-523,526-527,529,531,533,535-536,553-556,558,560-561,565-566,778-809
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "05f41aa8b0db648dd11c00e656d7b1807ed68ec0",
+  "prompts": {},
+  "humans": {
+    "h_7f727d5a3fe0e5": {
+      "author": "诏无言 <59789646+zhao-wuyan@users.noreply.github.com>"
+    }
+  }
+}
