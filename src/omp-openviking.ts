@@ -7,8 +7,9 @@ import { connectionConfig, readPolicy, readProject } from './openviking/config.j
 import { experienceCommand } from './openviking/experience.js';
 import { readExperienceProfile } from './openviking/experience-candidates.js';
 import { gitText } from './openviking/git.js';
-import { initializeProject } from './openviking/lifecycle.js';
+import { initializeProject, inspectInitSkillRoots, type OpenVikingSkillTarget } from './openviking/lifecycle.js';
 import { defaultEvolutionPolicyPath } from './openviking/policy.js';
+import { projectInstructionPlan, provisionProjectInstructions } from './workflow-install.js';
 import { workflowHead, workflowPath } from './workflow-skills.js';
 
 const commandName = 'evolve-openviking';
@@ -32,6 +33,7 @@ const phaseOrder: Record<PublishProgress['phase'], [number, number]> = {
 const initializationHints: Readonly<Record<string, string>> = {
   OPENVIKING_STAGED_CHANGES: '仓库中有已暂存、尚未提交的改动。为保护你的暂存内容，初始化已停止。\n请在 Git 面板查看“已暂存的更改”，确认后提交，或只取消暂存（保留文件内容），再重新初始化。\n也可运行 git diff --cached --name-status 查看文件列表；检查范围是整个仓库，不仅是 Skills。',
   OPENVIKING_MANAGED_DIRTY: 'Skills 目录中有未提交的修改，或有无法安全接管的文件。为避免覆盖本地内容，初始化已停止。\n请运行 git status --short 查看改动，确认需要保留的内容并提交后再试；不要直接丢弃文件。',
+  OPENVIKING_MULTIPLE_SKILL_ROOTS: '仓库中存在多套受管工作流 Skill 目录（例如同时安装了多宿主插件或混用 .agents/skills 与 .omp/skills）。为避免重复上传与优先级遮蔽，初始化已停止。\n请先在仓库中仅保留唯一一套工作流 Skill 目录（推荐 .agents/skills/），提交变更后再重新初始化。',
   OPENVIKING_CONFIG_INVALID: 'OpenViking 连接配置缺失或无效。\n请检查 ~/.openviking/ovcli.conf 中的服务地址和 API key；如设置了 EVOLVE_OPENVIKING_CONFIG，请检查它指向的配置文件。不要把 API key 发到聊天中。',
   OPENVIKING_CONFIG_PATH: 'OpenViking 配置文件路径无效。\n请将 EVOLVE_OPENVIKING_CONFIG 设置为配置文件的绝对路径后再试。',
   OPENVIKING_POLICY_NOT_COMMITTED: '演进策略或它引用的回放文件尚未提交，无法建立可复现的初始化基线。\n请检查下方诊断信息中的文件，确认内容并提交后再试。',
@@ -236,6 +238,72 @@ async function handleStatus(root: string, ctx: OmpCommandContext) {
   }
 }
 
+const skillDirChoices: ReadonlyArray<{ label: string; target: OpenVikingSkillTarget; dir: string; agentsDir: string }> = [
+  {
+    label: '.agents/skills/（推荐：OMP / Antigravity / Codex / Claude 跨宿主通用）',
+    target: 'agy',
+    dir: '.agents/skills/',
+    agentsDir: '.agents/agents/',
+  },
+  {
+    label: '.omp/skills/（仅 OMP 项目专属）',
+    target: 'omp',
+    dir: '.omp/skills/',
+    agentsDir: '.omp/agents/',
+  },
+  {
+    label: 'skills/（通用项目根目录）',
+    target: 'generic',
+    dir: 'skills/',
+    agentsDir: 'agents/',
+  },
+];
+
+async function chooseSkillTarget(
+  root: string,
+  base: string,
+  ctx: OmpCommandContext,
+): Promise<{ target: OpenVikingSkillTarget | undefined; dir: string; agentsDir?: string; reused: boolean } | undefined> {
+  const existingRoots = inspectInitSkillRoots(root, base);
+  if (existingRoots.length > 1) {
+    throw new InputError('OPENVIKING_MULTIPLE_SKILL_ROOTS: ' + existingRoots.join(', '));
+  }
+  if (existingRoots.length === 1) {
+    const dir = `${existingRoots[0]}/`;
+    const matched = skillDirChoices.find(item => item.dir === dir);
+    return { target: undefined, dir, agentsDir: matched?.agentsDir, reused: true };
+  }
+  if (typeof ctx.ui.select === 'function') {
+    const picked = await ctx.ui.select(
+      '选择项目工作流 Skills 安装目录',
+      skillDirChoices.map(item => item.label),
+    );
+    if (!picked) return undefined;
+    const choice = skillDirChoices.find(item => item.label === picked);
+    if (!choice) throw new InputError('未知的 Skills 安装目录选项');
+    return { target: choice.target, dir: choice.dir, agentsDir: choice.agentsDir, reused: false };
+  }
+  const fallback = skillDirChoices[0];
+  return { target: fallback.target, dir: fallback.dir, agentsDir: fallback.agentsDir, reused: false };
+}
+
+async function maybeProvisionInstructions(root: string, skillsRoot: string | undefined, ctx: OmpCommandContext) {
+  const plan = projectInstructionPlan(root, skillsRoot ?? 'agy');
+  if (!plan.needs_provision) return '已有引导规则（未修改）';
+  const fileName = plan.path.endsWith('CLAUDE.md') ? 'CLAUDE.md' : 'AGENTS.md';
+  const confirmed = await ctx.ui.confirm(
+    `顺手补齐项目根 ${fileName} 的 Evolve 引导规则？`,
+    [
+      `目标文件：${plan.path}`,
+      '仅写入/更新 <!-- evolve:instructions:start/end --> 受管区块，保留文件原有自定义内容。',
+      '仅写入本地工作区，不会自动上传到 OpenViking；确认后可随仓库提交。',
+    ].join('\n'),
+  );
+  if (!confirmed) return `暂未写入（后续可运行 evolve skill install 补齐 ${fileName}）`;
+  const result = provisionProjectInstructions(root, skillsRoot ?? 'agy');
+  return result.status === 'updated' ? `已补齐 ${fileName} 受管区块（本地未提交）` : '已有引导规则（未修改）';
+}
+
 async function maybeEnableExperience(root: string, ctx: OmpCommandContext) {
   const profile = readExperienceProfile();
   if (profile?.roots.includes(root)) return '已开启';
@@ -288,14 +356,22 @@ export function registerOmpOpenViking(api: OmpExtensionApi) {
         if (existing && policy !== existing.evolution_policy) throw new InputError('项目已初始化，请通过 Agent 管理策略，不要重跑 init 来切换策略');
         const session = ctx.sessionManager.getSessionId();
         const connection = connectionConfig();
+        const skillChoice = existing ? undefined : await chooseSkillTarget(root, base, ctx);
+        if (!existing && !skillChoice) {
+          ctx.ui.notify('已取消，未初始化项目。', 'info');
+          return;
+        }
         const effect = existing
           ? '读取已有项目版本；若上次初始化未完成，会重试发布。'
-          : '会创建 Git 基线（含 .evolve/openviking.json，可能补装 .omp/skills/），并向服务发布项目 Skills、经批准的 Wiki 和明确标记共享的记忆。未审批的 Wiki 保留在本地。Agent 定义仅安装到 .omp/agent/agents/，不提交或上传。';
+          : skillChoice!.reused
+            ? `会复用已有 ${skillChoice!.dir} 创建 Git 基线（含 .evolve/openviking.json），并向服务发布项目 Skills、经批准的 Wiki 和明确标记共享的记忆。未审批的 Wiki 保留在本地。Agent 定义不会提交或上传。`
+            : `会创建 Git 基线（含 .evolve/openviking.json，将项目 Skills 安装到 ${skillChoice!.dir}），并向服务发布项目 Skills、经批准的 Wiki 和明确标记共享的记忆。未审批的 Wiki 保留在本地。Agent 定义仅本地安装到 ${skillChoice!.agentsDir ?? '.agents/agents/'}（OMP 插件自身已自带 agents/），不提交或上传。`;
         const policySummary = policy ?? (existing ? '未绑定（仅同步资产）' : `${defaultEvolutionPolicyPath}（若缺失则创建空策略，只同步资产）`);
         if (!await ctx.ui.confirm('确认初始化 OpenViking 项目资产？', [
           `项目：${root}`,
           `服务：${connection.url}`,
           `策略：${policySummary}`,
+          ...(skillChoice ? [`Skills 目录：${skillChoice.dir}${skillChoice.reused ? '（复用已有目录）' : ''}`] : []),
           '',
           effect,
         ].join('\n'))) {
@@ -309,11 +385,13 @@ export function registerOmpOpenViking(api: OmpExtensionApi) {
         }
         const progress = createProgressReporter(ctx, 'OpenViking 项目初始化');
         const result = await (async () => {
-          try { return await initializeProject(root, policy, undefined, 'omp', 'omp', progress.render); }
+          try { return await initializeProject(root, policy, undefined, undefined, skillChoice?.target, progress.render); }
           finally { progress.clear(); }
         })();
         const statusTitle = 'recovered' in result && result.recovered ? '已恢复项目初始化' : result.existing ? '项目已初始化' : '项目初始化完成';
         const localWiki = 'local_only_wiki' in result ? result.local_only_wiki?.length : 0;
+        const resolvedSkillsRoot = 'skills_root' in result ? result.skills_root : skillChoice?.dir.replace(/\/$/, '');
+        const instructionsStatus = existing ? undefined : await maybeProvisionInstructions(root, resolvedSkillsRoot, ctx);
         const experienceStatus = await maybeEnableExperience(root, ctx);
         const lines = [
           statusTitle,
@@ -321,6 +399,8 @@ export function registerOmpOpenViking(api: OmpExtensionApi) {
           `• 项目 ID：${result.project.project_id}`,
           `• 资产版本：${result.head.release_id}`,
           '• 配置文件：.evolve/openviking.json',
+          ...(resolvedSkillsRoot ? [`• Skills 目录：${resolvedSkillsRoot}/`] : []),
+          ...(instructionsStatus ? [`• 引导规则：${instructionsStatus}`] : []),
           `• 个人经验：${experienceStatus}`,
         ];
         if (localWiki) lines.push(`• 本地保留：${localWiki} 条 Wiki 未匹配审批记录，已保留在本地，未上传。`);

@@ -38,6 +38,7 @@ export interface OmpCommandContext extends OmpContext {
   ui: {
     notify(message: string, level: 'info' | 'warning' | 'error'): void;
     confirm(title: string, message: string): Promise<boolean>;
+    select?(title: string, options: string[]): Promise<string | undefined>;
     setStatus?(key: string, text: string | undefined): void;
     setWidget?(key: string, content: string[] | undefined, options?: { placement?: 'aboveEditor' | 'belowEditor' }): void;
     setWorkingMessage?(message?: string): void;

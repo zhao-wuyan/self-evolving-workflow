@@ -457,7 +457,7 @@ test('OMP OpenViking initialization failures explain recovery without altering u
 
 test('OMP OpenViking initialization changes Git and publishes only after confirmation', async t => {
   const server = await protocol(t);
-  const f = projectFixture(t, server, { profile: false, minimalSkills: true });
+  const f = projectFixture(t, server, { profile: false });
   const previousExperienceConfig = process.env.EVOLVE_EXPERIENCE_CONFIG;
   process.env.EVOLVE_EXPERIENCE_CONFIG = join(f.root, '.agent-memory', 'experience-test.json');
   t.after(() => {
@@ -472,7 +472,10 @@ test('OMP OpenViking initialization changes Git and publishes only after confirm
   const { handler } = h.commands['evolve-openviking'];
   const before = f.git('rev-parse', 'HEAD');
   let approve = false;
+  let approveInstructions = false;
   let approveExperience = false;
+  let selectedDir;
+  let selectCalls = 0;
   let output;
   const statusUpdates = [];
   const widgetUpdates = [];
@@ -481,7 +484,16 @@ test('OMP OpenViking initialization changes Git and publishes only after confirm
     setStatus(key, text) { statusUpdates.push([key, text]); },
     setWidget(key, lines) { widgetUpdates.push([key, lines]); },
     setWorkingMessage() {},
+    async select(title, options) {
+      selectCalls++;
+      assert.match(title, /Skills 安装目录/);
+      assert.equal(options.length, 3);
+      assert.match(options[0], /^\.agents\/skills\//);
+      assert.match(options[1], /^\.omp\/skills\//);
+      return selectedDir === undefined ? undefined : options[selectedDir];
+    },
     async confirm(title, message) {
+      if (title.includes('引导规则')) return approveInstructions;
       if (title.includes('个人经验')) return approveExperience;
       assert.match(message, /\.evolve\/evolution\.json.*只同步资产/);
       return approve;
@@ -492,21 +504,36 @@ test('OMP OpenViking initialization changes Git and publishes only after confirm
   await handler('status', ctx);
   assert.match(output, /OpenViking 状态/);
   assert.match(output, /未初始化/);
+  // 在目录选择阶段取消，不应修改仓库或上传。
   await handler('', ctx);
+  assert.equal(selectCalls, 1);
+  assert.match(output, /已取消/);
+  assert.equal(f.git('rev-parse', 'HEAD'), before);
+  // 选默认 .agents/skills/ 后在确认弹窗取消，同样不修改仓库。
+  selectedDir = 0;
+  await handler('', ctx);
+  assert.equal(selectCalls, 2);
   assert.match(output, /已取消/);
   assert.equal(f.git('rev-parse', 'HEAD'), before);
   assert.equal(existsSync(join(f.root, '.evolve/openviking.json')), false);
   assert.equal(existsSync(join(f.root, '.evolve/evolution.json')), false);
   assert.deepEqual((await server.inspect()).files, {});
-  assert.equal(existsSync(join(f.root, '.omp/agent/agents')), false);
+  assert.equal(existsSync(join(f.root, '.agents/agents')), false);
+  assert.equal(existsSync(join(f.root, '.agents/skills')), false);
+  assert.equal(existsSync(join(f.root, '.omp/agents')), false);
   assert.equal(existsSync(join(f.root, '.omp/skills')), false);
 
-  // 模拟上次初始化安装后留下的原版包，本次确认后应直接接管（省略 init 子命令直接运行）。
-  f.evolve('skill', 'install', 'ew-knowledge', '--host', 'omp', '--yes');
+  // 模拟上次初始化安装后留下的 .agents/skills 原版包，本次确认后应直接复用不弹目录选择器。
+  f.evolve('skill', 'install', 'ew-knowledge', '--host', 'agy', '--yes');
   approve = true;
+  approveInstructions = true;
   approveExperience = true;
+  const selectBeforeReuse = selectCalls;
   await handler('', ctx);
+  assert.equal(selectCalls, selectBeforeReuse);
   assert.match(output, /项目初始化完成/);
+  assert.match(output, /Skills 目录：\.agents\/skills\//);
+  assert.match(output, /引导规则：已补齐 AGENTS\.md/);
   assert.match(output, /个人经验：已开启/);
   assert.match(output, /1 条 Wiki 未匹配审批记录，已保留在本地，未上传/);
   assert.ok(statusUpdates.some(([, text]) => typeof text === 'string' && text.includes('校验远端资产')));
@@ -523,18 +550,20 @@ test('OMP OpenViking initialization changes Git and publishes only after confirm
   assert.deepEqual(JSON.parse(f.git('show', 'HEAD:.evolve/evolution.json')).targets, []);
   assert.equal(existsSync(join(f.root, 'evolution.json')), true);
   assert.equal(existsSync(join(f.root, 'agents')), false);
-  assert.equal(existsSync(join(f.root, '.omp/agent/agents/workflow-executor.md')), true);
-  assert.equal(existsSync(join(f.root, '.omp/skills/ew-orchestrate/SKILL.md')), true);
+  assert.equal(existsSync(join(f.root, '.agents/agents/workflow-executor.md')), true);
+  assert.equal(existsSync(join(f.root, '.agents/skills/ew-orchestrate/SKILL.md')), true);
+  assert.equal(existsSync(join(f.root, '.omp/agent/agents')), false);
+  assert.match(readFileSync(join(f.root, 'AGENTS.md'), 'utf8'), /\.agents\/skills\//);
   const manifest = JSON.parse(readFileSync(join(f.root, '.evolve/install-manifest.json'), 'utf8'));
-  assert.equal(manifest.targets[join(f.root, '.omp/skills')].skills_dir, join(f.root, '.omp/skills'));
+  assert.equal(manifest.targets[join(f.root, '.agents/skills')].skills_dir, join(f.root, '.agents/skills'));
   const binding = f.evolve('skill', 'validate', 'ew-companion');
-  assert.equal(binding.package_path, '.omp/skills/ew-orchestrate/steps/ew-companion');
-  assert.equal(f.git('ls-tree', '-r', '--name-only', 'HEAD', '--', '.omp/agent/agents'), '');
+  assert.equal(binding.package_path, '.agents/skills/ew-orchestrate/steps/ew-companion');
+  assert.equal(f.git('ls-tree', '-r', '--name-only', 'HEAD', '--', '.agents/agents'), '');
   const { head } = await readProjectHead(f.client, project);
   assert.ok(initOutput.includes(head.release_id));
   const release = await loadRelease(f.client, project, head.release_id);
-  assert.ok(release.files.some(file => file.path === '.omp/skills/ew-orchestrate/SKILL.md'));
-  assert.equal(release.files.some(file => file.path.startsWith('.omp/agent/agents/')), false);
+  assert.ok(release.files.some(file => file.path === '.agents/skills/ew-orchestrate/SKILL.md'));
+  assert.equal(release.files.some(file => file.path.startsWith('.agents/agents/')), false);
 
   await h.event('session_start');
   const args = ['openviking', 'policy', '--entry', f.entry, '--runner', 'tools/replay.mjs', '--scenarios', 'tools/scenarios.json'];
@@ -745,4 +774,36 @@ test('OMP workflow supports v0.7.0 version, closeouts, doctor, storage preview, 
   await assert.rejects(runBundledWorkflow(f.root, ['kb', 'storage', '--apply']), /read-only preview only/);
   await assert.rejects(runBundledWorkflow(f.root, ['kb', 'storage', '--apply=true']), /read-only preview only/);
   await assert.rejects(runBundledWorkflow(f.root, ['kb', 'apply', 'change-1']), /knowledge closeout supports/);
+});
+
+test('OMP OpenViking initialization lets user pick .omp/skills via selector and skip AGENTS.md update', async t => {
+  const server = await protocol(t);
+  const f = projectFixture(t, server, { profile: false });
+  const previousExperienceConfig = process.env.EVOLVE_EXPERIENCE_CONFIG;
+  process.env.EVOLVE_EXPERIENCE_CONFIG = join(f.root, '.agent-memory', 'experience-omp-pick.json');
+  t.after(() => {
+    if (previousExperienceConfig === undefined) delete process.env.EVOLVE_EXPERIENCE_CONFIG;
+    else process.env.EVOLVE_EXPERIENCE_CONFIG = previousExperienceConfig;
+  });
+  const h = harness(f.root);
+  f.dispose(() => closeHarnesses(f.root));
+  const { handler } = h.commands['evolve-openviking'];
+  let output;
+  const ctx = Object.assign(h.ctx, { hasUI: true, ui: {
+    notify(message, level) { assert.equal(level, 'info', message); output = message; },
+    async select(_title, options) { return options[1]; },
+    async confirm(title) {
+      if (title.includes('引导规则') || title.includes('个人经验')) return false;
+      return true;
+    },
+  } });
+  await handler('', ctx);
+  assert.match(output, /项目初始化完成/);
+  assert.match(output, /Skills 目录：\.omp\/skills\//);
+  assert.match(output, /引导规则：暂未写入/);
+  assert.equal(existsSync(join(f.root, '.omp/skills/ew-orchestrate/SKILL.md')), true);
+  assert.equal(existsSync(join(f.root, '.omp/agents/workflow-executor.md')), true);
+  assert.equal(existsSync(join(f.root, '.omp/agent/agents')), false);
+  assert.equal(existsSync(join(f.root, '.agents/skills')), false);
+  assert.equal(existsSync(join(f.root, 'AGENTS.md')), false);
 });
